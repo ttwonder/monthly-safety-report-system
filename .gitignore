@@ -1,0 +1,19 @@
+# Local/editor noise
+.DS_Store
+Thumbs.db
+*.tmp
+.tmp_*
+
+# Do not commit local-only secrets/config exports
+.env
+.env.*
+*.local
+
+# Python / node temporary files
+__pycache__/
+*.pyc
+node_modules/
+
+# Browser/download artifacts
+*.crdownload
+*.download
