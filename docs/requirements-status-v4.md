@@ -38,4 +38,4 @@
 - 目前是簡易 Workspace Key 模式，適合先用；敏感資料建議後續升級 Supabase Auth + 嚴格 RLS。
 - 附件仍主要依原 demo 方式處理；大量附件或敏感附件後續應遷移到 Supabase Storage。
 - Tailwind / Chart / SheetJS / FontAwesome 仍使用 CDN，離線或內網封鎖時可能影響功能。
-- `document.execCommand` 是舊式富文本方案，但目前可用；若長期產品化，後續可考慮更穩的 editor。
+- 已在 V4 將富文本核心由舊式 `document.execCommand` 調整為 Selection/Range API：加粗、顏色、字號、列表、清除格式與各類 HTML 模塊插入不再依賴 execCommand。

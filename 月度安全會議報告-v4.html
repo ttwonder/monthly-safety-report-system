@@ -587,7 +587,7 @@
                 </div>
             </div>&nbsp;`;
             
-            document.execCommand('insertHTML', false, html);
+            insertHtmlAtSelection(html);
             setTimeout(() => {
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div));
                 window.renderAllCharts();
@@ -1662,7 +1662,7 @@
                 </tbody>
             </table>&nbsp;`;
             
-            document.execCommand('insertHTML', false, html);
+            insertHtmlAtSelection(html);
             setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
         }
 
@@ -1717,7 +1717,7 @@
                 </div>
             </div>&nbsp;`;
             
-            document.execCommand('insertHTML', false, html);
+            insertHtmlAtSelection(html);
             // 插入後觸發一次更新讓標線就位
             setTimeout(() => { 
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); 
@@ -1750,7 +1750,7 @@
                 </div>
             </div>&nbsp;`;
             
-            document.execCommand('insertHTML', false, html);
+            insertHtmlAtSelection(html);
             setTimeout(() => { 
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); 
                 document.querySelectorAll('.progress-card-container').forEach(card => window.updateProgressCard(card));
@@ -1793,7 +1793,7 @@
                 </div>
             </div>&nbsp;`;
             
-            document.execCommand('insertHTML', false, html);
+            insertHtmlAtSelection(html);
             setTimeout(() => { 
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); 
                 document.querySelectorAll('.zone-card-container').forEach(card => window.updateZoneCard(card));
@@ -1916,24 +1916,180 @@
             }, 50);
         }
 
+        // === V4 穩定富文本核心：用 Selection/Range API 取代 document.execCommand ===
+        function getActiveEditableFromSelection() {
+            const sel = window.getSelection();
+            if (sel && sel.rangeCount > 0) {
+                let node = sel.getRangeAt(0).startContainer;
+                if (node.nodeType === 3) node = node.parentNode;
+                if (node && node.closest) {
+                    const editable = node.closest('.editable-div, [contenteditable="true"]');
+                    if (editable) return editable;
+                }
+            }
+            if (document.activeElement && document.activeElement.closest) {
+                return document.activeElement.closest('.editable-div, [contenteditable="true"]');
+            }
+            return null;
+        }
+
+        function saveRangeFromSelection() {
+            const sel = window.getSelection();
+            if (sel && sel.rangeCount > 0) lastSavedRange = sel.getRangeAt(0).cloneRange();
+        }
+
+        function ensureEditableSelection() {
+            restoreSelection();
+            let sel = window.getSelection();
+            if (sel && sel.rangeCount > 0) {
+                const editable = getActiveEditableFromSelection();
+                if (editable) return { sel, range: sel.getRangeAt(0), editable };
+            }
+            const editable = document.activeElement && document.activeElement.matches && document.activeElement.matches('.editable-div, [contenteditable="true"]') ? document.activeElement : document.querySelector('.editable-div[contenteditable="true"]');
+            if (!editable) return null;
+            editable.focus();
+            const range = document.createRange();
+            range.selectNodeContents(editable);
+            range.collapse(false);
+            sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            lastSavedRange = range.cloneRange();
+            return { sel, range, editable };
+        }
+
+        function htmlToFragment(html) {
+            const template = document.createElement('template');
+            template.innerHTML = html;
+            return template.content;
+        }
+
+        function placeCaretAfterNode(node) {
+            const range = document.createRange();
+            range.setStartAfter(node);
+            range.collapse(true);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            lastSavedRange = range.cloneRange();
+        }
+
+        function insertHtmlAtSelection(html) {
+            const ctx = ensureEditableSelection();
+            if (!ctx) return;
+            const { range, editable } = ctx;
+            range.deleteContents();
+            const fragment = htmlToFragment(html);
+            const lastNode = fragment.lastChild;
+            range.insertNode(fragment);
+            if (lastNode) placeCaretAfterNode(lastNode);
+            cleanupEditable(editable.closest('.editable-div') || editable);
+            triggerAutoSave(editable);
+            saveRangeFromSelection();
+        }
+
+        function escapeHtmlText(text) {
+            return String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function getSelectedTextOrPlaceholder(placeholder = '文字') {
+            const sel = window.getSelection();
+            if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return placeholder;
+            return sel.toString() || placeholder;
+        }
+
+        function replaceSelectionWithHtml(html) {
+            insertHtmlAtSelection(html);
+        }
+
+        function wrapSelectionInline(tagName, attrs = {}, placeholder = '文字') {
+            const text = getSelectedTextOrPlaceholder(placeholder);
+            const attrText = Object.entries(attrs).map(([k, v]) => ` ${k}="${String(v).replace(/"/g, '&quot;')}"`).join('');
+            replaceSelectionWithHtml(`<${tagName}${attrText}>${escapeHtmlText(text)}</${tagName}>`);
+        }
+
+        function applyInlineColor(color) {
+            wrapSelectionInline('span', { style: `color:${color};` }, '文字');
+        }
+
+        function applyInlineFontSize(sizeValue) {
+            const sizeMap = { '1': '10px', '2': '12px', '3': '14px', '4': '18px', '5': '24px', '6': '32px', '7': '40px' };
+            wrapSelectionInline('span', { style: `font-size:${sizeMap[String(sizeValue)] || '14px'};` }, '文字');
+        }
+
+        function getSelectedLinesForList() {
+            const sel = window.getSelection();
+            if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return ['項目'];
+            const holder = document.createElement('div');
+            holder.appendChild(sel.getRangeAt(0).cloneContents());
+            let html = holder.innerHTML || '';
+            html = html
+                .replace(/<br\s*\/?\s*>/gi, '\n')
+                .replace(/<\/li>/gi, '\n')
+                .replace(/<\/(div|p|tr)>/gi, '\n')
+                .replace(/<\/t[dh]>/gi, ' ');
+            holder.innerHTML = html;
+            let text = holder.textContent || sel.toString() || '';
+            // 部分瀏覽器會把文字節點內的換行壓成空格；若原始 clone 仍有換行，優先使用。
+            const rawText = sel.getRangeAt(0).cloneContents().textContent || '';
+            if (rawText.includes('\n')) text = rawText;
+            const newlinePattern = new RegExp('\\r?\\n');
+            const lines = text.split(newlinePattern).map(s => s.trim()).filter(Boolean);
+            return lines.length ? lines : ['項目'];
+        }
+
+        function insertListAtSelection(listTag) {
+            const lines = getSelectedLinesForList();
+            const items = lines.map(line => `<li>${escapeHtmlText(line)}</li>`).join('');
+            replaceSelectionWithHtml(`<${listTag}>${items}</${listTag}>`);
+        }
+
+        function removeFormatFromSelection() {
+            const sel = window.getSelection();
+            if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+            const text = sel.toString();
+            replaceSelectionWithHtml(escapeHtmlText(text).replace(/\r?\n/g, '<br>'));
+        }
+
         // --- 富文本與區塊操作 ---
+        function runRichTextCommand(command, value = null) {
+            switch (command) {
+                case 'bold':
+                    wrapSelectionInline('strong', {}, '加粗文字');
+                    break;
+                case 'fontSize':
+                    applyInlineFontSize(value);
+                    break;
+                case 'insertOrderedList':
+                    insertListAtSelection('ol');
+                    break;
+                case 'insertUnorderedList':
+                    insertListAtSelection('ul');
+                    break;
+                case 'removeFormat':
+                    removeFormatFromSelection();
+                    break;
+                default:
+                    console.warn('未支援的富文本命令，已忽略:', command);
+            }
+        }
         function execCmd(command, value = null) { 
-            restoreSelection(); document.execCommand(command, false, value); 
+            runRichTextCommand(command, value); 
         }
         function changeColor(color) { 
-            restoreSelection(); document.execCommand('foreColor', false, color); 
+            applyInlineColor(color); 
         }
         function insertSymbol(symbol) { 
             if(symbol) { 
                 restoreSelection(); 
-                document.execCommand('insertHTML', false, symbol); 
+                insertHtmlAtSelection(symbol); 
             } 
         }
         
         function insertHighlight() {
             restoreSelection();
             const html = `&nbsp;<span class="highlight-val">數值</span>&nbsp;`;
-            document.execCommand('insertHTML', false, html);
+            insertHtmlAtSelection(html);
             setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
         }
 
@@ -1949,7 +2105,7 @@
             };
             const theme = themes[colorTheme];
             const html = theme.fn(theme.title, "請輸入內容...");
-            document.execCommand('insertHTML', false, html);
+            insertHtmlAtSelection(html);
             setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
         }
 
@@ -1970,7 +2126,7 @@
                     </tr>
                 </tbody>
             </table><br>`;
-            document.execCommand('insertHTML', false, html);
+            insertHtmlAtSelection(html);
             setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
         }
 
@@ -1999,7 +2155,7 @@
                 bases.forEach(base64 => {
                     html += `<img src="${base64}" class="content-inline-img" style="width: 48%; margin: 4px; cursor: pointer; border-radius: 4px; vertical-align: top; display: inline-block;">`;
                 });
-                document.execCommand('insertHTML', false, html + '&nbsp;');
+                insertHtmlAtSelection(html + '&nbsp;');
                 hideLoader();
                 event.target.value = ''; 
                 setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);

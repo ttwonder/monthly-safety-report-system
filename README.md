@@ -11,7 +11,7 @@
 - V1：模塊化月報、勾選式 PDF、歷史 / 備份
 - V2：資料記錄庫、檢查 / 缺失 / PSC 滯留 / 行動項 / Safety Walk 記錄
 - V3：KPI 自動化、近 3 / 6 / 12 月趨勢、月報模塊更新
-- V4：Supabase 雲端同步準備、完整 JSON 雲端包、GitHub Pages 部署文件
+- V4：Supabase 雲端同步準備、完整 JSON 雲端包、GitHub Pages 部署文件、Selection/Range API 富文本核心
 
 ## 文件夾說明
 
