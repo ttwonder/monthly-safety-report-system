@@ -4584,13 +4584,17 @@
             const password = document.getElementById('v5-user-password')?.value || '';
             let role = document.getElementById('v5-user-role')?.value || 'operator';
             if (!username || !password) return alert('請填寫用戶名和密碼。');
-            if (users.length === 0) role = 'owner';
-            if (role === 'owner' && users.some(u => u.role === 'owner' && u.username !== username) && !v5IsOwner()) return alert('只有 owner 可以設定其他 owner。');
-            if (role === 'owner' && users.some(u => u.role === 'owner' && u.username !== username)) return alert('目前僅允許一個 owner。');
-            const passwordHash = await v5HashPassword(password);
             const idx = users.findIndex(u => u.username === username);
-            const next = v5SafeUser({ username, displayName, role, passwordHash, createdAt: idx >= 0 ? users[idx].createdAt : new Date().toISOString() });
+            const existing = idx >= 0 ? users[idx] : null;
             const wasFirstUser = users.length === 0;
+            if (wasFirstUser) role = 'owner';
+            if (!wasFirstUser && !v5IsOwner()) {
+                if (role === 'owner') return alert('只有 owner 可以新增或設定 owner。');
+                if (existing && existing.role === 'owner') return alert('只有 owner 可以修改 owner 帳號。');
+            }
+            if (!wasFirstUser && role === 'owner' && users.some(u => u.role === 'owner' && u.username !== username)) return alert('目前僅允許一個 owner。如需更換 owner 用戶名，請先由 owner 匯出備份並按流程重設。');
+            const passwordHash = await v5HashPassword(password);
+            const next = v5SafeUser({ username, displayName, role, passwordHash, createdAt: existing ? existing.createdAt : new Date().toISOString() });
             if (idx >= 0) users[idx] = next; else users.push(next);
             v5SetUsers(users);
             v5ClearUserAdminDraft();
@@ -4659,7 +4663,8 @@
             const users = v5GetUsers();
             const canManage = v5CanManageData();
             if (!canManage && users.length) return `<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>`;
-            const rows = users.map(u => `<tr><td>${v2RecordText(u.username)}</td><td>${v2RecordText(u.displayName)}</td><td>${v5RoleLabel(u.role)}</td><td>${v5IsOwner() && u.role !== 'owner' ? `<button class="v1-small-btn v1-danger-btn" onclick="v5DeleteUser('${v1EscapeAttr(u.username)}')">刪除</button>` : '—'}</td></tr>`).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-3">尚未建立用戶。第一個用戶會自動成為 owner。</td></tr>`;
+            const rows = users.map(u => `<tr><td>${v2RecordText(u.username)}</td><td>${v2RecordText(u.displayName)}</td><td>${v5RoleLabel(u.role)}</td><td>${u.role === 'owner' ? '<span class="text-slate-400">受保護</span>' : (v5IsOwner() ? `<button class="v1-small-btn v1-danger-btn" onclick="v5DeleteUser('${v1EscapeAttr(u.username)}')">刪除</button>` : '—')}</td></tr>`).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-3">尚未建立用戶。第一個用戶會自動成為 owner。</td></tr>`;
+            const roleOptions = `<option value="operator">使用者</option><option value="admin">管理員</option>${v5IsOwner() || users.length===0 ? '<option value="owner">Owner</option>' : ''}`;
             return `
                 <section class="v1-category-card">
                     <div class="v1-category-title mb-2">用戶與權限管理</div>
@@ -4668,12 +4673,12 @@
                         <input id="v5-user-display" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="顯示名稱">
                         <input id="v5-user-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="密碼">
                         <select id="v5-user-role" class="border border-indigo-100 rounded px-2 py-1 text-sm">
-                            <option value="operator">使用者</option><option value="admin">管理員</option>${v5IsOwner() || users.length===0 ? '<option value="owner">Owner</option>' : ''}
+                            ${roleOptions}
                         </select>
                     </div>
                     <div class="v1-action-row"><button class="v1-small-btn v1-primary-btn" onclick="v5AddOrUpdateUserFromForm()"><i class="fas fa-user-plus mr-1"></i>${users.length ? '新增 / 更新用戶' : '建立第一個 owner'}</button></div>
                     <div class="overflow-auto border border-slate-200 rounded-lg"><table style="table-layout:auto;"><thead><tr><th>用戶名</th><th>顯示名稱</th><th>權限</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
-                    <div class="text-xs text-slate-500 mt-2">權限規則：owner 可刪除月報項次與用戶；owner/管理員可進入數據管理；所有已登入用戶可同步最新與保存修改。</div>
+                    <div class="text-xs text-slate-500 mt-2">權限規則：owner 可管理 owner / 管理員 / 使用者；管理員只可新增或更新非 owner 用戶，不能新增、修改或升級 owner；所有已登入用戶可同步最新與保存修改。</div>
                 </section>`;
         }
 
