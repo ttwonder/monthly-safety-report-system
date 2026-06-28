@@ -3361,12 +3361,14 @@
             });
         }
 
-        function normalizeSelectedPdfRow(row, displayIndex) {
-            row.dataset.pdfSelectedOrder = String(displayIndex);
+        function normalizeSelectedPdfRow(row, originalIndex, selectedOrder) {
+            // PDF 輸出中心只篩選/排序模塊，不重新編項次；保留月報編輯中的原始項次，避免把原 6 顯示成 2 而誤認為取消的第 2 項仍在。
+            row.dataset.pdfSelectedOrder = String(selectedOrder);
+            const displayNumber = Number(originalIndex) + 1;
             const input = row.querySelector('.no-print-input input');
-            if (input) input.value = displayIndex;
+            if (input) input.value = displayNumber;
             const printOnly = row.querySelector('.print-only');
-            if (printOnly) printOnly.textContent = String(displayIndex);
+            if (printOnly) printOnly.textContent = String(displayNumber);
             row.querySelectorAll('[contenteditable="true"]').forEach(el => el.removeAttribute('contenteditable'));
             row.querySelectorAll('.no-print:not(.chart-table-area)').forEach(el => el.remove());
             stripCloneIds(row);
@@ -3412,7 +3414,7 @@
             selected.forEach((entry, order) => {
                 const sourceRow = rowsByIndex.get(String(entry.index));
                 if (!sourceRow) return;
-                const row = normalizeSelectedPdfRow(sourceRow.cloneNode(true), order + 1);
+                const row = normalizeSelectedPdfRow(sourceRow.cloneNode(true), entry.index, order + 1);
                 tbody.appendChild(row);
             });
             table.appendChild(tbody);
