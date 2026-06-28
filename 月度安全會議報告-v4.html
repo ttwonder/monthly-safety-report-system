@@ -3403,6 +3403,7 @@
         }
 
         function clearV2Form(kind) {
+            v5ClearV2RecordDraft(kind);
             const idEl = document.getElementById(`v2-${kind}-editing-id`);
             if (idEl) idEl.value = '';
             V2_RECORD_SCHEMAS[kind].fields.forEach(([key]) => {
@@ -3430,6 +3431,7 @@
             if (editingId) records[kind] = records[kind].map(x => String(x.id) === String(editingId) ? item : x);
             else records[kind].unshift(item);
             await saveV2Records(records);
+            v5ClearV2RecordDraft(kind);
             showToast(editingId ? '記錄已更新' : '記錄已新增');
             renderV2RecordWorkbench(kind);
             renderV2StatsPanel();
@@ -3596,6 +3598,7 @@
                     <div class="text-xs text-slate-500 mt-2">資料目前保存於本機 IndexedDB。後續雲端版可將這些表遷移到 Supabase。</div>
                 </div>
             `;
+            setTimeout(() => v5RestoreFormDrafts(root), 0);
         }
 
         function renderV1RecordsPane() {
@@ -3870,6 +3873,7 @@
             config.anonKey = (document.getElementById('v4-supabase-anon')?.value || '').trim();
             config.workspaceKey = (document.getElementById('v4-workspace-key')?.value || '').trim();
             localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
+            v5ClearSupabaseConfigDraft();
             showToast('雲端設定已保存於本機');
             renderV4CloudPane();
         }
@@ -4206,6 +4210,62 @@
         // === V5 多人協作與應用內權限管理（無 email） ===
         const V5_USERS_KEY = 'monthly_report_v5_users';
         const V5_SESSION_KEY = 'monthly_report_v5_session';
+        const V5_FORM_DRAFTS_KEY = 'monthly_report_v5_form_drafts';
+
+        function v5GetFormDrafts() {
+            try { return JSON.parse(localStorage.getItem(V5_FORM_DRAFTS_KEY) || '{}'); } catch { return {}; }
+        }
+        function v5SetFormDrafts(drafts) {
+            localStorage.setItem(V5_FORM_DRAFTS_KEY, JSON.stringify(drafts || {}));
+        }
+        function v5DraftKeyForElement(el) {
+            if (!el || !el.id) return '';
+            if (!el.closest?.('#v1-pane-cloud, #v1-pane-records')) return '';
+            const type = String(el.type || '').toLowerCase();
+            if (['file','hidden','button','submit','reset','color'].includes(type)) return '';
+            if (el.id.startsWith('v5-login-')) return '';
+            if (el.disabled || el.readOnly) return '';
+            return `${location.pathname}::${el.id}`;
+        }
+        function v5SaveFormDraft(el) {
+            const key = v5DraftKeyForElement(el);
+            if (!key) return;
+            const drafts = v5GetFormDrafts();
+            drafts[key] = { value: el.value ?? '', at: new Date().toISOString() };
+            v5SetFormDrafts(drafts);
+            el.dataset.v5DraftTouched = '1';
+        }
+        function v5RestoreFormDrafts(scope = document) {
+            const drafts = v5GetFormDrafts();
+            scope.querySelectorAll?.('input, textarea, select').forEach(el => {
+                const key = v5DraftKeyForElement(el);
+                if (!key || !drafts[key] || el.dataset.v5DraftTouched === '1') return;
+                el.value = drafts[key].value ?? '';
+                el.dataset.v5DraftRestored = '1';
+            });
+        }
+        function v5ClearFormDraftIds(ids) {
+            const drafts = v5GetFormDrafts();
+            (ids || []).forEach(id => delete drafts[`${location.pathname}::${id}`]);
+            v5SetFormDrafts(drafts);
+        }
+        function v5ClearV2RecordDraft(kind) {
+            const ids = [`v2-${kind}-editing-id`].concat((V2_RECORD_SCHEMAS[kind]?.fields || []).map(([key]) => `v2-${kind}-${key}`));
+            v5ClearFormDraftIds(ids);
+        }
+        function v5ClearUserAdminDraft() {
+            v5ClearFormDraftIds(['v5-user-username', 'v5-user-display', 'v5-user-password', 'v5-user-role']);
+        }
+        function v5ClearSupabaseConfigDraft() {
+            v5ClearFormDraftIds(['v4-supabase-url', 'v4-supabase-anon', 'v4-workspace-key']);
+        }
+        function v5SetupFormDraftPersistence() {
+            if (window.__v5FormDraftPersistenceReady) return;
+            window.__v5FormDraftPersistenceReady = true;
+            document.addEventListener('input', (event) => v5SaveFormDraft(event.target), true);
+            document.addEventListener('change', (event) => v5SaveFormDraft(event.target), true);
+            v5RestoreFormDrafts();
+        }
 
         function v5RoleLabel(role) {
             return role === 'owner' ? 'Owner' : role === 'admin' ? '管理員' : '使用者';
@@ -4266,6 +4326,7 @@
             const wasFirstUser = users.length === 0;
             if (idx >= 0) users[idx] = next; else users.push(next);
             v5SetUsers(users);
+            v5ClearUserAdminDraft();
             if (wasFirstUser) v5SetSession(next);
             showToast(wasFirstUser ? 'Owner 已建立，正在保存到雲端' : '用戶已保存，正在保存到雲端');
             v4QueueAutoSave('用戶權限');
@@ -4397,12 +4458,14 @@
                     <div class="mt-3">${v5UserAdminHtml()}</div>
                     <div class="v1-note-box mt-3"><b>同步說明：</b>正式使用時 Supabase URL / anon public key / Workspace Key 應放在 <code>supabase-config.js</code>，大家打開同一網址會自動讀取同一份雲端資料。Workspace Key 仍需視為內部共享密鑰，請勿公開。</div>`}
                 </div>`;
+            setTimeout(() => v5RestoreFormDrafts(root), 0);
         };
 
 
         window.onload = async function() {
             await initApp();
             setupV1Shell();
+            v5SetupFormDraftPersistence();
             await v4AutoSyncOnStartup();
             v4SetupAutoRefresh();
         };
