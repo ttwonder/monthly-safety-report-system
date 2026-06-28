@@ -269,6 +269,73 @@
         const chartInstances = {}; // 儲存所有的圖表實例
         const colorPalette = ['#4f46e5', '#10b981', '#f43f5e', '#f59e0b', '#8b5cf6']; // 藍, 綠, 紅, 橘, 紫
 
+        function sanitizeTrendChartHtml(html) {
+            if (!html || !String(html).includes('trend-chart-container')) return html;
+            const template = document.createElement('template');
+            template.innerHTML = String(html);
+            template.content.querySelectorAll('.trend-chart-container').forEach(container => {
+                const canvasArea = container.querySelector('.chart-canvas-area');
+                if (canvasArea) {
+                    const h = parseInt(canvasArea.style.height || canvasArea.getAttribute('data-chart-height') || '200', 10) || 200;
+                    canvasArea.style.height = Math.max(100, h) + 'px';
+                    canvasArea.style.minWidth = '0';
+                    canvasArea.style.position = 'relative';
+                    canvasArea.style.flex = canvasArea.style.flex || '1 1 auto';
+                }
+                container.querySelectorAll('canvas.trend-canvas').forEach(canvas => {
+                    canvas.removeAttribute('width');
+                    canvas.removeAttribute('height');
+                    canvas.removeAttribute('style');
+                    canvas.removeAttribute('data-chart-id');
+                    canvas.removeAttribute('role');
+                    canvas.removeAttribute('aria-label');
+                });
+            });
+            return template.innerHTML;
+        }
+
+        function sanitizeReportDataForStorage(data) {
+            if (!Array.isArray(data)) return data;
+            data.forEach(item => {
+                if (!item || !Array.isArray(item.columns)) return;
+                item.columns = item.columns.map(col => sanitizeTrendChartHtml(col || ''));
+            });
+            return data;
+        }
+
+        function prepareTrendChartForRender(container) {
+            if (!container) return null;
+            const canvasArea = container.querySelector('.chart-canvas-area');
+            const canvas = container.querySelector('.trend-canvas');
+            const table = container.querySelector('.chart-data-table');
+            if (!canvas || !table || !canvasArea) return null;
+
+            const h = parseInt(canvasArea.style.height || canvasArea.getAttribute('data-chart-height') || '200', 10) || 200;
+            canvasArea.style.height = Math.max(100, h) + 'px';
+            canvasArea.style.minWidth = '120px';
+            canvasArea.style.position = 'relative';
+            canvasArea.style.flex = canvasArea.style.flex || '1 1 auto';
+
+            // Chart.js 會在 canvas 上寫入即時 width/height/style。這些值若被保存為 0，重開後就會空白。
+            // 每次重繪前都清掉舊尺寸，讓 Chart.js 依目前可見容器重新計算。
+            canvas.removeAttribute('width');
+            canvas.removeAttribute('height');
+            canvas.style.width = '100%';
+            canvas.style.height = '100%';
+            canvas.style.display = 'block';
+            canvas.style.boxSizing = 'border-box';
+
+            return { canvas, table, canvasArea };
+        }
+
+        function redrawChartsWhenVisible() {
+            if (window._redrawChartsWhenVisibleTimer) clearTimeout(window._redrawChartsWhenVisibleTimer);
+            window._redrawChartsWhenVisibleTimer = setTimeout(() => {
+                window.renderAllCharts?.();
+                setTimeout(() => window.renderAllCharts?.(), 250);
+            }, 80);
+        }
+
         window.renderAllCharts = function() {
             // 安全防護：如果 Chart 尚未載入，稍後重試
             if (typeof Chart === 'undefined') {
@@ -277,9 +344,15 @@
             }
 
             document.querySelectorAll('.trend-chart-container').forEach(container => {
-                const canvas = container.querySelector('.trend-canvas');
-                const table = container.querySelector('.chart-data-table');
-                if(!canvas || !table) return;
+                const prepared = prepareTrendChartForRender(container);
+                if (!prepared) return;
+                const { canvas, table, canvasArea } = prepared;
+                const areaRect = canvasArea.getBoundingClientRect();
+                if (areaRect.width < 10 || areaRect.height < 10) {
+                    const existingHiddenChart = typeof Chart.getChart === 'function' ? Chart.getChart(canvas) : null;
+                    if (existingHiddenChart) existingHiddenChart.destroy();
+                    return;
+                }
 
                 // 【強制修復舊版表格編輯屬性防錯亂】
                 if(table.getAttribute('contenteditable') === 'true') {
@@ -340,9 +413,11 @@
                     canvas.setAttribute('data-chart-id', chartId);
                 }
 
-                // 如果已經存在舊圖表，先銷毀它
+                // 如果已經存在舊圖表，先銷毀它；也清理 Chart.js 綁在 canvas 上的舊實例。
+                const attachedChart = typeof Chart.getChart === 'function' ? Chart.getChart(canvas) : null;
+                if (attachedChart) attachedChart.destroy();
                 if(chartInstances[chartId]) {
-                    chartInstances[chartId].destroy();
+                    try { chartInstances[chartId].destroy(); } catch {}
                 }
 
                 // 繪製新圖表
@@ -397,6 +472,9 @@
                         }
                     }]
                 });
+                setTimeout(() => {
+                    try { chartInstances[chartId]?.resize(); } catch {}
+                }, 0);
             });
             setTimeout(preserveTrendAnchor, 0);
         };
@@ -1465,6 +1543,7 @@
         }
 
         async function saveToDB(data, explicitTimestamp = null) {
+            data = sanitizeReportDataForStorage(data);
             const dateStr = document.getElementById('reportDate').value;
             let titleStr = "月度安全會議報告";
             if (document.getElementById('mainTitle')) {
@@ -1932,6 +2011,7 @@
 
             setTimeout(() => {
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div));
+                redrawChartsWhenVisible();
             }, 50);
         }
 
@@ -2409,7 +2489,7 @@
             }
         }
 
-        async function updateColumnData(index, colIndex, value) { reportData[index].columns[colIndex] = value; await saveToDB(reportData); }
+        async function updateColumnData(index, colIndex, value) { reportData[index].columns[colIndex] = sanitizeTrendChartHtml(value); await saveToDB(reportData); }
         async function updateColLayout(index, layout) {
             reportData[index].colLayout = layout;
             const count = layout.split(':').length;
@@ -2899,6 +2979,7 @@
             if (tab === 'trends') renderV3TrendPane();
             if (tab === 'cloud') renderV4CloudPane();
             renderV5SessionBar();
+            if (tab === 'editor' || tab === 'pdf') redrawChartsWhenVisible();
             setTimeout(() => v6ClaimCurrentSectionLock({ silent: true }), 0);
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }
