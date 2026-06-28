@@ -2098,6 +2098,9 @@
                 case 'fontSize':
                     applyInlineFontSize(value);
                     break;
+                case 'foreColor':
+                    applyInlineColor(value || '#000000');
+                    break;
                 case 'insertOrderedList':
                     insertListAtSelection('ol');
                     break;
