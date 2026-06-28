@@ -1074,6 +1074,35 @@
         .trend-chart-container { overflow-anchor: none; scroll-margin-top: 210px; }
         .chart-canvas-area canvas { max-width: 100% !important; }
         #pdfPrintArea { display:none; }
+        body.pdf-render-prep #pdfPrintArea {
+            display: block !important;
+            position: fixed !important;
+            left: -12000px !important;
+            top: 0 !important;
+            width: 980px !important;
+            max-width: 980px !important;
+            background: #fff !important;
+            visibility: visible !important;
+            pointer-events: none !important;
+            z-index: -1 !important;
+        }
+        body.pdf-render-prep #pdfPrintArea .v1-pdf-paper {
+            width: 980px !important;
+            max-width: 980px !important;
+            box-shadow: none !important;
+        }
+        body.pdf-render-prep #pdfPrintArea .chart-table-area { display: none !important; }
+        body.pdf-render-prep #pdfPrintArea .chart-layout-wrapper { display: block !important; width: 100% !important; max-width: 100% !important; }
+        body.pdf-render-prep #pdfPrintArea .chart-canvas-area {
+            display: block !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            min-width: 360px !important;
+            flex: none !important;
+            overflow: hidden !important;
+            position: relative !important;
+        }
+        body.pdf-render-prep #pdfPrintArea .trend-canvas { display:block !important; width:100% !important; height:100% !important; }
         @media (max-width: 900px) { .v1-pdf-layout { grid-template-columns:1fr; } .v1-pdf-side { position:static; } .v1-pdf-toc ol { columns:1; } }
         @media print {
             body.pdf-print-mode { background:#fff !important; padding:0 !important; }
@@ -3032,7 +3061,7 @@
             cloud.parentNode.insertBefore(printArea, cloud.nextSibling);
 
             window.addEventListener('afterprint', () => {
-                document.body.classList.remove('pdf-print-mode');
+                document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
             });
 
             renderV5SessionBar();
@@ -3256,18 +3285,46 @@
             `;
         }
 
+        function waitForV1PdfCharts(timeoutMs = 900) {
+            return new Promise(resolve => {
+                const start = Date.now();
+                const tick = () => {
+                    const charts = Array.from(document.querySelectorAll('#pdfPrintArea .trend-chart-container'));
+                    if (!charts.length) return resolve(true);
+                    const ready = charts.every(container => {
+                        const canvas = container.querySelector('canvas.trend-canvas');
+                        const area = container.querySelector('.chart-canvas-area');
+                        const rect = area ? area.getBoundingClientRect() : { width: 0, height: 0 };
+                        return canvas && canvas.width > 10 && canvas.height > 10 && rect.width > 10 && rect.height > 10;
+                    });
+                    if (ready || Date.now() - start > timeoutMs) return resolve(ready);
+                    setTimeout(tick, 80);
+                };
+                tick();
+            });
+        }
+
+        async function prepareV1PdfPrintArea() {
+            const printArea = document.getElementById('pdfPrintArea');
+            if (!printArea) return false;
+            printArea.innerHTML = buildV1PdfHtml();
+            document.body.classList.add('pdf-render-prep');
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            if (window.renderAllCharts) window.renderAllCharts();
+            await waitForV1PdfCharts();
+            if (window.renderAllCharts) window.renderAllCharts();
+            await new Promise(resolve => setTimeout(resolve, 180));
+            return true;
+        }
+
         function printV1SelectedPdf() {
             if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
             setTimeout(async () => {
                 await saveToDB(reportData, Date.now());
-                const printArea = document.getElementById('pdfPrintArea');
-                if (!printArea) return;
-                printArea.innerHTML = buildV1PdfHtml();
+                const ok = await prepareV1PdfPrintArea();
+                if (!ok) return;
                 document.body.classList.add('pdf-print-mode');
-                setTimeout(() => {
-                    if (window.renderAllCharts) window.renderAllCharts();
-                    setTimeout(() => window.print(), 180);
-                }, 80);
+                setTimeout(() => window.print(), 80);
             }, 80);
         }
 
