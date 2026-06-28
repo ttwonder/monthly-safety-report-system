@@ -238,6 +238,19 @@
 
         // 防止 highlight-val 內按 Enter 換行破壞版面
         document.addEventListener('keydown', (e) => {
+            const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z';
+            const isRedo = (e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'));
+            if (isUndo || isRedo) {
+                const editable = getActiveEditableFromSelection?.() || document.activeElement?.closest?.('.editable-div, [contenteditable="true"]');
+                if (editable) {
+                    e.preventDefault();
+                    document.execCommand(isUndo ? 'undo' : 'redo', false, null);
+                    cleanupEditable(editable.closest('.editable-div') || editable);
+                    triggerAutoSave(editable.closest('.editable-div') || editable);
+                    saveRangeFromSelection();
+                    return;
+                }
+            }
             if (e.key === 'Enter') {
                 const sel = window.getSelection();
                 if (sel.rangeCount > 0) {
@@ -1092,8 +1105,16 @@
                 <!-- 左上：基礎編輯 -->
                 <div class="flex items-center gap-1 bg-white/60 p-1 rounded border border-indigo-100 shrink-0">
                     <span class="text-xs font-bold text-indigo-800 mx-1">基礎編輯:</span>
-                    <button class="toolbar-btn" onclick="execCmd('bold')" title="加粗"><i class="fas fa-bold"></i></button>
-                    <input type="color" class="color-picker" id="textColorPicker" onchange="changeColor(this.value)" title="改變顏色">
+                    <button class="toolbar-btn" onmousedown="event.preventDefault()" onclick="execCmd('bold')" title="加粗/取消加粗"><i class="fas fa-bold"></i></button>
+                    <div class="inline-flex items-center gap-1 px-1 py-0.5 rounded border border-slate-200 bg-white/70" title="快速文字顏色">
+                        <button type="button" class="w-6 h-6 rounded border border-slate-300" style="background:#111827" onmousedown="event.preventDefault()" onclick="changeColor('#111827')" title="黑色"></button>
+                        <button type="button" class="w-6 h-6 rounded border border-slate-300" style="background:#dc2626" onmousedown="event.preventDefault()" onclick="changeColor('#dc2626')" title="紅色"></button>
+                        <button type="button" class="w-6 h-6 rounded border border-slate-300" style="background:#ea580c" onmousedown="event.preventDefault()" onclick="changeColor('#ea580c')" title="橙色"></button>
+                        <button type="button" class="w-6 h-6 rounded border border-slate-300" style="background:#ca8a04" onmousedown="event.preventDefault()" onclick="changeColor('#ca8a04')" title="黃色"></button>
+                        <button type="button" class="w-6 h-6 rounded border border-slate-300" style="background:#16a34a" onmousedown="event.preventDefault()" onclick="changeColor('#16a34a')" title="綠色"></button>
+                        <button type="button" class="w-6 h-6 rounded border border-slate-300" style="background:#2563eb" onmousedown="event.preventDefault()" onclick="changeColor('#2563eb')" title="藍色"></button>
+                        <button type="button" class="w-6 h-6 rounded border border-slate-300" style="background:#7c3aed" onmousedown="event.preventDefault()" onclick="changeColor('#7c3aed')" title="紫色"></button>
+                    </div>
                     
                     <select id="globalFontEnSelector" class="toolbar-btn" onchange="changeGlobalFont()" title="英數字體">
                         <option value="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial" selected>英: 預設(無襯線)</option>
@@ -1134,9 +1155,9 @@
                         <option value="🟢">🟢 低風險</option>
                     </select>
 
-                    <button class="toolbar-btn" onclick="execCmd('insertOrderedList')" title="自動編號"><i class="fas fa-list-ol"></i></button>
-                    <button class="toolbar-btn" onclick="execCmd('insertUnorderedList')" title="項目符號"><i class="fas fa-list-ul"></i></button>
-                    <button class="toolbar-btn text-red-500" onclick="execCmd('removeFormat')" title="清除格式"><i class="fas fa-eraser"></i></button>
+                    <button class="toolbar-btn" onmousedown="event.preventDefault()" onclick="execCmd('insertOrderedList')" title="自動編號/取消編號"><i class="fas fa-list-ol"></i></button>
+                    <button class="toolbar-btn" onmousedown="event.preventDefault()" onclick="execCmd('insertUnorderedList')" title="項目符號/取消符號"><i class="fas fa-list-ul"></i></button>
+                    <button class="toolbar-btn text-red-500" onmousedown="event.preventDefault()" onclick="execCmd('removeFormat')" title="清除格式"><i class="fas fa-eraser"></i></button>
                 </div>
                 
                 <!-- 右上：全局操作按鈕 -->
@@ -2140,31 +2161,100 @@
             wrapSelectionInline('span', { style: `font-size:${sizeMap[String(sizeValue)] || '14px'};` }, '文字');
         }
 
+        function fragmentTextWithBreaks(root) {
+            const parts = [];
+            const walk = (node) => {
+                if (!node) return;
+                if (node.nodeType === Node.TEXT_NODE) {
+                    parts.push(node.textContent || '');
+                    return;
+                }
+                if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return;
+                const tag = node.tagName ? node.tagName.toLowerCase() : '';
+                if (tag === 'br') {
+                    parts.push('\n');
+                    return;
+                }
+                Array.from(node.childNodes).forEach(walk);
+                if (['div','p','li','tr'].includes(tag)) parts.push('\n');
+                if (['td','th'].includes(tag)) parts.push(' ');
+            };
+            walk(root);
+            return parts.join('');
+        }
+
         function getSelectedLinesForList() {
             const sel = window.getSelection();
             if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return ['項目'];
-            const holder = document.createElement('div');
-            holder.appendChild(sel.getRangeAt(0).cloneContents());
-            let html = holder.innerHTML || '';
-            html = html
-                .replace(/<br\s*\/?\s*>/gi, '\n')
-                .replace(/<\/li>/gi, '\n')
-                .replace(/<\/(div|p|tr)>/gi, '\n')
-                .replace(/<\/t[dh]>/gi, ' ');
-            holder.innerHTML = html;
-            let text = holder.textContent || sel.toString() || '';
-            // 部分瀏覽器會把文字節點內的換行壓成空格；若原始 clone 仍有換行，優先使用。
-            const rawText = sel.getRangeAt(0).cloneContents().textContent || '';
-            if (rawText.includes('\n')) text = rawText;
-            const newlinePattern = new RegExp('\\r?\\n');
-            const lines = text.split(newlinePattern).map(s => s.trim()).filter(Boolean);
+            const fragment = sel.getRangeAt(0).cloneContents();
+            let text = fragmentTextWithBreaks(fragment);
+            if (!text.trim()) text = sel.toString() || '';
+            const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
             return lines.length ? lines : ['項目'];
         }
 
+        function findListFromSelection(listTag = '') {
+            const ctx = ensureEditableSelection();
+            if (!ctx) return null;
+            let node = ctx.range.startContainer.nodeType === 1 ? ctx.range.startContainer : ctx.range.startContainer.parentNode;
+            const editableRoot = ctx.editable.closest('.editable-div') || ctx.editable;
+            while (node && node !== editableRoot) {
+                if (node.nodeType === 1 && ['OL','UL'].includes(node.tagName)) {
+                    if (!listTag || node.tagName.toLowerCase() === listTag.toLowerCase()) return node;
+                }
+                node = node.parentNode;
+            }
+            return null;
+        }
+
+        function insertHtmlWithUndo(html) {
+            const ctx = ensureEditableSelection();
+            if (!ctx) return false;
+            const editableRoot = ctx.editable.closest('.editable-div') || ctx.editable;
+            ctx.editable.focus();
+            restoreSelection();
+            document.execCommand('insertHTML', false, html);
+            cleanupEditable(editableRoot);
+            triggerAutoSave(editableRoot);
+            saveRangeFromSelection();
+            return true;
+        }
+
+        function unwrapListToLines(listEl) {
+            if (!listEl || !listEl.parentNode) return false;
+            const editableRoot = listEl.closest('.editable-div') || listEl.parentNode;
+            const frag = document.createDocumentFragment();
+            let lastLine = null;
+            Array.from(listEl.children).forEach(li => {
+                const line = document.createElement('div');
+                line.innerHTML = li.innerHTML || '<br>';
+                frag.appendChild(line);
+                lastLine = line;
+            });
+            listEl.parentNode.replaceChild(frag, listEl);
+            cleanupEditable(editableRoot);
+            if (lastLine && document.body.contains(lastLine)) {
+                const range = document.createRange();
+                range.selectNodeContents(lastLine);
+                range.collapse(false);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                lastSavedRange = range.cloneRange();
+                lastActiveEditableDiv = editableRoot;
+            }
+            triggerAutoSave(editableRoot);
+            return true;
+        }
+
         function insertListAtSelection(listTag) {
+            const currentList = findListFromSelection(listTag);
+            if (currentList) return unwrapListToLines(currentList);
+            const otherList = findListFromSelection(listTag === 'ol' ? 'ul' : 'ol');
+            if (otherList) unwrapListToLines(otherList);
             const lines = getSelectedLinesForList();
             const items = lines.map(line => `<li>${escapeHtmlText(line)}</li>`).join('');
-            replaceSelectionWithHtml(`<${listTag}>${items}</${listTag}>`);
+            return insertHtmlWithUndo(`<${listTag}>${items}</${listTag}>`);
         }
 
         function removeFormatFromSelection() {
@@ -2176,34 +2266,30 @@
 
         // --- 富文本與區塊操作 ---
         function runRichTextCommand(command, value = null) {
-            switch (command) {
-                case 'bold':
-                    wrapSelectionInline('strong', {}, '加粗文字');
-                    break;
-                case 'fontSize':
-                    applyInlineFontSize(value);
-                    break;
-                case 'foreColor':
-                    applyInlineColor(value || '#000000');
-                    break;
-                case 'insertOrderedList':
-                    insertListAtSelection('ol');
-                    break;
-                case 'insertUnorderedList':
-                    insertListAtSelection('ul');
-                    break;
-                case 'removeFormat':
-                    removeFormatFromSelection();
-                    break;
-                default:
-                    console.warn('未支援的富文本命令，已忽略:', command);
+            if (command === 'insertOrderedList') return insertListAtSelection('ol');
+            if (command === 'insertUnorderedList') return insertListAtSelection('ul');
+            const ctx = ensureEditableSelection();
+            if (!ctx) return false;
+            const editableRoot = ctx.editable.closest('.editable-div') || ctx.editable;
+            try {
+                ctx.editable.focus();
+                restoreSelection();
+                document.execCommand('styleWithCSS', false, true);
+                const ok = document.execCommand(command, false, value);
+                cleanupEditable(editableRoot);
+                triggerAutoSave(editableRoot);
+                saveRangeFromSelection();
+                return ok;
+            } catch (err) {
+                console.error('富文本命令失敗:', command, err);
+                return false;
             }
         }
         function execCmd(command, value = null) { 
             runRichTextCommand(command, value); 
         }
         function changeColor(color) { 
-            applyInlineColor(color); 
+            runRichTextCommand('foreColor', color || '#111827'); 
         }
         function insertSymbol(symbol) { 
             if(symbol) { 
