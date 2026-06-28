@@ -1,0 +1,321 @@
+{
+  "payload": {
+    "app": "monthly-safety-report-system",
+    "users": [
+      {
+        "role": "owner",
+        "username": "owner",
+        "displayName": "Owner",
+        "passwordHash": "x"
+      }
+    ],
+    "fileId": "report_1782636987080_979",
+    "report": {
+      "date": "2026-06-28",
+      "title": "月度安全會議報告",
+      "period": {
+        "endD": "30",
+        "endM": "6",
+        "startD": "1",
+        "startM": "6"
+      },
+      "modules": [
+        {
+          "id": 1,
+          "icon": "fas fa-file-alt",
+          "title": "本月安全管理摘要",
+          "columns": [
+            "<div class=\"content-block blue-block\"><div class=\"block-title\"><i class=\"fas fa-info-circle\"></i> 綜合評估</div><div class=\"block-body\">本月船隊整體安全與檢查表現<span class=\"highlight-val\">穩定</span>。本月共接受各類內外部檢查<span class=\"highlight-val\">0</span>次,其中外部檢查<span class=\"highlight-val\">0</span>次,內部稽核/督導檢查<span class=\"highlight-val\">0</span>次。整體來看,各項檢查表現<span class=\"highlight-val\">符合KPI</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 關注焦點</div><div class=\"block-body\">本月需重點關注事項為：<span class=\"highlight-val\">PSC平均缺失微幅上升、救生設備小缺失重複發生</span>。</div></div><div class=\"block-spacer\"><br></div>",
+            "\n            <div class=\"block-spacer\"><br></div>&nbsp;&nbsp;<div class=\"zone-card-container\" style=\"border: 2px solid rgb(203, 213, 225); padding: 12px 14px; border-radius: 6px; background-color: rgb(255, 255, 255); position: relative; width: 100%; margin: 0px 6px 6px 0px; display: inline-block; vertical-align: top; box-sizing: border-box; break-inside: avoid; outline: none;\">\n                \n                <!-- 標題與現值 -->\n                <div style=\"display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 2px;\">\n                    <div style=\"font-weight: bold; color: #334155; font-size: 14px; outline: none; border-bottom: 1px dashed #94a3b8; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\" contenteditable=\"true\" onblur=\"triggerAutoSave(this)\">評估指標</div>\n                    <div style=\"display: flex; gap: 4px; align-items: baseline;\">\n                        <span class=\"zone-label-current\" style=\"color:#64748b; font-size: 10px; outline: none; border-bottom: 1px dashed transparent;\" contenteditable=\"true\" onfocus=\"this.style.borderBottom='1px dashed #cbd5e1'\" onblur=\"this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)\">現值</span> \n                        <span class=\"zone-val current-val\" contenteditable=\"true\" style=\"font-size: 14px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #94a3b8; outline: none; min-width: 20px; display: inline-block; text-align: right;\" onblur=\"triggerAutoSave(this)\">1.55</span>\n                    </div>\n                </div>\n                \n                <!-- 上方黃色中間值標籤 -->\n                <div style=\"position: relative; height: 14px; margin: 0 6px 1px 6px; font-size: 10px; color: #64748b;\">\n                    <span contenteditable=\"true\" class=\"zone-limit-mid\" style=\"position: absolute; left: 49%; bottom: 0px; transform: translateX(-50%); outline:none; border-bottom: 1px dashed #cbd5e1; transition: left 0.3s ease-out;\" onblur=\"triggerAutoSave(this)\">2.45</span>\n                </div>\n                \n                <!-- 數據條與自訂樣式全黑豎線 -->\n                <div class=\"zone-bar-wrapper\" style=\"position: relative; height: 10px; margin: 0 6px;\">\n                    <div class=\"zone-bar\" style=\"position: absolute; width: 100%; height: 100%; background: linear-gradient(to right, rgb(34, 197, 94) 0%, rgb(34, 197, 94) 29%, rgb(234, 179, 8) 29%, rgb(234, 179, 8) 69%, rgb(239, 68, 68) 69%, rgb(239, 68, 68) 100%); border-radius: 5px; box-shadow: rgba(0, 0, 0, 0.1) 0px 1px 2px inset;\"></div>\n                    <div class=\"zone-marker current-marker\" style=\"position: absolute; left: 31%; top: -4px; bottom: -4px; width: 4px; background-color: #000000; transform: translateX(-50%); z-index: 2; border: none; border-radius: 2px; transition: left 0.3s ease-out;\"></div>\n                </div>\n\n                <!-- 下方交界標籤 -->\n                <div style=\"position: relative; height: 14px; margin: 1px 6px 0 6px; font-size: 10px; color: #64748b;\">\n                    <span contenteditable=\"true\" class=\"zone-min\" style=\"position: absolute; left: 0; top: 0px; outline:none; border-bottom: 1px dashed transparent;\" onfocus=\"this.style.borderBottom='1px dashed #cbd5e1'\" onblur=\"this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)\">0</span>\n                    <span contenteditable=\"true\" class=\"zone-limit1\" style=\"position: absolute; left: 29%; top: 0px; transform: translateX(-50%); outline: none; border-bottom: 1px dashed rgb(203, 213, 225); transition: left 0.3s ease-out;\" onblur=\"triggerAutoSave(this)\">1.45</span>\n                    <span contenteditable=\"true\" class=\"zone-limit2\" style=\"position: absolute; left: 69%; top: 0px; transform: translateX(-50%); outline:none; border-bottom: 1px dashed #cbd5e1; transition: left 0.3s ease-out;\" onblur=\"triggerAutoSave(this)\">3.45</span>\n                    <span contenteditable=\"true\" class=\"zone-max\" style=\"position: absolute; right: 0; top: 0px; outline:none; border-bottom: 1px dashed transparent;\" onfocus=\"this.style.borderBottom='1px dashed #cbd5e1'\" onblur=\"this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)\">5</span>\n                </div>\n            </div><div class=\"block-spacer\"><br></div>&nbsp;&nbsp;\n            <div class=\"zone-card-container\" style=\"border: 2px solid rgb(203, 213, 225); padding: 12px 14px; border-radius: 6px; background-color: rgb(255, 255, 255); position: relative; width: 100%; margin: 0px 6px 6px 0px; display: inline-block; vertical-align: top; box-sizing: border-box; break-inside: avoid; outline: none;\">\n                \n                <!-- 標題與現值 -->\n                <div style=\"display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 2px;\">\n                    <div style=\"font-weight: bold; color: #334155; font-size: 14px; outline: none; border-bottom: 1px dashed #94a3b8; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\" contenteditable=\"true\" onblur=\"triggerAutoSave(this)\">評估指標</div>\n                    <div style=\"display: flex; gap: 4px; align-items: baseline;\">\n                        <span class=\"zone-label-current\" style=\"color:#64748b; font-size: 10px; outline: none; border-bottom: 1px dashed transparent;\" contenteditable=\"true\" onfocus=\"this.style.borderBottom='1px dashed #cbd5e1'\" onblur=\"this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)\">現值</span> \n                        <span class=\"zone-val current-val\" contenteditable=\"true\" style=\"font-size: 14px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #94a3b8; outline: none; min-width: 20px; display: inline-block; text-align: right;\" onblur=\"triggerAutoSave(this)\">1.55</span>\n                    </div>\n                </div>\n                \n                <!-- 上方黃色中間值標籤 -->\n                <div style=\"position: relative; height: 14px; margin: 0 6px 1px 6px; font-size: 10px; color: #64748b;\">\n                    <span contenteditable=\"true\" class=\"zone-limit-mid\" style=\"position: absolute; left: 49%; bottom: 0px; transform: translateX(-50%); outline:none; border-bottom: 1px dashed #cbd5e1; transition: left 0.3s ease-out;\" onblur=\"triggerAutoSave(this)\">2.45</span>\n                </div>\n                \n                <!-- 數據條與自訂樣式全黑豎線 -->\n                <div class=\"zone-bar-wrapper\" style=\"position: relative; height: 10px; margin: 0 6px;\">\n                    <div class=\"zone-bar\" style=\"position: absolute; width: 100%; height: 100%; background: linear-gradient(to right, rgb(34, 197, 94) 0%, rgb(34, 197, 94) 29%, rgb(234, 179, 8) 29%, rgb(234, 179, 8) 69%, rgb(239, 68, 68) 69%, rgb(239, 68, 68) 100%); border-radius: 5px; box-shadow: rgba(0, 0, 0, 0.1) 0px 1px 2px inset;\"></div>\n                    <div class=\"zone-marker current-marker\" style=\"position: absolute; left: 31%; top: -4px; bottom: -4px; width: 4px; background-color: #000000; transform: translateX(-50%); z-index: 2; border: none; border-radius: 2px; transition: left 0.3s ease-out;\"></div>\n                </div>\n\n                <!-- 下方交界標籤 -->\n                <div style=\"position: relative; height: 14px; margin: 1px 6px 0 6px; font-size: 10px; color: #64748b;\">\n                    <span contenteditable=\"true\" class=\"zone-min\" style=\"position: absolute; left: 0; top: 0px; outline:none; border-bottom: 1px dashed transparent;\" onfocus=\"this.style.borderBottom='1px dashed #cbd5e1'\" onblur=\"this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)\">0</span>\n                    <span contenteditable=\"true\" class=\"zone-limit1\" style=\"position: absolute; left: 29%; top: 0px; transform: translateX(-50%); outline: none; border-bottom: 1px dashed rgb(203, 213, 225); transition: left 0.3s ease-out;\" onblur=\"triggerAutoSave(this)\">1.45</span>\n                    <span contenteditable=\"true\" class=\"zone-limit2\" style=\"position: absolute; left: 69%; top: 0px; transform: translateX(-50%); outline:none; border-bottom: 1px dashed #cbd5e1; transition: left 0.3s ease-out;\" onblur=\"triggerAutoSave(this)\">3.45</span>\n                    <span contenteditable=\"true\" class=\"zone-max\" style=\"position: absolute; right: 0; top: 0px; outline:none; border-bottom: 1px dashed transparent;\" onfocus=\"this.style.borderBottom='1px dashed #cbd5e1'\" onblur=\"this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)\">5</span>\n                </div>\n            </div><div class=\"block-spacer\"><br></div>&nbsp;&nbsp;\n            &nbsp;",
+            "\n            <div class=\"block-spacer\"><br></div>&nbsp;\n            <div class=\"trend-chart-container\" data-trend-chart=\"1\" contenteditable=\"false\" style=\"border: 2px solid #cbd5e1; padding: 8px; border-radius: 6px; background-color: #ffffff; width: 100%; margin-bottom: 8px; break-inside: avoid; page-break-inside: avoid; display: block;\">\n                \n                <!-- 標題與控制列 -->\n                <div style=\"display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 6px; flex-wrap: wrap; gap: 4px;\">\n                    <div contenteditable=\"true\" class=\"chart-title\" style=\"font-weight: bold; color: #334155; font-size: 14px; outline: none; border-bottom: 1px dashed #94a3b8; min-width: 150px; display: inline-block;\" onblur=\"triggerAutoSave(this)\">多維度趨勢比較圖</div>\n                    \n                    <div class=\"no-print\" style=\"display: flex; gap: 2px; align-items: center; background: #f8fafc; padding: 2px 4px; border-radius: 4px; border: 1px solid #e2e8f0;\">\n                        <span style=\"font-size: 10px; color:#64748b; font-weight:bold; margin-right:2px;\">指標(線)</span>\n                        <button contenteditable=\"false\" onclick=\"window.addChartSeries(this)\" class=\"toolbar-btn !bg-indigo-50 text-indigo-700 !px-1.5 !h-5\" title=\"增加一條數據線\"><i class=\"fas fa-plus text-[10px]\"></i></button>\n                        <button contenteditable=\"false\" onclick=\"window.removeChartSeries(this)\" class=\"toolbar-btn !bg-rose-50 text-rose-600 !px-1.5 !h-5\" title=\"刪除最後一條數據線\"><i class=\"fas fa-minus text-[10px]\"></i></button>\n                        \n                        <span style=\"width:1px; height:12px; background:#cbd5e1; margin:0 4px;\"></span>\n                        \n                        <span style=\"font-size: 10px; color:#64748b; font-weight:bold; margin-right:2px;\">週期(點)</span>\n                        <button contenteditable=\"false\" onclick=\"window.addChartRow(this)\" class=\"toolbar-btn !bg-emerald-50 text-emerald-700 !px-1.5 !h-5\" title=\"增加一個X軸時間點\"><i class=\"fas fa-plus text-[10px]\"></i></button>\n                        <button contenteditable=\"false\" onclick=\"window.removeChartRow(this)\" class=\"toolbar-btn !bg-rose-50 text-rose-600 !px-1.5 !h-5\" title=\"刪除最後一個時間點\"><i class=\"fas fa-minus text-[10px]\"></i></button>\n                        \n                        <span style=\"width:1px; height:12px; background:#cbd5e1; margin:0 4px;\"></span>\n                        \n                        <span style=\"font-size: 10px; color:#64748b; font-weight:bold; margin-right:2px;\">高:</span>\n                        <input type=\"number\" contenteditable=\"false\" class=\"toolbar-btn !w-12 !h-5 !py-0 !text-[10px] text-center\" value=\"200\" step=\"10\" min=\"100\" max=\"800\" onchange=\"window.setChartHeight(this)\" title=\"設定圖表高度(px)\">\n                        <span style=\"font-size: 10px; color:#64748b;\">px</span>\n\n                        <button contenteditable=\"false\" onclick=\"this.closest('.trend-chart-container').remove(); triggerAutoSave(document.activeElement); setTimeout(window.renderAllCharts, 50);\" class=\"toolbar-btn !bg-transparent text-gray-400 hover:!text-red-600 !px-1.5 !h-5 ml-2\" title=\"刪除整個圖表區塊\"><i class=\"fas fa-trash text-[10px]\"></i></button>\n                    </div>\n                </div>\n\n                <!-- 佈局：並排顯示，左邊極致壓縮表格，右邊畫布 -->\n                <div style=\"display: flex; flex-direction: row; flex-wrap: nowrap; gap: 8px; align-items: stretch; width: 100%;\" class=\"chart-layout-wrapper\">\n                    \n                    <!-- 數據輸入表格 (列印時隱藏) -->\n                    <!-- 放寬 max-width 至 35% 以防太擁擠 -->\n                    <div style=\"flex: 0 0 auto; max-width: 35%; overflow-x: auto; background: #f8fafc; border-radius: 4px; border: 1px dashed #cbd5e1; padding: 1px;\" class=\"no-print chart-table-area chart-table-wrapper no-scrollbar\">\n                        <!-- 【全部縮小一半】：字體全面 6px，所有 padding 為 1px -->\n                        <table class=\"chart-data-table\" contenteditable=\"false\" style=\"width: max-content; border-collapse: collapse; font-size: 6px; background: #fff; line-height: 1; margin: 0;\">\n                            <thead>\n                                <tr>\n                                    <th contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; background: #f1f5f9; padding: 1px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 15px; white-space: nowrap; font-size: 6px;\">週期</th>\n                                    <th contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; background: #f1f5f9; padding: 1px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 15px; white-space: nowrap; font-size: 6px;\">指標 1</th>\n                                    <th contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; background: #f1f5f9; padding: 1px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 15px; white-space: nowrap; font-size: 6px;\">指標 2</th>\n                                </tr>\n                            </thead>\n                            <tbody>\n                                <tr>\n                                    <td contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;\">Q1</td>\n                                    <td contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;\" class=\"chart-val\">10</td>\n                                    <td contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;\" class=\"chart-val\">15</td>\n                                </tr>\n                                <tr>\n                                    <td contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;\">Q2</td>\n                                    <td contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;\" class=\"chart-val\">20</td>\n                                    <td contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;\" class=\"chart-val\">18</td>\n                                </tr>\n                                <tr>\n                                    <td contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;\">Q3</td>\n                                    <td contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;\" class=\"chart-val\">15</td>\n                                    <td contenteditable=\"true\" style=\"border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;\" class=\"chart-val\">22</td>\n                                </tr>\n                            </tbody>\n                        </table>\n                    </div>\n\n                    <!-- 畫布區塊 (固定高度依據內聯樣式計算) -->\n                    <div style=\"flex: 1 1 auto; height: 200px; min-width: 0; position: relative;\" class=\"chart-canvas-area\">\n                        <canvas class=\"trend-canvas\" data-chart-id=\"chart_v27zxj84v\" width=\"509\" height=\"400\" style=\"display: block; box-sizing: border-box; height: 200px; width: 254px;\"></canvas>\n                    </div>\n                </div>\n            </div><div class=\"block-spacer\"><br></div>&nbsp;"
+          ],
+          "colCount": 3,
+          "pdfOrder": 1,
+          "colLayout": "1:1:1",
+          "iconColor": "#3b82f6",
+          "attachments": [],
+          "moduleCategory": "overview",
+          "selectedForPdf": true
+        },
+        {
+          "id": 2,
+          "icon": "fas fa-chart-pie",
+          "title": "本月檢查總覽",
+          "columns": [
+            "<div class=\"content-block green-block\"><div class=\"block-title\"><i class=\"fas fa-check-circle\"></i> 數據總覽</div><div class=\"block-body\">本月檢查總數<span class=\"highlight-val\">0</span>次。其中 SIRE<span class=\"highlight-val\">0</span>次、CDI<span class=\"highlight-val\">0</span>次、RightShip<span class=\"highlight-val\">0</span>次、PSC<span class=\"highlight-val\">0</span>次、FLAG<span class=\"highlight-val\">0</span>次、內部稽核<span class=\"highlight-val\">0</span>次。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block orange-block\"><div class=\"block-title\"><i class=\"fas fa-chart-line\"></i> 趨勢與變化</div><div class=\"block-body\">本月通過<span class=\"highlight-val\">0</span>次，未通過/滯留<span class=\"highlight-val\">0</span>次。與上月相比，檢查總次數<span class=\"highlight-val\">持平</span>，主要變化為<span class=\"highlight-val\">無明顯異常</span>。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 2,
+          "colLayout": "1",
+          "iconColor": "#22c55e",
+          "attachments": [],
+          "moduleCategory": "overview",
+          "selectedForPdf": true
+        },
+        {
+          "id": 3,
+          "icon": "fas fa-bullseye",
+          "title": "KPI達成情況",
+          "columns": [
+            "<div class=\"content-block green-block\"><div class=\"block-title\"><i class=\"fas fa-check-circle\"></i> 各項指標達標狀況</div><div class=\"block-body\">SIRE平均缺失<span class=\"highlight-val\">0.8</span>個/次 (目標值<span class=\"highlight-val\"><1.0</span>) 狀態<span class=\"highlight-val\">達標</span><br>PSC Tanker平均缺失<span class=\"highlight-val\">0.5</span>個/次 (目標值<span class=\"highlight-val\"><1.0</span>) 狀態<span class=\"highlight-val\">達標</span><br>PSC滯留次數<span class=\"highlight-val\">0</span>次 (目標值<span class=\"highlight-val\">0</span>) 狀態<span class=\"highlight-val\">達標</span></div></div><div class=\"block-spacer\"><br></div><div class=\"content-block red-block\"><div class=\"block-title\"><i class=\"fas fa-exclamation-triangle\"></i> 異常指標追蹤</div><div class=\"block-body\">本月KPI異常項目為<span class=\"highlight-val\">無</span>，需於下月持續追蹤維持。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 3,
+          "colLayout": "1",
+          "iconColor": "#22c55e",
+          "attachments": [],
+          "moduleCategory": "overview",
+          "selectedForPdf": true
+        },
+        {
+          "id": 4,
+          "icon": "fas fa-chart-line",
+          "title": "與上月趨勢比較",
+          "columns": [
+            "<div class=\"content-block orange-block\"><div class=\"block-title\"><i class=\"fas fa-chart-line\"></i> 各項趨勢比較</div><div class=\"block-body\">SIRE平均缺失由<span class=\"highlight-val\">0.9</span>降至<span class=\"highlight-val\">0.8</span>，趨勢為<span class=\"highlight-val\">改善</span>。<br>PSC平均缺失由<span class=\"highlight-val\">0.6</span>降至<span class=\"highlight-val\">0.5</span>，趨勢為<span class=\"highlight-val\">改善</span>。<br>內部稽核完成率為<span class=\"highlight-val\">100%</span>，趨勢為<span class=\"highlight-val\">持平</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 管理建議</div><div class=\"block-body\">本月最需關注的趨勢為<span class=\"highlight-val\">設備維護紀錄的完整性</span>，初步判斷為<span class=\"highlight-val\">交接不確實</span>所致。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 4,
+          "colLayout": "1",
+          "iconColor": "#f97316",
+          "attachments": [],
+          "moduleCategory": "overview",
+          "selectedForPdf": true
+        },
+        {
+          "id": 5,
+          "icon": "fas fa-ship",
+          "title": "SIRE 檢查重點分析",
+          "columns": [
+            "<div class=\"content-block blue-block\"><div class=\"block-title\"><i class=\"fas fa-info-circle\"></i> 檢查概況與表現</div><div class=\"block-body\">本月SIRE檢查<span class=\"highlight-val\">0</span>次，受檢船舶為<span class=\"highlight-val\">某某輪</span>，總缺失數<span class=\"highlight-val\">0</span>項，平均缺失<span class=\"highlight-val\">0</span>項/次。表現較佳原因為<span class=\"highlight-val\">準備充分、缺失關閉徹底</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 後續準備重點</div><div class=\"block-body\">本月缺失主要集中於<span class=\"highlight-val\">航行安全/文件記錄</span>。下月準備重點為<span class=\"highlight-val\">加強人員對應急程序的熟悉度</span>。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 5,
+          "colLayout": "1",
+          "iconColor": "#3b82f6",
+          "attachments": [],
+          "moduleCategory": "inspection",
+          "selectedForPdf": true
+        },
+        {
+          "id": 6,
+          "icon": "fas fa-flask",
+          "title": "CDI檢查重點分析",
+          "columns": [
+            "<div class=\"content-block blue-block\"><div class=\"block-title\"><i class=\"fas fa-info-circle\"></i> 檢查概況</div><div class=\"block-body\">本月CDI檢查<span class=\"highlight-val\">0</span>次，受檢船舶為<span class=\"highlight-val\">某某輪</span>，平均缺失<span class=\"highlight-val\">0</span>項/次。主要缺失集中於<span class=\"highlight-val\">STS作業/化學品適裝文件</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 船端提醒事項</div><div class=\"block-body\">需提醒各輪注意：<span class=\"highlight-val\">STS 作業開始前24小時內需完成適當演練並保留紀錄</span>。下月相關船舶需完成<span class=\"highlight-val\">專項</span>自查。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 6,
+          "colLayout": "1",
+          "iconColor": "#3b82f6",
+          "attachments": [],
+          "moduleCategory": "inspection",
+          "selectedForPdf": true
+        },
+        {
+          "id": 7,
+          "icon": "fas fa-anchor",
+          "title": "PSC檢查重點分析",
+          "columns": [
+            "<div class=\"content-block blue-block\"><div class=\"block-title\"><i class=\"fas fa-info-circle\"></i> 缺失分佈</div><div class=\"block-body\">本月PSC檢查<span class=\"highlight-val\">0</span>次，總缺失<span class=\"highlight-val\">0</span>項，滯留<span class=\"highlight-val\">0</span>次。主要缺失包括：<span class=\"highlight-val\">缺失1：救生圈標示不清</span>、<span class=\"highlight-val\">缺失2：消防管路微漏</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block red-block\"><div class=\"block-title\"><i class=\"fas fa-exclamation-triangle\"></i> 高關注港口與風險</div><div class=\"block-body\">本月PSC表現<span class=\"highlight-val\">符合預期</span>，下月需特別關注<span class=\"highlight-val\">澳洲AMSA / 中國PSC</span>等高關注港口的專項檢查。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 7,
+          "colLayout": "1",
+          "iconColor": "#3b82f6",
+          "attachments": [],
+          "moduleCategory": "inspection",
+          "selectedForPdf": true
+        },
+        {
+          "id": 8,
+          "icon": "fas fa-flag",
+          "title": "FLAG/RightShip 重點分析",
+          "columns": [
+            "<div class=\"content-block blue-block\"><div class=\"block-title\"><i class=\"fas fa-info-circle\"></i> 檢查結果</div><div class=\"block-body\">本月FLAG檢查<span class=\"highlight-val\">0</span>次，平均缺失<span class=\"highlight-val\">0</span>項/次；RightShip檢查<span class=\"highlight-val\">0</span>次，平均缺失<span class=\"highlight-val\">0</span>項/次。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 主要問題追蹤</div><div class=\"block-body\">主要問題為<span class=\"highlight-val\">船員熟悉度/PMS維護紀錄</span>。其中需特別追蹤船舶為<span class=\"highlight-val\">某某輪</span>，原因為<span class=\"highlight-val\">近期換班人員較多</span>。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 8,
+          "colLayout": "1",
+          "iconColor": "#3b82f6",
+          "attachments": [],
+          "moduleCategory": "inspection",
+          "selectedForPdf": true
+        },
+        {
+          "id": 9,
+          "icon": "fas fa-exclamation-triangle",
+          "title": "重大異常/滯留/列管案例",
+          "columns": [
+            "<div class=\"content-block red-block\"><div class=\"block-title\"><i class=\"fas fa-exclamation-triangle\"></i> 事件概要與原因</div><div class=\"block-body\">本月發生重大異常案例<span class=\"highlight-val\">0</span>件。事件概要：<span class=\"highlight-val\">無</span>。初步原因分析為：<span class=\"highlight-val\">無</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block green-block\"><div class=\"block-title\"><i class=\"fas fa-check-circle\"></i> 採取措施</div><div class=\"block-body\">已採取臨時措施：<span class=\"highlight-val\">無</span>。其他船舶需立即自查項目：<span class=\"highlight-val\">常規消防救生設備檢查</span>。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 9,
+          "colLayout": "1",
+          "iconColor": "#ef4444",
+          "attachments": [],
+          "moduleCategory": "risk",
+          "selectedForPdf": true
+        },
+        {
+          "id": 10,
+          "icon": "fas fa-exclamation-circle",
+          "title": "高風險缺失案例",
+          "columns": [
+            "<div class=\"content-block red-block\"><div class=\"block-title\"><i class=\"fas fa-exclamation-triangle\"></i> 典型案例描述</div><div class=\"block-body\">本月高風險缺失共<span class=\"highlight-val\">0</span>項，主要涉及<span class=\"highlight-val\">繫泊設備/消防設備</span>。風險後果可能導致<span class=\"highlight-val\">設備失效/人員傷害</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 改善與究責</div><div class=\"block-body\">臨時措施為<span class=\"highlight-val\">立即修復更換</span>，永久改善措施為<span class=\"highlight-val\">納入PMS每月重點檢查</span>，完成期限為<span class=\"highlight-val\">本月底</span>。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 10,
+          "colLayout": "1",
+          "iconColor": "#ef4444",
+          "attachments": [],
+          "moduleCategory": "risk",
+          "selectedForPdf": true
+        },
+        {
+          "id": 11,
+          "icon": "fas fa-history",
+          "title": "重複缺失分析",
+          "columns": [
+            "<div class=\"content-block orange-block\"><div class=\"block-title\"><i class=\"fas fa-chart-line\"></i> 重複性問題盤點</div><div class=\"block-body\">本月重複性缺失主要包括：<span class=\"highlight-val\">缺失類別1：垃圾記錄簿填寫錯誤</span>。說明船端在<span class=\"highlight-val\">文件記錄/人員交接</span>方面仍存在不足。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 矯正行動</div><div class=\"block-body\">各輪應於<span class=\"highlight-val\">次月5日</span>前完成針對性自查，並於船端安全會議中探討根本原因。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 11,
+          "colLayout": "1",
+          "iconColor": "#f97316",
+          "attachments": [],
+          "moduleCategory": "risk",
+          "selectedForPdf": true
+        },
+        {
+          "id": 12,
+          "icon": "fas fa-clipboard-check",
+          "title": "船端執行與記錄一致性",
+          "columns": [
+            "<div class=\"content-block orange-block\"><div class=\"block-title\"><i class=\"fas fa-chart-line\"></i> 現場與記錄差異</div><div class=\"block-body\">部分船舶存在「記錄已完成，但現場操作不完全一致」的情況，主要表現在<span class=\"highlight-val\">演練記錄/安全巡查</span>等方面。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 管理要求</div><div class=\"block-body\">各輪需注意：所有記錄應能反映實際執行情況。下月將把<span class=\"highlight-val\">記錄與實際一致性</span>列為內部稽核重點。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 12,
+          "colLayout": "1",
+          "iconColor": "#f97316",
+          "attachments": [],
+          "moduleCategory": "risk",
+          "selectedForPdf": true
+        },
+        {
+          "id": 13,
+          "icon": "fas fa-user-graduate",
+          "title": "船員熟悉度與能力實操",
+          "columns": [
+            "<div class=\"content-block orange-block\"><div class=\"block-title\"><i class=\"fas fa-chart-line\"></i> 實操能力評估</div><div class=\"block-body\">檢查中發現船員對<span class=\"highlight-val\">密閉空間救援/救助艇施放</span>熟悉度<span class=\"highlight-val\">存在差異</span>。典型問題：<span class=\"highlight-val\">僅知道文件位置但不理解具體操作細節</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 訓練計畫</div><div class=\"block-body\">各輪船長及部門長需針對<span class=\"highlight-val\">應急設備操作</span>安排實操訓練，並於<span class=\"highlight-val\">月底</span>前完成訓練記錄回傳。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 13,
+          "colLayout": "1",
+          "iconColor": "#f97316",
+          "attachments": [],
+          "moduleCategory": "risk",
+          "selectedForPdf": true
+        },
+        {
+          "id": 14,
+          "icon": "fas fa-tasks",
+          "title": "主題/專項檢查執行效果",
+          "columns": [
+            "<div class=\"content-block blue-block\"><div class=\"block-title\"><i class=\"fas fa-info-circle\"></i> 計畫與執行</div><div class=\"block-body\">本月主題檢查項目為<span class=\"highlight-val\">UKC與航行計畫審核</span>。計畫檢查<span class=\"highlight-val\">0</span>艘，實際完成<span class=\"highlight-val\">0</span>艘，完成率<span class=\"highlight-val\">100%</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block green-block\"><div class=\"block-title\"><i class=\"fas fa-check-circle\"></i> 效果評估</div><div class=\"block-body\">共發現問題<span class=\"highlight-val\">0</span>項，已全數關閉。執行效果評估為<span class=\"highlight-val\">有效</span>，主要因為<span class=\"highlight-val\">岸基提供了明確的檢查清單</span>。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 14,
+          "colLayout": "1",
+          "iconColor": "#3b82f6",
+          "attachments": [],
+          "moduleCategory": "inspection",
+          "selectedForPdf": true
+        },
+        {
+          "id": 15,
+          "icon": "fas fa-shoe-prints",
+          "title": "Safety Walk 執行情況",
+          "columns": [
+            "<div class=\"content-block blue-block\"><div class=\"block-title\"><i class=\"fas fa-info-circle\"></i> 執行統計</div><div class=\"block-body\">應執行船舶<span class=\"highlight-val\">0</span>艘，已完成<span class=\"highlight-val\">0</span>艘。共發現安全觀察事項<span class=\"highlight-val\">0</span>項（不安全狀況<span class=\"highlight-val\">0</span>項、優良實務<span class=\"highlight-val\">0</span>項）。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 聚焦與建議</div><div class=\"block-body\">典型優良案例為<span class=\"highlight-val\">完整穿戴PPE並互相提醒</span>。下月 Safety Walk 建議聚焦於<span class=\"highlight-val\">繫泊區域</span>作業。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 15,
+          "colLayout": "1",
+          "iconColor": "#3b82f6",
+          "attachments": [],
+          "moduleCategory": "inspection",
+          "selectedForPdf": true
+        },
+        {
+          "id": 16,
+          "icon": "fas fa-check-double",
+          "title": "船端落實事項",
+          "columns": [
+            "<div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 通告與待辦</div><div class=\"block-body\">本月需船端落實的通告共<span class=\"highlight-val\">0</span>項。各輪需完成：<span class=\"highlight-val\">最新程序張貼、系統資料上傳</span>。需於<span class=\"highlight-val\">次月10日</span>前完成。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 16,
+          "colLayout": "1",
+          "iconColor": "#a855f7",
+          "attachments": [],
+          "moduleCategory": "action",
+          "selectedForPdf": true
+        },
+        {
+          "id": 17,
+          "icon": "fas fa-gavel",
+          "title": "法規/外部要求轉化行動",
+          "columns": [
+            "<div class=\"content-block blue-block\"><div class=\"block-title\"><i class=\"fas fa-info-circle\"></i> 外部要求更新</div><div class=\"block-body\">本月涉及船端操作的外部要求包括<span class=\"highlight-val\">某港口最新減速規定/油公司額外要求</span>。</div></div><div class=\"block-spacer\"><br></div><div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 轉化行動</div><div class=\"block-body\">公司已轉化為船端行動：<span class=\"highlight-val\">更新航行計畫檢查表</span>。各輪需在<span class=\"highlight-val\">抵港前檢查</span>中實際落實。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 17,
+          "colLayout": "1",
+          "iconColor": "#3b82f6",
+          "attachments": [],
+          "moduleCategory": "action",
+          "selectedForPdf": true
+        },
+        {
+          "id": 18,
+          "icon": "fas fa-search",
+          "title": "下月安全聚焦項目",
+          "columns": [
+            "<div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 重點目標</div><div class=\"block-body\">一、<span class=\"highlight-val\">救生設備保養</span>，完成期限<span class=\"highlight-val\">月中</span>。<br>二、<span class=\"highlight-val\">航行計畫審核</span>，完成期限<span class=\"highlight-val\">月底</span>。<br>三、<span class=\"highlight-val\">防污設備測試</span>，完成期限<span class=\"highlight-val\">月底</span>。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 18,
+          "colLayout": "1",
+          "iconColor": "#a855f7",
+          "attachments": [],
+          "moduleCategory": "action",
+          "selectedForPdf": true
+        },
+        {
+          "id": 19,
+          "icon": "fas fa-reply",
+          "title": "船舶需回覆/回傳事項",
+          "columns": [
+            "<div class=\"content-block purple-block\"><div class=\"block-title\"><i class=\"fas fa-tasks\"></i> 回傳清單</div><div class=\"block-body\">各輪需於<span class=\"highlight-val\">次月5日</span>前完成並回傳：<span class=\"highlight-val\">月底自查表、演練照片、缺失關閉證據</span>。岸基將於<span class=\"highlight-val\">次月10日</span>前完成審核。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 19,
+          "colLayout": "1",
+          "iconColor": "#a855f7",
+          "attachments": [],
+          "moduleCategory": "action",
+          "selectedForPdf": true
+        },
+        {
+          "id": 20,
+          "icon": "fas fa-flag-checkered",
+          "title": "會議結論",
+          "columns": [
+            "<div class=\"content-block green-block\"><div class=\"block-title\"><i class=\"fas fa-check-circle\"></i> 總結與期許</div><div class=\"block-body\">一、本月船隊整體表現<span class=\"highlight-val\">平穩達標</span>。<br>二、需立即改善事項為<span class=\"highlight-val\">文件記錄的即時性</span>。<br>三、各輪船長需將本次會議內容傳達至全體船員，確保落實於日常操作中。</div></div><div class=\"block-spacer\"><br></div>"
+          ],
+          "pdfOrder": 20,
+          "colLayout": "1",
+          "iconColor": "#22c55e",
+          "attachments": [],
+          "moduleCategory": "conclusion",
+          "selectedForPdf": true
+        }
+      ]
+    },
+    "records": {
+      "actions": [],
+      "trainings": [],
+      "detentions": [],
+      "inspections": [],
+      "deficiencies": []
+    },
+    "version": 6,
+    "exportedAt": "2026-06-28T10:09:31.228Z"
+  },
+  "updated_at": "2026-06-28T10:09:32.175761+00:00",
+  "revision": 5,
+  "updated_by": "tuotuo"
+}
