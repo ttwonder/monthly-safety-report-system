@@ -4197,8 +4197,9 @@
 
         async function v4AutoSyncLatestFromCloud(options = {}) {
             const silent = options.silent !== false;
-            if (options.auto && v4IsUserEditingDraft()) {
-                v4SetCloudRuntimeStatus('正在填寫未提交資料，已暫停背景自動同步，避免清空輸入。', 'warn');
+            const deferMessage = '正在輸入未提交內容，已延後雲端同步，避免刷新頁面和跳走光標。';
+            if (!options.force && v4IsUserEditingDraft()) {
+                v4SetCloudRuntimeStatus(deferMessage, 'warn');
                 return false;
             }
             if (V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return false;
@@ -4212,6 +4213,11 @@
                 const data = await v4CloudRequest('rpc/get_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey });
                 if (!data || !data.payload) {
                     v4SetCloudRuntimeStatus('雲端尚無資料；請 owner 先保存一次。', 'warn');
+                    return false;
+                }
+                // 即使請求發出時沒有在輸入，也可能在網路等待期間開始輸入；套用雲端前再檢查一次。
+                if (!options.force && v4IsUserEditingDraft()) {
+                    v4SetCloudRuntimeStatus(deferMessage, 'warn');
                     return false;
                 }
                 await v4ApplyCloudBundle(data.payload, '雲端最新', { silent: true });
