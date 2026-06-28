@@ -4534,6 +4534,41 @@
             v5RestoreFormDrafts();
         }
 
+        function v5CaptureCloudPaneInputState(root) {
+            const active = document.activeElement;
+            const isDraftField = active && root?.contains(active) && active.matches?.('input, textarea, select');
+            const state = { values: {}, activeId: '', selectionStart: null, selectionEnd: null };
+            root?.querySelectorAll?.('input, textarea, select').forEach(el => {
+                if (el.id) state.values[el.id] = el.value ?? '';
+            });
+            if (isDraftField && active.id) {
+                state.activeId = active.id;
+                try {
+                    state.selectionStart = active.selectionStart;
+                    state.selectionEnd = active.selectionEnd;
+                } catch {}
+            }
+            return state;
+        }
+        function v5RestoreCloudPaneInputState(root, state) {
+            if (!state || !root) return;
+            Object.entries(state.values || {}).forEach(([id, value]) => {
+                const el = root.querySelector(`#${CSS.escape(id)}`);
+                if (el && el.matches?.('input, textarea, select')) el.value = value;
+            });
+            if (state.activeId) {
+                const active = root.querySelector(`#${CSS.escape(state.activeId)}`);
+                if (active && active.matches?.('input, textarea, select')) {
+                    active.focus({ preventScroll: true });
+                    try {
+                        if (Number.isFinite(state.selectionStart) && Number.isFinite(state.selectionEnd) && typeof active.setSelectionRange === 'function') {
+                            active.setSelectionRange(state.selectionStart, state.selectionEnd);
+                        }
+                    } catch {}
+                }
+            }
+        }
+
         function v5RoleLabel(role) {
             return role === 'owner' ? 'Owner' : role === 'admin' ? '管理員' : '使用者';
         }
@@ -4686,6 +4721,7 @@
         renderV4CloudPane = function(testStatus = '') {
             const root = document.getElementById('v1-pane-cloud');
             if (!root) return;
+            const inputState = v5CaptureCloudPaneInputState(root);
             const c = v4GetCloudConfig();
             const ready = v4ConfigReady(c);
             const canManage = v5CanManageData();
@@ -4730,7 +4766,10 @@
                     <div class="mt-3">${v5UserAdminHtml()}</div>
                     <div class="v1-note-box mt-3"><b>同步說明：</b>正式使用時 Supabase URL / anon public key / Workspace Key 應放在 <code>supabase-config.js</code>，大家打開同一網址會自動讀取同一份雲端資料。Workspace Key 仍需視為內部共享密鑰，請勿公開。</div>`}
                 </div>`;
-            setTimeout(() => v5RestoreFormDrafts(root), 0);
+            setTimeout(() => {
+                v5RestoreFormDrafts(root);
+                v5RestoreCloudPaneInputState(root, inputState);
+            }, 0);
         };
 
 
