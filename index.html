@@ -4051,8 +4051,22 @@
             }, delay);
         }
 
+        function v4IsUserEditingDraft() {
+            const active = document.activeElement;
+            if (active && (active.matches?.('input, textarea, select') || active.isContentEditable)) return true;
+            const userDraftIds = ['v5-user-username', 'v5-user-display', 'v5-user-password'];
+            if (userDraftIds.some(id => (document.getElementById(id)?.value || '').trim())) return true;
+            const roleSelect = document.getElementById('v5-user-role');
+            if (roleSelect && roleSelect.value && roleSelect.value !== 'operator') return true;
+            return false;
+        }
+
         async function v4AutoSyncLatestFromCloud(options = {}) {
             const silent = options.silent !== false;
+            if (options.auto && v4IsUserEditingDraft()) {
+                v4SetCloudRuntimeStatus('正在填寫未提交資料，已暫停背景自動同步，避免清空輸入。', 'warn');
+                return false;
+            }
             if (V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return false;
             const config = v4GetCloudConfig();
             if (!v4ConfigReady(config)) {
@@ -4095,7 +4109,7 @@
             if (V4_SYNC_INTERVAL_ID) return;
             const syncIfSafe = () => {
                 if (document.hidden || V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return;
-                v4AutoSyncLatestFromCloud({ silent: true, source: '正在刷新雲端最新資料...' });
+                v4AutoSyncLatestFromCloud({ silent: true, auto: true, source: '正在刷新雲端最新資料...' });
             };
             window.addEventListener('focus', syncIfSafe);
             document.addEventListener('visibilitychange', () => { if (!document.hidden) syncIfSafe(); });
