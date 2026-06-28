@@ -1196,7 +1196,7 @@
                     <input type="file" id="excelUpload" class="hidden" accept=".xlsx, .xls" onchange="importExcel(event)">
                     <button onclick="document.getElementById('excelUpload').click()" class="toolbar-btn !border-green-300 !text-green-700 hover:!bg-green-50" title="支援還原隱藏版式資料"><i class="fas fa-file-import mr-1"></i>匯入Excel</button>
                     <button onclick="exportExcel()" class="toolbar-btn !border-green-300 !text-green-700 hover:!bg-green-50" title="匯出帶有隱藏版式資料的 Excel"><i class="fas fa-file-excel mr-1"></i>匯出Excel</button>
-                    <button onclick="window.print()" class="toolbar-btn !border-gray-300 !text-gray-700 hover:!bg-gray-100" title="列印成完美PDF版面"><i class="fas fa-print mr-1"></i>列印(PDF)</button>
+                    <button onclick="printCurrentEditorReport()" class="toolbar-btn !border-gray-300 !text-gray-700 hover:!bg-gray-100" title="列印目前月報編輯畫面，不使用PDF輸出中心版式"><i class="fas fa-print mr-1"></i>列印(PDF)</button>
                     <button onclick="resetData()" class="toolbar-btn !border-gray-300 !text-red-500 hover:!bg-red-50" title="恢復預設範本"><i class="fas fa-undo mr-1"></i>重置</button>
                 </div>
             </div>
@@ -3158,6 +3158,7 @@
 
             window.addEventListener('afterprint', () => {
                 document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
+                document.body.dataset.printSource = '';
             });
 
             renderV5SessionBar();
@@ -3435,6 +3436,39 @@
             });
         }
 
+        async function v1DeleteReportById(fileId) {
+            if (!fileId) return;
+            if (fileId === window.currentFileId) {
+                showToast('目前正在使用的月報不能直接刪除，請先切換到其他月報。');
+                return;
+            }
+            const saved = await loadFromDB(fileId);
+            const title = saved?.title || fileId;
+            if (!confirm(`確定刪除這份本地歷史月報？\n\n${title}\nID：${fileId}\n\n此操作只刪除本機 IndexedDB 歷史，不會刪除雲端資料。`)) return;
+            const db = await initDB();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction([STORE_NAME], 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                const req = store.delete(fileId);
+                req.onsuccess = () => resolve(true);
+                req.onerror = (e) => reject(e);
+            });
+            showToast('已刪除本地歷史月報');
+            renderV1HistoryPane();
+        }
+
+        function printCurrentEditorReport() {
+            // 頂部「列印(PDF)」應列印目前月報編輯畫面；清掉 PDF 輸出中心專用列印狀態，避免圖一畫面打印成圖二版式。
+            document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
+            document.body.dataset.printSource = 'editor';
+            const printArea = document.getElementById('pdfPrintArea');
+            if (printArea) printArea.innerHTML = '';
+            if (window.renderAllCharts) {
+                try { window.renderAllCharts(); } catch (err) { console.warn('列印前重畫趨勢圖失敗', err); }
+            }
+            setTimeout(() => window.print(), 80);
+        }
+
         async function v1LoadReportById(fileId) {
             const saved = await loadFromDB(fileId);
             if (!saved) { showToast('找不到該月報'); return; }
@@ -3499,7 +3533,10 @@
                                 <div class="v1-module-title">${active ? '✅ ' : ''}${row.title || '未命名月報'}</div>
                                 <div class="v1-module-meta">ID：${row.id}　｜　日期：${row.date || '未填'}　｜　模塊：${data.length}　｜　PDF 已選：${selected}　｜　更新：${v1FormatTime(row.timestamp)}</div>
                             </div>
-                            <button class="v1-small-btn ${active ? '' : 'v1-primary-btn'}" onclick="v1LoadReportById('${row.id}')">${active ? '目前使用' : '切換'}</button>
+                            <div class="flex flex-col sm:flex-row gap-1 justify-end">
+                                <button class="v1-small-btn ${active ? '' : 'v1-primary-btn'}" onclick="v1LoadReportById(${JSON.stringify(row.id)})">${active ? '目前使用' : '切換'}</button>
+                                <button class="v1-small-btn !border-red-200 !text-red-600 hover:!bg-red-50 ${active ? 'opacity-50 cursor-not-allowed' : ''}" onclick="v1DeleteReportById(${JSON.stringify(row.id)})" title="刪除此本地歷史月報" ${active ? 'disabled' : ''}><i class="fas fa-trash mr-1"></i>刪除</button>
+                            </div>
                         </div>
                     `;
                 }).join('');
