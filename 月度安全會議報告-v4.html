@@ -3110,12 +3110,12 @@
             tabs.id = 'v1TabsBar';
             tabs.className = 'v1-tabs-bar no-print';
             tabs.innerHTML = `
+                <button class="v1-tab-btn" data-v1-tab="trends" onclick="switchV1Tab('trends')"><i class="fas fa-chart-line mr-1"></i>KPI和趨勢</button>
                 <button class="v1-tab-btn active" data-v1-tab="editor" onclick="switchV1Tab('editor')"><i class="fas fa-edit mr-1"></i>月報編輯</button>
                 <button class="v1-tab-btn" data-v1-tab="modules" onclick="switchV1Tab('modules')"><i class="fas fa-th-large mr-1"></i>模塊庫 / 勾選</button>
                 <button class="v1-tab-btn" data-v1-tab="pdf" onclick="switchV1Tab('pdf')"><i class="fas fa-file-pdf mr-1"></i>PDF 輸出中心</button>
                 <button class="v1-tab-btn" data-v1-tab="history" onclick="switchV1Tab('history')"><i class="fas fa-clock-rotate-left mr-1"></i>歷史 / 備份</button>
                 <button class="v1-tab-btn" data-v1-tab="records" onclick="switchV1Tab('records')"><i class="fas fa-database mr-1"></i>資料記錄</button>
-                <button class="v1-tab-btn" data-v1-tab="trends" onclick="switchV1Tab('trends')"><i class="fas fa-chart-line mr-1"></i>KPI / 趨勢 V3</button>
                 <button class="v1-tab-btn" data-v1-tab="cloud" onclick="switchV1Tab('cloud')"><i class="fas fa-shield-halved mr-1"></i>數據管理</button>
                 <span class="ml-auto text-xs text-indigo-700 font-bold px-2">V6：多人協作安全 / 區塊鎖 / 防覆蓋</span>
             `;
@@ -4099,13 +4099,13 @@
             const prev = rows[rows.length - 2] || {};
             root.innerHTML = `
                 <div class="v1-page-card">
-                    <h2 class="v1-page-title"><i class="fas fa-chart-line mr-2"></i>KPI / 趨勢 V3</h2>
+                    <h2 class="v1-page-title"><i class="fas fa-chart-line mr-2"></i>KPI和趨勢</h2>
                     <div class="v1-page-subtitle">第三版開始：從 V2 記錄庫自動計算 KPI，生成近 3 / 6 / 12 個月趨勢，並可寫回月報模塊。</div>
                     <div class="v1-action-row">
                         <button class="v1-small-btn ${v3TrendMonths === 3 ? 'v1-primary-btn' : ''}" onclick="v3SetTrendMonths(3)">近 3 月</button>
                         <button class="v1-small-btn ${v3TrendMonths === 6 ? 'v1-primary-btn' : ''}" onclick="v3SetTrendMonths(6)">近 6 月</button>
                         <button class="v1-small-btn ${v3TrendMonths === 12 ? 'v1-primary-btn' : ''}" onclick="v3SetTrendMonths(12)">近 12 月</button>
-                        <button class="v1-small-btn v1-primary-btn" onclick="v3UpdateTrendModules()"><i class="fas fa-wand-magic-sparkles mr-1"></i>用 KPI / 趨勢更新月報</button>
+                        <button class="v1-small-btn v1-primary-btn" onclick="v3UpdateTrendModules()"><i class="fas fa-wand-magic-sparkles mr-1"></i>用 KPI和趨勢更新月報</button>
                         <button class="v1-small-btn" onclick="switchV1Tab('records')"><i class="fas fa-database mr-1"></i>回資料記錄</button>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mb-3">
