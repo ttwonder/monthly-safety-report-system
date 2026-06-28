@@ -3914,7 +3914,7 @@
                 anonKey: String(cfg.anonKey || cfg.anon || '').trim(),
                 workspaceKey: String(cfg.workspaceKey || cfg.workspace || '').trim(),
                 autoSyncOnOpen: cfg.autoSyncOnOpen !== false,
-                autoSave: cfg.autoSave !== false,
+                autoSave: false,
                 autoSaveDelayMs: Number(cfg.autoSaveDelayMs || 2500) || 2500,
                 lastCloudUpdatedAt: '',
                 lastSyncAt: '',
@@ -3932,7 +3932,8 @@
                 });
                 if (Number.isFinite(Number(saved.cloudRevision))) base.cloudRevision = Number(saved.cloudRevision);
                 if (typeof saved.autoSyncOnOpen === 'boolean') base.autoSyncOnOpen = saved.autoSyncOnOpen;
-                if (typeof saved.autoSave === 'boolean') base.autoSave = saved.autoSave;
+                // 手動模式：保留舊設定相容，但不再允許本機自動上傳雲端。
+                base.autoSave = false;
                 if (Number(saved.autoSaveDelayMs)) base.autoSaveDelayMs = Number(saved.autoSaveDelayMs);
                 base.supabaseUrl = base.supabaseUrl.replace(/\/$/, '');
                 return base;
@@ -4102,7 +4103,7 @@
                 const config = v4GetCloudConfig();
                 if (!v4ConfigReady(config)) throw new Error('請先填寫 Supabase URL、anon key、Workspace Key');
                 V4_CLOUD_SAVING = true;
-                v4SetCloudRuntimeStatus(silent ? '正在自動保存到雲端...' : '正在保存到雲端...', 'muted');
+                v4SetCloudRuntimeStatus('正在保存到雲端...', 'muted');
                 if (V6_LOCK_BLOCKED) throw new Error('目前區塊被其他人鎖定，不能保存。');
                 const actor = v6CurrentActor();
                 const payload = await v4BuildCloudBundle();
@@ -4162,26 +4163,18 @@
 
         function v4QueueAutoSave(reason = '修改') {
             if (V4_CLOUD_APPLYING || V4_CLOUD_SAVING) return;
+            clearTimeout(V4_AUTO_SAVE_TIMER);
+            V4_AUTO_SAVE_TIMER = null;
             const config = v4GetCloudConfig();
             if (!v4ConfigReady(config)) {
                 v4SetCloudRuntimeStatus('本機已保存；雲端未配置，尚未同步。', 'warn');
                 return;
             }
-            if (config.autoSave === false) {
-                v4SetCloudRuntimeStatus('本機已保存；自動雲端保存已關閉。', 'warn');
-                return;
-            }
             if (!v5CurrentUser()) {
-                v4SetCloudRuntimeStatus('本機已保存；未登入，暫不自動保存到雲端。', 'warn');
+                v4SetCloudRuntimeStatus(`本機已保存；${reason}尚未上傳雲端，請登入後手動按「保存修改」。`, 'warn');
                 return;
             }
-            clearTimeout(V4_AUTO_SAVE_TIMER);
-            const delay = Math.max(800, Number(config.autoSaveDelayMs || 2500));
-            v4SetCloudRuntimeStatus(`${reason}已更新，${Math.round(delay/1000)} 秒後自動保存到雲端...`, 'muted');
-            V4_AUTO_SAVE_TIMER = setTimeout(() => {
-                V4_AUTO_SAVE_TIMER = null;
-                v4UploadToCloud({ silent: true, reason });
-            }, delay);
+            v4SetCloudRuntimeStatus(`${reason}已本機保存；不會自動上傳雲端，請需要時手動按「保存修改」。`, 'warn');
         }
 
         function v4IsUserEditingDraft() {
@@ -4479,7 +4472,7 @@
                         </section>
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
-                            <div class="text-xs text-slate-500 mb-2">系統會在打開、回到頁面時自動同步；修改後會自動保存到 Supabase。V6 會檢查 revision，若別人先保存，會阻止覆蓋並要求先同步。</div>
+                            <div class="text-xs text-slate-500 mb-2">手動模式：打開系統時自動同步一次；使用中只檢查雲端版本，不自動刷新；修改後只保存本機，請手動按「保存修改 / 上傳雲端」。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn v1-primary-btn" onclick="v4UploadToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>上傳本機到雲端</button>
                                 <button class="v1-small-btn" onclick="v4DownloadFromCloud()"><i class="fas fa-cloud-arrow-down mr-1"></i>下載雲端覆蓋本機</button>
@@ -4669,7 +4662,7 @@
             v5SetUsers(users);
             v5ClearUserAdminDraft();
             if (wasFirstUser) v5SetSession(next);
-            showToast(wasFirstUser ? 'Owner 已建立，正在保存到雲端' : '用戶已保存，正在保存到雲端');
+            showToast(wasFirstUser ? 'Owner 已建立，請手動按「保存修改」上傳雲端' : '用戶已本機保存，請手動按「保存修改」上傳雲端');
             v4QueueAutoSave('用戶權限');
             renderV4CloudPane();
         }
@@ -4789,7 +4782,7 @@
                         ${supabaseConfigHtml}
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
-                            <div class="text-xs text-slate-500 mb-2">系統會在打開、回到頁面時自動同步；修改後會自動保存到 Supabase。下面按鈕保留給手動確認使用。</div>
+                            <div class="text-xs text-slate-500 mb-2">手動模式：打開系統時自動同步一次；使用中只檢查雲端版本，不自動刷新；修改後只保存本機，請手動按「保存修改 / 上傳雲端」。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn" onclick="v5SyncLatest()"><i class="fas fa-cloud-arrow-down mr-1"></i>同步最新 / 下載雲端</button>
                                 <button class="v1-small-btn v1-primary-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改 / 上傳雲端</button>
