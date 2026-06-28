@@ -3864,6 +3864,7 @@
         }
 
         function v4SaveCloudConfigFromForm() {
+            if (!v5RequireSupabaseOwner()) return;
             const config = v4GetCloudConfig();
             config.supabaseUrl = (document.getElementById('v4-supabase-url')?.value || '').trim().replace(/\/$/, '');
             config.anonKey = (document.getElementById('v4-supabase-anon')?.value || '').trim();
@@ -3874,6 +3875,7 @@
         }
 
         function v4GenerateWorkspaceKey() {
+            if (!v5RequireSupabaseOwner()) return;
             const arr = new Uint8Array(18);
             crypto.getRandomValues(arr);
             const key = Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -4011,6 +4013,7 @@
         }
 
         async function v4TestCloudConnection() {
+            if (!v5RequireSupabaseOwner()) return;
             try {
                 const config = v4GetCloudConfig();
                 if (!v4ConfigReady(config)) throw new Error('請先填寫 Supabase URL、anon key、Workspace Key');
@@ -4215,6 +4218,8 @@
         function v5IsOwner() { return v5CurrentUser()?.role === 'owner'; }
         function v5IsAdmin() { const r = v5CurrentUser()?.role; return r === 'owner' || r === 'admin'; }
         function v5CanManageData() { return v5GetUsers().length === 0 || v5IsAdmin(); }
+        function v5CanManageSupabaseConfig() { return v5GetUsers().length === 0 || v5IsOwner(); }
+        function v5RequireSupabaseOwner(msg = '只有 owner 可以查看或修改 Supabase 設定。') { if (v5CanManageSupabaseConfig()) return true; alert(msg); return false; }
         function v5RequireOwner(msg = '只有 owner 可以執行此操作。') { if (v5IsOwner()) return true; alert(msg); return false; }
         function v5RequireLogin(msg = '請先登入。') { if (v5CurrentUser()) return true; alert(msg); return false; }
         async function v5HashPassword(password) {
@@ -4337,12 +4342,8 @@
             const c = v4GetCloudConfig();
             const ready = v4ConfigReady(c);
             const canManage = v5CanManageData();
-            root.innerHTML = `
-                <div class="v1-page-card">
-                    <h2 class="v1-page-title"><i class="fas fa-shield-halved mr-2"></i>數據管理</h2>
-                    <div class="v1-page-subtitle">V5：雲端資料為準；打開系統會自動同步 Supabase，操作員修改後會自動保存，也可手動同步 / 保存。</div>
-                    ${!canManage && v5GetUsers().length ? '<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>' : `
-                    <div class="v1-category-grid">
+            const canManageSupabase = v5CanManageSupabaseConfig();
+            const supabaseConfigHtml = canManageSupabase ? `
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">Supabase 設定</div>
                             <label class="flex flex-col gap-1 text-xs font-bold text-slate-600 mb-2">Supabase Project URL
@@ -4360,7 +4361,14 @@
                                 <button class="v1-small-btn" onclick="v4TestCloudConnection()"><i class="fas fa-plug mr-1"></i>測試連線</button>
                             </div>
                             <div class="text-xs ${ready ? 'text-emerald-700' : 'text-rose-700'} font-bold">狀態：${ready ? '設定已填寫' : '尚未完成設定'} ${testStatus === 'connected' ? '｜剛剛測試成功' : ''}</div>
-                        </section>
+                        </section>` : '';
+            root.innerHTML = `
+                <div class="v1-page-card">
+                    <h2 class="v1-page-title"><i class="fas fa-shield-halved mr-2"></i>數據管理</h2>
+                    <div class="v1-page-subtitle">V5：雲端資料為準；打開系統會自動同步 Supabase，操作員修改後會自動保存，也可手動同步 / 保存。</div>
+                    ${!canManage && v5GetUsers().length ? '<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>' : `
+                    <div class="v1-category-grid">
+                        ${supabaseConfigHtml}
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
                             <div class="text-xs text-slate-500 mb-2">系統會在打開、回到頁面時自動同步；修改後會自動保存到 Supabase。下面按鈕保留給手動確認使用。</div>
