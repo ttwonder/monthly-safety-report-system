@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>月度安全會議報告 V4</title>
+    <title>月度安全會議報告 V5</title>
     <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- SheetJS for Excel Import/Export -->
@@ -14,8 +14,6 @@
     <!-- Chart.js 動態趨勢圖 -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
-    <!-- 載入外部資料檔 (這是讓分享版能讀取到最新數據的關鍵) -->
-    <script src="lib/data.js"></script>
     
     <!-- 系統保留節點 -->
     <script id="portable-data" type="application/json"></script>
@@ -223,6 +221,7 @@
             clearTimeout(window._globalInputSaveTimer);
             window._globalInputSaveTimer = setTimeout(() => {
                 triggerAutoSave(e.target);
+                setTimeout(preserveTrendAnchor, 0);
             }, 800);
         });
 
@@ -397,6 +396,7 @@
                     }]
                 });
             });
+            setTimeout(preserveTrendAnchor, 0);
         };
 
         // 監聽列印事件，強制重繪圖表解決出框與自適應延遲問題
@@ -515,10 +515,8 @@
 
         // --- 全新升級：插入多維度動態趨勢圖 ---
         function insertTrendChart() {
-            restoreSelection();
-            ensureCursorOutsideBlock();
             const html = `
-            <div class="trend-chart-container block-spacer" contenteditable="false" style="border: 2px solid #cbd5e1; padding: 8px; border-radius: 6px; background-color: #ffffff; width: 100%; margin-bottom: 8px; break-inside: avoid; page-break-inside: avoid; display: block;">
+            <div class="trend-chart-container" data-trend-chart="1" contenteditable="false" style="border: 2px solid #cbd5e1; padding: 8px; border-radius: 6px; background-color: #ffffff; width: 100%; margin-bottom: 8px; break-inside: avoid; page-break-inside: avoid; display: block;">
                 
                 <!-- 標題與控制列 -->
                 <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 6px; flex-wrap: wrap; gap: 4px;">
@@ -587,11 +585,18 @@
                 </div>
             </div>&nbsp;`;
             
-            insertHtmlAtSelection(html);
+            const inserted = insertHtmlAtSelection(html, { scrollToInserted: true });
+            const chart = inserted && inserted.primary && inserted.primary.classList && inserted.primary.classList.contains('trend-chart-container')
+                ? inserted.primary
+                : (inserted && inserted.editable ? inserted.editable.querySelector('[data-trend-chart="1"]') : document.querySelector('[data-trend-chart="1"]'));
+            if (chart) markTrendAnchor(chart);
             setTimeout(() => {
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div));
                 window.renderAllCharts();
-            }, 50);
+                if (chart && chart.scrollIntoView) chart.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                if (chart) markTrendAnchor(chart);
+            }, 80);
+            return chart;
         }
 
     </script>
@@ -967,6 +972,14 @@
         .v1-empty-state { color:#94a3b8; text-align:center; padding:24px; border:1px dashed #cbd5e1; border-radius:12px; background:#fff; }
         .v1-history-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
         .v1-note-box { border-left:4px solid #8b5cf6; background:#faf5ff; color:#5b21b6; padding:10px 12px; border-radius:8px; font-size:13px; }
+
+        .v5-session-bar { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:7px 8px; margin:-4px 0 10px; border:1px solid #bae6fd; border-radius:12px; background:#f0f9ff; color:#075985; font-size:12px; font-weight:800; }
+        .v5-role-pill { display:inline-flex; align-items:center; gap:4px; border-radius:999px; padding:3px 8px; background:#e0f2fe; color:#075985; }
+        .v5-sync-btn { border:1px solid #7dd3fc; background:#fff; color:#0369a1; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:800; cursor:pointer; }
+        .v5-sync-btn:hover { background:#e0f2fe; }
+        .v5-locked { opacity:.45; pointer-events:none; filter:grayscale(.3); }
+        .trend-chart-container { overflow-anchor: none; scroll-margin-top: 210px; }
+        .chart-canvas-area canvas { max-width: 100% !important; }
         #pdfPrintArea { display:none; }
         @media (max-width: 900px) { .v1-pdf-layout { grid-template-columns:1fr; } .v1-pdf-side { position:static; } .v1-pdf-toc ol { columns:1; } }
         @media print {
@@ -1049,11 +1062,6 @@
                 <!-- 右上：全局操作按鈕 -->
                 <div class="flex items-center gap-1.5 shrink-0">
                     <button onclick="manualSave()" class="toolbar-btn !border-blue-500 !bg-blue-50 !text-blue-700 hover:!bg-blue-100 font-bold shadow-sm" title="將變更寫入本地儲存"><i class="fas fa-save mr-1"></i>保存</button>
-                    <button onclick="exportDataJS()" class="toolbar-btn !border-indigo-400 !text-indigo-700 hover:!bg-indigo-50 font-bold shadow-sm" title="匯出 data.js 檔案，放入 lib 資料夾後隨 HTML 檔案一起發送即可共享最新數據"><i class="fas fa-share-alt mr-1"></i>匯出資料(data.js)</button>
-                    
-                    <input type="file" id="dataJsUpload" class="hidden" accept=".js" onchange="importDataJS(event)">
-                    <button onclick="document.getElementById('dataJsUpload').click()" class="toolbar-btn !border-indigo-400 !text-indigo-700 hover:!bg-indigo-50 font-bold shadow-sm" title="手動匯入已匯出的 data.js 檔案"><i class="fas fa-file-import mr-1"></i>匯入資料(data.js)</button>
-
                     <input type="file" id="excelUpload" class="hidden" accept=".xlsx, .xls" onchange="importExcel(event)">
                     <button onclick="document.getElementById('excelUpload').click()" class="toolbar-btn !border-green-300 !text-green-700 hover:!bg-green-50" title="支援還原隱藏版式資料"><i class="fas fa-file-import mr-1"></i>匯入Excel</button>
                     <button onclick="exportExcel()" class="toolbar-btn !border-green-300 !text-green-700 hover:!bg-green-50" title="匯出帶有隱藏版式資料的 Excel"><i class="fas fa-file-excel mr-1"></i>匯出Excel</button>
@@ -1111,9 +1119,9 @@
                     <button class="toolbar-btn !bg-purple-50 !border-purple-300 text-purple-700" onclick="insertBlock('purple')" title="紫色: 行動/計畫"><i class="fas fa-tasks"></i></button>
                 </div>
 
-                <!-- 右下：使用說明 -->
-                <div class="text-[11px] text-indigo-700 font-bold no-print bg-white/80 px-3 py-1.5 rounded shadow-sm border border-indigo-200 text-right leading-tight shrink-0 flex-1 min-w-[500px]">
-                    <i class="fas fa-lightbulb text-amber-500 mr-1"></i>使用说明：html文件和lib文件夹需要在同一文件夹内。编辑完成后，点击“导出資料檔 (data.js)”，并将“data.js”文件，替换掉lib文件夹中的原始文件，再打包发送。
+                <!-- 右下：雲端/權限狀態 -->
+                <div id="v5TopStatus" class="text-[11px] text-indigo-700 font-bold no-print bg-white/80 px-3 py-1.5 rounded shadow-sm border border-indigo-200 text-right leading-tight shrink-0 flex-1 min-w-[500px]">
+                    <i class="fas fa-cloud text-sky-500 mr-1"></i>雲端協作版：請登入後使用「同步最新 / 保存修改」。本機備份請到「歷史 / 備份」。
                 </div>
             </div>
         </div>
@@ -1309,6 +1317,8 @@
         let reportData = [];
         let currentEditingIconIndex = -1;
         let lastSavedRange = null;
+        let lastActiveEditableDiv = null;
+        let activeTrendAnchor = null;
         
         window.currentFileId = 'latest_report'; 
 
@@ -1324,7 +1334,11 @@
                     }
                     node = node.parentNode;
                 }
-                if(isInside) lastSavedRange = range;
+                if(isInside) {
+                    lastSavedRange = range.cloneRange();
+                    let n = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentNode;
+                    lastActiveEditableDiv = n && n.closest ? n.closest('.editable-div') : null;
+                }
             }
         });
 
@@ -1537,7 +1551,7 @@
             initPeriodSelects();
             
             let loadedFromPortable = false;
-            let portableData = window.SHARED_REPORT_DATA;
+            let portableData = null;
 
             if (portableData && portableData.fileId) {
                 window.currentFileId = portableData.fileId;
@@ -1618,7 +1632,7 @@
                 }, 300);
 
                 if(loadedFromPortable) {
-                    showToast('已成功掛載 lib/data.js 最新資料！');
+                    showToast('已成功載入本機共享資料檔。');
                 }
             } catch (error) {
                 console.error("載入失敗:", error);
@@ -1904,7 +1918,7 @@
                                 <button onclick="moveRowDown(${index})" class="text-gray-400 hover:text-indigo-600 disabled:opacity-20 transition-colors" ${index === reportData.length - 1 ? 'disabled' : ''}><i class="fas fa-arrow-down"></i></button>
                             </div>
                             <div class="w-8 h-px bg-red-200"></div>
-                            <button onclick="deleteRow(${index})" class="text-red-400 hover:text-red-600 transition-colors" title="刪除"><i class="fas fa-trash-alt"></i></button>
+                            ${v5IsOwner() ? `<button onclick="deleteRow(${index})" class="text-red-400 hover:text-red-600 transition-colors" title="刪除"><i class="fas fa-trash-alt"></i></button>` : `<span class="text-gray-300" title="只有 owner 可以刪除項次"><i class="fas fa-lock"></i></span>`}
                         </div>
                     </td>
                 `;
@@ -1945,7 +1959,9 @@
                 const editable = getActiveEditableFromSelection();
                 if (editable) return { sel, range: sel.getRangeAt(0), editable };
             }
-            const editable = document.activeElement && document.activeElement.matches && document.activeElement.matches('.editable-div, [contenteditable="true"]') ? document.activeElement : document.querySelector('.editable-div[contenteditable="true"]');
+            const editable = (document.activeElement && document.activeElement.matches && document.activeElement.matches('.editable-div, [contenteditable="true"]'))
+                ? document.activeElement
+                : (lastActiveEditableDiv && document.body.contains(lastActiveEditableDiv) ? lastActiveEditableDiv : document.querySelector('.editable-div[contenteditable="true"]'));
             if (!editable) return null;
             editable.focus();
             const range = document.createRange();
@@ -1974,18 +1990,40 @@
             lastSavedRange = range.cloneRange();
         }
 
-        function insertHtmlAtSelection(html) {
+        function insertHtmlAtSelection(html, options = {}) {
             const ctx = ensureEditableSelection();
-            if (!ctx) return;
+            if (!ctx) return null;
             const { range, editable } = ctx;
+            const editableRoot = editable.closest('.editable-div') || editable;
             range.deleteContents();
             const fragment = htmlToFragment(html);
-            const lastNode = fragment.lastChild;
+            const insertedNodes = Array.from(fragment.childNodes);
+            const lastNode = insertedNodes[insertedNodes.length - 1] || null;
             range.insertNode(fragment);
             if (lastNode) placeCaretAfterNode(lastNode);
-            cleanupEditable(editable.closest('.editable-div') || editable);
-            triggerAutoSave(editable);
+            cleanupEditable(editableRoot);
+            triggerAutoSave(editableRoot);
             saveRangeFromSelection();
+            const primary = insertedNodes.find(n => n.nodeType === 1) || lastNode;
+            if (options.scrollToInserted && primary && primary.scrollIntoView) {
+                setTimeout(() => primary.scrollIntoView({ block: 'center', behavior: 'smooth' }), 80);
+            }
+            return { insertedNodes, primary, editable: editableRoot };
+        }
+
+        function markTrendAnchor(el) {
+            if (!el) return;
+            activeTrendAnchor = { el, top: el.getBoundingClientRect().top };
+        }
+
+        function preserveTrendAnchor() {
+            if (!activeTrendAnchor || !activeTrendAnchor.el || !document.body.contains(activeTrendAnchor.el)) return;
+            const rect = activeTrendAnchor.el.getBoundingClientRect();
+            if (Number.isFinite(activeTrendAnchor.top)) {
+                const delta = rect.top - activeTrendAnchor.top;
+                if (Math.abs(delta) > 2) window.scrollBy(0, delta);
+            }
+            activeTrendAnchor.top = activeTrendAnchor.el.getBoundingClientRect().top;
         }
 
         function escapeHtmlText(text) {
@@ -2215,6 +2253,9 @@
                     toolbar.style.left = rect.left + 'px';
                     if (parseInt(toolbar.style.top) < 0) toolbar.style.top = (rect.bottom + 5) + 'px';
                 }
+            } else if (e.target.closest('.trend-chart-container')) {
+                markTrendAnchor(e.target.closest('.trend-chart-container'));
+                hideImgToolbar(); hideTableToolbar(); hideBlockToolbar(); hideHighlightToolbar();
             } else if (e.target.closest('.content-block')) {
                 hideImgToolbar(); hideTableToolbar(); hideHighlightToolbar();
                 const block = e.target.closest('.content-block');
@@ -2406,6 +2447,7 @@
             window.scrollTo(0, document.body.scrollHeight);
         }
         async function deleteRow(index) {
+            if (!v5RequireOwner('只有 owner 可以刪除「月報編輯」中的項次項目。')) return;
             if(confirm('確定要刪除這個項目嗎？')) { reportData.splice(index, 1); await saveToDB(reportData); renderTable(); }
         }
         async function updateData(index, field, value) { reportData[index][field] = value; await saveToDB(reportData); }
@@ -2451,117 +2493,7 @@
             closeIconPicker();
         }
 
-        // --- 匯出 JS 外部資料檔機制 ---
-        function exportDataJS() {
-            if (document.activeElement && typeof document.activeElement.blur === 'function') {
-                document.activeElement.blur();
-            }
-            showLoader();
-            setTimeout(async () => {
-                try {
-                    await saveToDB(reportData, Date.now());
-                    const dbData = await loadFromDB(window.currentFileId);
-
-                    const currentData = {
-                        fileId: window.currentFileId, 
-                        reportData: reportData,
-                        date: document.getElementById('reportDate').value,
-                        title: document.getElementById('mainTitle').innerText,
-                        period: {
-                            startM: document.getElementById('startMonth').value,
-                            startD: document.getElementById('startDay').value,
-                            endM: document.getElementById('endMonth').value,
-                            endD: document.getElementById('endDay').value
-                        },
-                        globalFontEn: document.getElementById('globalFontEnSelector').value,
-                        globalFontZh: document.getElementById('globalFontZhSelector').value,
-                        timestamp: dbData.timestamp 
-                    };
-
-                    const jsContent = `// 請將此檔案放在與 HTML 檔案同層的 lib 資料夾中\nwindow.SHARED_REPORT_DATA = ${JSON.stringify(currentData, null, 2)};`;
-                    
-                    const blob = new Blob([jsContent], { type: 'text/javascript;charset=utf-8' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `data.js`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                    hideLoader();
-                    
-                    showToast('已下載 data.js！請放入 lib 資料夾。');
-                } catch(e) {
-                    console.error("匯出 data.js 失敗", e);
-                    hideLoader();
-                    alert("匯出失敗，請查看控制台！");
-                }
-            }, 100);
-        }
-        
-        // --- 全新：手動匯入 data.js 機制 ---
-        function importDataJS(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-            showLoader();
-            const reader = new FileReader();
-            reader.onload = async function(e) {
-                try {
-                    const jsContent = e.target.result;
-                    // 使用正則擷取 JSON 內容
-                    const jsonMatch = jsContent.match(/window\.SHARED_REPORT_DATA\s*=\s*(\{[\s\S]*\});/);
-                    if (jsonMatch && jsonMatch[1]) {
-                        const importedData = JSON.parse(jsonMatch[1]);
-                        
-                        if (importedData && importedData.reportData) {
-                            reportData = normalizeData(importedData.reportData);
-                            window.currentFileId = importedData.fileId || window.currentFileId;
-                            
-                            document.getElementById('reportDate').value = importedData.date || new Date().toISOString().slice(0,10);
-                            document.getElementById('mainTitle').innerText = importedData.title || "月度安全會議報告";
-                            
-                            if (importedData.period) {
-                                document.getElementById('startMonth').value = importedData.period.startM;
-                                document.getElementById('startDay').value = importedData.period.startD;
-                                document.getElementById('endMonth').value = importedData.period.endM;
-                                document.getElementById('endDay').value = importedData.period.endD;
-                            } else {
-                                setDefaultPeriod();
-                            }
-                            
-                            if (importedData.globalFontEn && importedData.globalFontZh) {
-                                document.getElementById('globalFontEnSelector').value = importedData.globalFontEn;
-                                document.getElementById('globalFontZhSelector').value = importedData.globalFontZh;
-                                changeGlobalFont();
-                            } else {
-                                changeGlobalFont();
-                            }
-
-                            await manualSave(false);
-                            renderTable();
-                            
-                            setTimeout(() => {
-                                document.querySelectorAll('.kpi-card-container').forEach(card => window.updateKpiCard(card));
-                                document.querySelectorAll('.progress-card-container').forEach(card => window.updateProgressCard(card));
-                                document.querySelectorAll('.zone-card-container').forEach(card => window.updateZoneCard(card));
-                                window.renderAllCharts();
-                            }, 300);
-
-                            showToast('data.js 匯入成功！');
-                        } else {
-                            throw new Error("Invalid data format");
-                        }
-                    } else {
-                        throw new Error("Could not find data in the file");
-                    }
-                } catch (error) {
-                    console.error(error);
-                    alert("匯入失敗：這似乎不是由本系統匯出的有效 data.js 檔案。");
-                }
-                document.getElementById('dataJsUpload').value = '';
-                hideLoader();
-            };
-            reader.readAsText(file);
-        }
+        // 舊版離線分享機制已移除；V5 正式備份請使用「數據管理 → 匯出完整 JSON」。
 
         function handleFileUpload(event, index) {
             const files = event.target.files;
@@ -2885,8 +2817,8 @@
                 <button class="v1-tab-btn" data-v1-tab="history" onclick="switchV1Tab('history')"><i class="fas fa-clock-rotate-left mr-1"></i>歷史 / 備份</button>
                 <button class="v1-tab-btn" data-v1-tab="records" onclick="switchV1Tab('records')"><i class="fas fa-database mr-1"></i>資料記錄</button>
                 <button class="v1-tab-btn" data-v1-tab="trends" onclick="switchV1Tab('trends')"><i class="fas fa-chart-line mr-1"></i>KPI / 趨勢 V3</button>
-                <button class="v1-tab-btn" data-v1-tab="cloud" onclick="switchV1Tab('cloud')"><i class="fas fa-cloud-arrow-up mr-1"></i>雲端同步 V4</button>
-                <span class="ml-auto text-xs text-indigo-700 font-bold px-2">V4：Supabase 雲端同步準備 + GitHub Pages 部署</span>
+                <button class="v1-tab-btn" data-v1-tab="cloud" onclick="switchV1Tab('cloud')"><i class="fas fa-shield-halved mr-1"></i>數據管理</button>
+                <span class="ml-auto text-xs text-indigo-700 font-bold px-2">V5：多人協作 / 權限管理 / 穩定趨勢圖</span>
             `;
 
             const editor = document.createElement('div');
@@ -2929,6 +2861,7 @@
                 document.body.classList.remove('pdf-print-mode');
             });
 
+            renderV5SessionBar();
             renderV1ModuleLibrary();
             renderV1PdfCenter();
             renderV1HistoryPane();
@@ -2938,6 +2871,10 @@
         }
 
         function switchV1Tab(tab) {
+            if (tab === 'cloud' && !v5CanManageData() && v5GetUsers().length > 0) {
+                alert('您無權訪問數據管理。請使用 owner 或管理員帳號登入。');
+                return;
+            }
             const editor = document.getElementById('v1-editor-workspace');
             if (!editor) return;
             document.querySelectorAll('.v1-tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.v1Tab === tab));
@@ -2951,6 +2888,7 @@
             if (tab === 'records') renderV1RecordsPane();
             if (tab === 'trends') renderV3TrendPane();
             if (tab === 'cloud') renderV4CloudPane();
+            renderV5SessionBar();
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }
 
@@ -3247,7 +3185,7 @@
             root.innerHTML = `
                 <div class="v1-page-card">
                     <h2 class="v1-page-title"><i class="fas fa-clock-rotate-left mr-2"></i>歷史 / 備份</h2>
-                    <div class="v1-page-subtitle">第一版新增本地歷史月報清單，可建立副本、切換舊月報；同時保留 data.js / Excel 備份。</div>
+                    <div class="v1-page-subtitle">本地歷史月報清單，可建立副本、切換舊月報；正式備份請優先使用完整 JSON / Excel，雲端協作請到「數據管理」。</div>
                     <div class="v1-history-grid">
                         <div class="v1-category-card">
                             <div class="v1-category-title mb-2">目前月報</div>
@@ -3263,7 +3201,7 @@
                             <div class="v1-action-row">
                                 <button class="v1-small-btn v1-primary-btn" onclick="manualSave()"><i class="fas fa-save mr-1"></i>保存目前月報</button>
                                 <button class="v1-small-btn" onclick="v1CreateReportCopy()"><i class="fas fa-copy mr-1"></i>建立副本</button>
-                                <button class="v1-small-btn" onclick="exportDataJS()"><i class="fas fa-share-alt mr-1"></i>匯出 data.js</button>
+                                <button class="v1-small-btn" onclick="v4ExportLocalBundleJson()"><i class="fas fa-file-export mr-1"></i>匯出完整 JSON</button>
                                 <button class="v1-small-btn" onclick="exportExcel()"><i class="fas fa-file-excel mr-1"></i>匯出 Excel</button>
                             </div>
                             <div class="text-xs text-gray-500">提示：如果要做下個月報，建議先建立副本，再修改日期與內容。</div>
@@ -3929,7 +3867,8 @@
                     },
                     modules: reportData
                 },
-                records
+                records,
+                users: v5GetUsers()
             };
         }
 
@@ -3948,6 +3887,7 @@
             }
             await saveToDB(reportData, Date.now());
             if (bundle.records) await saveV2Records(Object.assign(v2BlankRecords(), bundle.records));
+            if (Array.isArray(bundle.users)) v5SetUsers(bundle.users);
             v2RecordsCache = null;
             renderTable();
             renderV1ModuleLibrary();
@@ -3978,7 +3918,7 @@
                 const config = v4GetCloudConfig();
                 const data = await v4CloudRequest('rpc/get_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey });
                 if (!data || !data.payload) { alert('雲端沒有找到此 Workspace Key 的資料。'); return; }
-                if (!confirm('確定用雲端資料覆蓋目前本機資料嗎？建議先匯出 JSON / data.js 備份。')) return;
+                if (!confirm('確定用雲端資料覆蓋目前本機資料嗎？建議先在數據管理匯出完整 JSON 備份。')) return;
                 await v4ApplyCloudBundle(data.payload, '雲端');
                 config.lastCloudUpdatedAt = data.updated_at || '';
                 config.lastSyncAt = new Date().toISOString();
@@ -4087,6 +4027,200 @@
                 </div>
             `;
         }
+
+
+        // === V5 多人協作與應用內權限管理（無 email） ===
+        const V5_USERS_KEY = 'monthly_report_v5_users';
+        const V5_SESSION_KEY = 'monthly_report_v5_session';
+
+        function v5RoleLabel(role) {
+            return role === 'owner' ? 'Owner' : role === 'admin' ? '管理員' : '使用者';
+        }
+        function v5GetUsers() {
+            try { return JSON.parse(localStorage.getItem(V5_USERS_KEY) || '[]'); } catch { return []; }
+        }
+        function v5SetUsers(users) {
+            localStorage.setItem(V5_USERS_KEY, JSON.stringify(Array.isArray(users) ? users : []));
+            renderV5SessionBar();
+        }
+        function v5CurrentUser() {
+            try { return JSON.parse(sessionStorage.getItem(V5_SESSION_KEY) || 'null'); } catch { return null; }
+        }
+        function v5SetSession(user) {
+            if (user) sessionStorage.setItem(V5_SESSION_KEY, JSON.stringify({ username: user.username, displayName: user.displayName || user.username, role: user.role || 'operator' }));
+            else sessionStorage.removeItem(V5_SESSION_KEY);
+            renderV5SessionBar();
+            renderTable();
+            if (document.getElementById('v1-pane-cloud')?.classList.contains('active') && !v5CanManageData() && v5GetUsers().length > 0) {
+                switchV1Tab('editor');
+            }
+        }
+        function v5IsOwner() { return v5CurrentUser()?.role === 'owner'; }
+        function v5IsAdmin() { const r = v5CurrentUser()?.role; return r === 'owner' || r === 'admin'; }
+        function v5CanManageData() { return v5GetUsers().length === 0 || v5IsAdmin(); }
+        function v5RequireOwner(msg = '只有 owner 可以執行此操作。') { if (v5IsOwner()) return true; alert(msg); return false; }
+        function v5RequireLogin(msg = '請先登入。') { if (v5CurrentUser()) return true; alert(msg); return false; }
+        async function v5HashPassword(password) {
+            const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(password || '')));
+            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+        function v5SafeUser(u) {
+            return {
+                username: String(u.username || '').trim(),
+                displayName: String(u.displayName || u.username || '').trim(),
+                role: ['owner','admin','operator'].includes(u.role) ? u.role : 'operator',
+                passwordHash: String(u.passwordHash || ''),
+                createdAt: u.createdAt || new Date().toISOString()
+            };
+        }
+        async function v5AddOrUpdateUserFromForm() {
+            if (!v5CanManageData()) return alert('您無權訪問數據管理。');
+            const users = v5GetUsers();
+            const username = (document.getElementById('v5-user-username')?.value || '').trim();
+            const displayName = (document.getElementById('v5-user-display')?.value || '').trim() || username;
+            const password = document.getElementById('v5-user-password')?.value || '';
+            let role = document.getElementById('v5-user-role')?.value || 'operator';
+            if (!username || !password) return alert('請填寫用戶名和密碼。');
+            if (users.length === 0) role = 'owner';
+            if (role === 'owner' && users.some(u => u.role === 'owner' && u.username !== username) && !v5IsOwner()) return alert('只有 owner 可以設定其他 owner。');
+            if (role === 'owner' && users.some(u => u.role === 'owner' && u.username !== username)) return alert('目前僅允許一個 owner。');
+            const passwordHash = await v5HashPassword(password);
+            const idx = users.findIndex(u => u.username === username);
+            const next = v5SafeUser({ username, displayName, role, passwordHash, createdAt: idx >= 0 ? users[idx].createdAt : new Date().toISOString() });
+            if (idx >= 0) users[idx] = next; else users.push(next);
+            v5SetUsers(users);
+            showToast(users.length === 1 && role === 'owner' ? 'Owner 已建立' : '用戶已保存');
+            renderV4CloudPane();
+        }
+        function v5DeleteUser(username) {
+            if (!v5IsOwner()) return alert('只有 owner 可以刪除用戶。');
+            const users = v5GetUsers();
+            const target = users.find(u => u.username === username);
+            if (!target) return;
+            if (target.role === 'owner') return alert('不能刪除 owner。');
+            if (!confirm(`確定刪除用戶 ${username}？`)) return;
+            v5SetUsers(users.filter(u => u.username !== username));
+            renderV4CloudPane();
+        }
+        async function v5Login() {
+            const username = (document.getElementById('v5-login-username')?.value || '').trim();
+            const password = document.getElementById('v5-login-password')?.value || '';
+            const users = v5GetUsers();
+            const hash = await v5HashPassword(password);
+            const user = users.find(u => u.username === username && u.passwordHash === hash);
+            if (!user) return alert('用戶名或密碼不正確。若這是新瀏覽器，請先點「同步最新」。');
+            v5SetSession(user);
+            showToast(`已登入：${user.displayName || user.username}`);
+        }
+        function v5Logout() { v5SetSession(null); showToast('已登出'); }
+        async function v5SyncLatest() {
+            try {
+                const config = v4GetCloudConfig();
+                const data = await v4CloudRequest('rpc/get_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey });
+                if (!data || !data.payload) { alert('雲端沒有找到此 Workspace Key 的資料。'); return; }
+                await v4ApplyCloudBundle(data.payload, '雲端最新');
+                config.lastCloudUpdatedAt = data.updated_at || '';
+                config.lastSyncAt = new Date().toISOString();
+                localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
+                showToast('已同步最新資料');
+                renderV4CloudPane();
+            } catch (err) { console.error(err); alert('同步最新失敗：' + err.message); }
+        }
+        async function v5SaveChangesToCloud() {
+            if (!v5RequireLogin('請先登入後再保存修改。')) return;
+            await v4UploadToCloud();
+            renderV5SessionBar();
+        }
+        function renderV5SessionBar() {
+            const root = document.getElementById('v5TopStatus');
+            if (!root) return;
+            const user = v5CurrentUser();
+            const users = v5GetUsers();
+            const configReady = v4ConfigReady();
+            root.innerHTML = user ? `
+                <div class="v5-session-bar">
+                    <span class="v5-role-pill"><i class="fas fa-user-shield"></i>${v2RecordText(user.displayName || user.username)}｜${v5RoleLabel(user.role)}</span>
+                    <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
+                    <button class="v5-sync-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改</button>
+                    <button class="v5-sync-btn" onclick="v5Logout()">登出</button>
+                    <span class="text-slate-500">${configReady ? '雲端已配置' : '尚未配置 Supabase'}</span>
+                </div>` : `
+                <div class="v5-session-bar">
+                    <span class="v5-role-pill"><i class="fas fa-lock"></i>${users.length ? '未登入' : '尚未建立 owner'}</span>
+                    <input id="v5-login-username" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="用戶名">
+                    <input id="v5-login-password" type="password" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="密碼" onkeydown="if(event.key==='Enter') v5Login()">
+                    <button class="v5-sync-btn" onclick="v5Login()">登入</button>
+                    <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
+                    <span class="text-slate-500">${users.length ? '登入後可保存修改' : '請到數據管理建立 owner'}</span>
+                </div>`;
+        }
+        function v5UserAdminHtml() {
+            const users = v5GetUsers();
+            const canManage = v5CanManageData();
+            if (!canManage && users.length) return `<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>`;
+            const rows = users.map(u => `<tr><td>${v2RecordText(u.username)}</td><td>${v2RecordText(u.displayName)}</td><td>${v5RoleLabel(u.role)}</td><td>${v5IsOwner() && u.role !== 'owner' ? `<button class="v1-small-btn v1-danger-btn" onclick="v5DeleteUser('${v1EscapeAttr(u.username)}')">刪除</button>` : '—'}</td></tr>`).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-3">尚未建立用戶。第一個用戶會自動成為 owner。</td></tr>`;
+            return `
+                <section class="v1-category-card">
+                    <div class="v1-category-title mb-2">用戶與權限管理</div>
+                    <div class="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-2">
+                        <input id="v5-user-username" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="用戶名">
+                        <input id="v5-user-display" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="顯示名稱">
+                        <input id="v5-user-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="密碼">
+                        <select id="v5-user-role" class="border border-indigo-100 rounded px-2 py-1 text-sm">
+                            <option value="operator">使用者</option><option value="admin">管理員</option>${v5IsOwner() || users.length===0 ? '<option value="owner">Owner</option>' : ''}
+                        </select>
+                    </div>
+                    <div class="v1-action-row"><button class="v1-small-btn v1-primary-btn" onclick="v5AddOrUpdateUserFromForm()"><i class="fas fa-user-plus mr-1"></i>${users.length ? '新增 / 更新用戶' : '建立第一個 owner'}</button></div>
+                    <div class="overflow-auto border border-slate-200 rounded-lg"><table style="table-layout:auto;"><thead><tr><th>用戶名</th><th>顯示名稱</th><th>權限</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
+                    <div class="text-xs text-slate-500 mt-2">權限規則：owner 可刪除月報項次與用戶；owner/管理員可進入數據管理；所有已登入用戶可同步最新與保存修改。</div>
+                </section>`;
+        }
+
+        // 覆蓋 V4 頁：改為 V5 數據管理
+        renderV4CloudPane = function(testStatus = '') {
+            const root = document.getElementById('v1-pane-cloud');
+            if (!root) return;
+            const c = v4GetCloudConfig();
+            const ready = v4ConfigReady(c);
+            const canManage = v5CanManageData();
+            root.innerHTML = `
+                <div class="v1-page-card">
+                    <h2 class="v1-page-title"><i class="fas fa-shield-halved mr-2"></i>數據管理</h2>
+                    <div class="v1-page-subtitle">V5：多人協作、應用內帳號密碼、權限管理與雲端同步。無需 Supabase email confirmation。</div>
+                    ${!canManage && v5GetUsers().length ? '<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>' : `
+                    <div class="v1-category-grid">
+                        <section class="v1-category-card">
+                            <div class="v1-category-title mb-2">Supabase 設定</div>
+                            <label class="flex flex-col gap-1 text-xs font-bold text-slate-600 mb-2">Supabase Project URL
+                                <input id="v4-supabase-url" class="border border-indigo-100 rounded px-2 py-1 text-sm" value="${v2RecordText(c.supabaseUrl)}" placeholder="https://xxxxx.supabase.co">
+                            </label>
+                            <label class="flex flex-col gap-1 text-xs font-bold text-slate-600 mb-2">Anon public key
+                                <input id="v4-supabase-anon" class="border border-indigo-100 rounded px-2 py-1 text-sm" value="${v2RecordText(c.anonKey)}" placeholder="eyJhbGciOi...">
+                            </label>
+                            <label class="flex flex-col gap-1 text-xs font-bold text-slate-600 mb-2">Workspace Key
+                                <input id="v4-workspace-key" class="border border-indigo-100 rounded px-2 py-1 text-sm" value="${v2RecordText(c.workspaceKey)}" placeholder="請生成或填入私密工作區 key">
+                            </label>
+                            <div class="v1-action-row">
+                                <button class="v1-small-btn" onclick="v4GenerateWorkspaceKey()"><i class="fas fa-key mr-1"></i>生成 Key</button>
+                                <button class="v1-small-btn v1-primary-btn" onclick="v4SaveCloudConfigFromForm()"><i class="fas fa-save mr-1"></i>保存設定</button>
+                                <button class="v1-small-btn" onclick="v4TestCloudConnection()"><i class="fas fa-plug mr-1"></i>測試連線</button>
+                            </div>
+                            <div class="text-xs ${ready ? 'text-emerald-700' : 'text-rose-700'} font-bold">狀態：${ready ? '設定已填寫' : '尚未完成設定'} ${testStatus === 'connected' ? '｜剛剛測試成功' : ''}</div>
+                        </section>
+                        <section class="v1-category-card">
+                            <div class="v1-category-title mb-2">同步操作</div>
+                            <div class="v1-action-row">
+                                <button class="v1-small-btn" onclick="v5SyncLatest()"><i class="fas fa-cloud-arrow-down mr-1"></i>同步最新 / 下載雲端</button>
+                                <button class="v1-small-btn v1-primary-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改 / 上傳雲端</button>
+                            </div>
+                            <div class="text-sm text-slate-600 leading-6"><div><b>最近同步：</b>${v4FmtTime(c.lastSyncAt)}</div><div><b>雲端更新：</b>${v4FmtTime(c.lastCloudUpdatedAt)}</div></div>
+                            <div class="v1-action-row mt-2"><button class="v1-small-btn" onclick="v4ExportLocalBundleJson()"><i class="fas fa-file-export mr-1"></i>匯出完整 JSON 備份</button><button class="v1-small-btn" onclick="document.getElementById('v4-bundle-import').click()"><i class="fas fa-file-import mr-1"></i>匯入完整 JSON 備份</button><input id="v4-bundle-import" type="file" accept=".json" class="hidden" onchange="v4ImportLocalBundleJson(event)"></div>
+                        </section>
+                    </div>
+                    <div class="mt-3">${v5UserAdminHtml()}</div>
+                    <div class="v1-note-box mt-3"><b>安全說明：</b>此版本採用應用內帳號密碼，密碼以 SHA-256 hash 保存在雲端資料包內；不使用 Supabase email 登入。Workspace Key 仍需保密。</div>`}
+                </div>`;
+        };
 
 
         window.onload = async function() { await initApp(); setupV1Shell(); };

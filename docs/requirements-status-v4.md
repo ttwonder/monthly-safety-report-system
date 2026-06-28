@@ -39,3 +39,6 @@
 - 附件仍主要依原 demo 方式處理；大量附件或敏感附件後續應遷移到 Supabase Storage。
 - Tailwind / Chart / SheetJS / FontAwesome 仍使用 CDN，離線或內網封鎖時可能影響功能。
 - 已在 V4 將富文本核心由舊式 `document.execCommand` 調整為 Selection/Range API：加粗、顏色、字號、列表、清除格式與各類 HTML 模塊插入不再依賴 execCommand。
+- 已在 V5 移除正式首頁與主文件中的舊版 data.js/lib 操作提示與可見入口，改用「數據管理 → 完整 JSON 備份 / Supabase 同步」。
+- 已在 V5 修復趨勢圖插入與定位：不再使用失效選區定位、不再用 `last-of-type` 猜測最新圖表、插入後會以實際回傳節點作為滾動錨點。
+- 已在 V5 加入應用內多人協作權限：owner/admin/operator；數據管理僅 owner/admin 可進入；只有 owner 可刪除「月報編輯」項次；所有已登入用戶可同步最新與保存修改。
