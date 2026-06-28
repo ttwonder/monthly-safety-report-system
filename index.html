@@ -4109,7 +4109,6 @@
                 const expectedRevision = Number.isFinite(Number(config.cloudRevision)) ? Number(config.cloudRevision) : null;
                 const data = await v4CloudRequest('rpc/upsert_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey, p_payload: payload, p_expected_revision: expectedRevision, p_saved_by: actor.name });
                 if (data && data.conflict) {
-                    v6SaveCloudMetaToConfig(config, data);
                     const msg = v6ConflictMessage(data);
                     v4SetCloudRuntimeStatus(msg, 'error');
                     if (!silent) alert(msg);
@@ -4231,6 +4230,35 @@
                 console.error(err);
                 v4SetCloudRuntimeStatus('自動同步失敗：' + err.message, 'error');
                 if (!silent) alert('同步最新失敗：' + err.message);
+                return false;
+            }
+        }
+
+        async function v4CheckCloudRevision(options = {}) {
+            const silent = options.silent !== false;
+            if (V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return false;
+            const config = v4GetCloudConfig();
+            if (!v4ConfigReady(config)) return false;
+            try {
+                const data = await v4CloudRequest('rpc/get_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey });
+                if (!data || !data.payload) return false;
+                const remoteRev = Number(data.revision);
+                const localRev = Number(config.cloudRevision);
+                const remoteTime = data.updated_at || '';
+                const localTime = config.lastCloudUpdatedAt || '';
+                const hasNewRevision = Number.isFinite(remoteRev) && Number.isFinite(localRev) && remoteRev > localRev;
+                const hasNewTime = !Number.isFinite(remoteRev) && remoteTime && localTime && remoteTime !== localTime;
+                if (hasNewRevision || hasNewTime) {
+                    const who = data.updated_by ? `，最後保存者：${data.updated_by}` : '';
+                    const rev = Number.isFinite(remoteRev) ? `版本 ${remoteRev}` : '新版本';
+                    v4SetCloudRuntimeStatus(`雲端有${rev}${who}。為避免打斷輸入，系統沒有自動刷新；請需要時按「同步最新」。`, 'warn');
+                    return true;
+                }
+                if (!silent) v4SetCloudRuntimeStatus(`已檢查雲端：目前沒有新版本｜本機版本 ${config.cloudRevision || '—'}`, 'ok');
+                return false;
+            } catch (err) {
+                console.warn('cloud revision check failed', err);
+                if (!silent) v4SetCloudRuntimeStatus('雲端版本檢查失敗：' + err.message, 'error');
                 return false;
             }
         }
@@ -4384,13 +4412,14 @@
 
         function v4SetupAutoRefresh() {
             if (V4_SYNC_INTERVAL_ID) return;
-            const syncIfSafe = () => {
+            const checkIfSafe = () => {
                 if (document.hidden || V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return;
-                v4AutoSyncLatestFromCloud({ silent: true, auto: true, source: '正在刷新雲端最新資料...' });
+                // 推薦模式：背景只檢查版本，不自動套用雲端資料，避免刷新頁面和跳走光標。
+                v4CheckCloudRevision({ silent: true });
             };
-            window.addEventListener('focus', syncIfSafe);
-            document.addEventListener('visibilitychange', () => { if (!document.hidden) syncIfSafe(); });
-            V4_SYNC_INTERVAL_ID = setInterval(syncIfSafe, 60000);
+            window.addEventListener('focus', checkIfSafe);
+            document.addEventListener('visibilitychange', () => { if (!document.hidden) checkIfSafe(); });
+            V4_SYNC_INTERVAL_ID = setInterval(checkIfSafe, 300000);
         }
 
         function v4ExportLocalBundleJson() {
