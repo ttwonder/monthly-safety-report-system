@@ -36,13 +36,13 @@ index.html
 4. 到 Project Settings → API，取得：
    - Project URL
    - anon public key
-5. 打開系統的「數據管理」。
-6. 填入 Project URL、anon public key。
-7. 點「生成 Key」建立 Workspace Key，請妥善保存。
-8. 點「保存設定」。
-9. 點「測試連線」。
-10. 第一次多人協作前，在「數據管理」建立第一個 owner。
-11. 點「保存修改 / 上傳雲端」，把資料與用戶設定保存到 Supabase。
+5. 若要所有使用者打開網址即自動同步，請在 repo 內的 `supabase-config.js` 填入：
+   - Project URL
+   - anon public key
+   - 共用 Workspace Key
+6. 打開系統後會自動同步雲端資料。
+7. 第一次多人協作前，在「數據管理」建立第一個 owner。
+8. 建立 owner 後系統會自動保存；也可點「保存修改 / 上傳雲端」手動確認。
 
 ## 3. GitHub Pages 部署
 

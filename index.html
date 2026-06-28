@@ -13,6 +13,8 @@
     
     <!-- Chart.js 動態趨勢圖 -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
+    <script src="./supabase-config.js"></script>
 
     
     <!-- 系統保留節點 -->
@@ -1491,7 +1493,10 @@
                     globalFontZh: fontZhVal,
                     timestamp: explicitTimestamp || Date.now() 
                 });
-                transaction.oncomplete = () => resolve();
+                transaction.oncomplete = () => {
+                    if (typeof v4QueueAutoSave === 'function') v4QueueAutoSave('月報編輯');
+                    resolve();
+                };
                 transaction.onerror = (e) => reject(e);
             });
         }
@@ -3290,7 +3295,10 @@
                 const tx = db.transaction([STORE_NAME], 'readwrite');
                 const store = tx.objectStore(STORE_NAME);
                 store.put({ id: V2_RECORD_STORE_ID, data: v2RecordsCache, title: 'V2資料記錄庫', timestamp: Date.now() });
-                tx.oncomplete = () => resolve();
+                tx.oncomplete = () => {
+                    if (typeof v4QueueAutoSave === 'function') v4QueueAutoSave('資料記錄');
+                    resolve();
+                };
                 tx.onerror = (e) => reject(e);
             });
         }
@@ -3798,13 +3806,61 @@
         // === V4 Supabase / GitHub Pages 雲端同步準備 ===
         const V4_CLOUD_CONFIG_KEY = 'monthly_report_v4_cloud_config';
         const V4_CLOUD_TABLE = 'monthly_report_cloud_data';
+        let V4_CLOUD_APPLYING = false;
+        let V4_CLOUD_SAVING = false;
+        let V4_AUTO_SAVE_TIMER = null;
+        let V4_STARTUP_SYNC_DONE = false;
+        let V4_SYNC_INTERVAL_ID = null;
+        let V4_CLOUD_STATUS_TEXT = '正在初始化雲端同步...';
+        let V4_CLOUD_STATUS_KIND = 'muted';
+
+        function v4GetDefaultCloudConfig() {
+            const cfg = window.MONTHLY_REPORT_SUPABASE_CONFIG || {};
+            return {
+                supabaseUrl: String(cfg.supabaseUrl || cfg.url || 'https://pgkemqnqhtfssxeodavu.supabase.co').trim().replace(/\/$/, ''),
+                anonKey: String(cfg.anonKey || cfg.anon || '').trim(),
+                workspaceKey: String(cfg.workspaceKey || cfg.workspace || '').trim(),
+                autoSyncOnOpen: cfg.autoSyncOnOpen !== false,
+                autoSave: cfg.autoSave !== false,
+                autoSaveDelayMs: Number(cfg.autoSaveDelayMs || 2500) || 2500,
+                lastCloudUpdatedAt: '',
+                lastSyncAt: ''
+            };
+        }
 
         function v4GetCloudConfig() {
+            const base = v4GetDefaultCloudConfig();
             try {
-                return Object.assign({ supabaseUrl: '', anonKey: '', workspaceKey: '', lastCloudUpdatedAt: '', lastSyncAt: '' }, JSON.parse(localStorage.getItem(V4_CLOUD_CONFIG_KEY) || '{}'));
+                const saved = JSON.parse(localStorage.getItem(V4_CLOUD_CONFIG_KEY) || '{}');
+                ['supabaseUrl','anonKey','workspaceKey','lastCloudUpdatedAt','lastSyncAt'].forEach(key => {
+                    if (String(saved[key] || '').trim()) base[key] = String(saved[key]).trim();
+                });
+                if (typeof saved.autoSyncOnOpen === 'boolean') base.autoSyncOnOpen = saved.autoSyncOnOpen;
+                if (typeof saved.autoSave === 'boolean') base.autoSave = saved.autoSave;
+                if (Number(saved.autoSaveDelayMs)) base.autoSaveDelayMs = Number(saved.autoSaveDelayMs);
+                base.supabaseUrl = base.supabaseUrl.replace(/\/$/, '');
+                return base;
             } catch {
-                return { supabaseUrl: '', anonKey: '', workspaceKey: '', lastCloudUpdatedAt: '', lastSyncAt: '' };
+                return base;
             }
+        }
+
+        function v4SetCloudRuntimeStatus(text, kind = 'muted') {
+            V4_CLOUD_STATUS_TEXT = text || '';
+            V4_CLOUD_STATUS_KIND = kind;
+            const el = document.getElementById('v4-cloud-runtime-status');
+            if (el) {
+                el.textContent = V4_CLOUD_STATUS_TEXT;
+                el.className = 'text-slate-500';
+                if (kind === 'ok') el.className = 'text-emerald-700 font-bold';
+                if (kind === 'warn') el.className = 'text-amber-700 font-bold';
+                if (kind === 'error') el.className = 'text-rose-700 font-bold';
+            }
+        }
+
+        function v4CloudStatusHtml() {
+            const cls = V4_CLOUD_STATUS_KIND === 'ok' ? 'text-emerald-700 font-bold' : V4_CLOUD_STATUS_KIND === 'warn' ? 'text-amber-700 font-bold' : V4_CLOUD_STATUS_KIND === 'error' ? 'text-rose-700 font-bold' : 'text-slate-500';
+            return `<span id="v4-cloud-runtime-status" class="${cls}">${v2RecordText(V4_CLOUD_STATUS_TEXT)}</span>`;
         }
 
         function v4SaveCloudConfigFromForm() {
@@ -3847,6 +3903,9 @@
             let data = null;
             try { data = text ? JSON.parse(text) : null; } catch { data = text; }
             if (!res.ok) throw new Error(typeof data === 'string' ? data : (data && (data.message || data.details)) || `HTTP ${res.status}`);
+            // Supabase RPC returning TABLE comes back as [{ payload, updated_at }].
+            // Normalize it so sync code can consistently use data.payload / data.updated_at.
+            if (Array.isArray(data) && data.length === 1 && data[0] && Object.prototype.hasOwnProperty.call(data[0], 'payload')) return data[0];
             return data;
         }
 
@@ -3875,44 +3934,62 @@
             };
         }
 
-        async function v4ApplyCloudBundle(bundle, sourceLabel = '雲端') {
+        async function v4ApplyCloudBundle(bundle, sourceLabel = '雲端', options = {}) {
             if (!bundle || !bundle.report || !Array.isArray(bundle.report.modules)) throw new Error('資料格式不正確');
-            window.currentFileId = bundle.fileId || window.currentFileId || ('report_' + Date.now());
-            localStorage.setItem('safety_report_file_id', window.currentFileId);
-            reportData = normalizeData(bundle.report.modules);
-            document.getElementById('mainTitle').innerText = bundle.report.title || '月度安全會議報告';
-            document.getElementById('reportDate').value = bundle.report.date || new Date().toISOString().slice(0,10);
-            if (bundle.report.period) {
-                document.getElementById('startMonth').value = bundle.report.period.startM || document.getElementById('startMonth').value;
-                document.getElementById('startDay').value = bundle.report.period.startD || document.getElementById('startDay').value;
-                document.getElementById('endMonth').value = bundle.report.period.endM || document.getElementById('endMonth').value;
-                document.getElementById('endDay').value = bundle.report.period.endD || document.getElementById('endDay').value;
+            V4_CLOUD_APPLYING = true;
+            try {
+                window.currentFileId = bundle.fileId || window.currentFileId || ('report_' + Date.now());
+                localStorage.setItem('safety_report_file_id', window.currentFileId);
+                reportData = normalizeData(bundle.report.modules);
+                document.getElementById('mainTitle').innerText = bundle.report.title || '月度安全會議報告';
+                document.getElementById('reportDate').value = bundle.report.date || new Date().toISOString().slice(0,10);
+                if (bundle.report.period) {
+                    document.getElementById('startMonth').value = bundle.report.period.startM || document.getElementById('startMonth').value;
+                    document.getElementById('startDay').value = bundle.report.period.startD || document.getElementById('startDay').value;
+                    document.getElementById('endMonth').value = bundle.report.period.endM || document.getElementById('endMonth').value;
+                    document.getElementById('endDay').value = bundle.report.period.endD || document.getElementById('endDay').value;
+                }
+                await saveToDB(reportData, Date.now());
+                if (bundle.records) await saveV2Records(Object.assign(v2BlankRecords(), bundle.records));
+                if (Array.isArray(bundle.users)) v5SetUsers(bundle.users);
+                v2RecordsCache = null;
+                renderTable();
+                renderV1ModuleLibrary();
+                renderV1PdfCenter();
+                renderV1RecordsPane();
+                renderV3TrendPane();
+                renderV5SessionBar();
+                if (!options.silent) showToast(`已套用${sourceLabel}資料`);
+            } finally {
+                V4_CLOUD_APPLYING = false;
             }
-            await saveToDB(reportData, Date.now());
-            if (bundle.records) await saveV2Records(Object.assign(v2BlankRecords(), bundle.records));
-            if (Array.isArray(bundle.users)) v5SetUsers(bundle.users);
-            v2RecordsCache = null;
-            renderTable();
-            renderV1ModuleLibrary();
-            renderV1PdfCenter();
-            renderV1RecordsPane();
-            renderV3TrendPane();
-            showToast(`已套用${sourceLabel}資料`);
         }
 
-        async function v4UploadToCloud() {
+        async function v4UploadToCloud(options = {}) {
+            const silent = options.silent === true;
+            if (V4_CLOUD_SAVING) return false;
             try {
                 const config = v4GetCloudConfig();
+                if (!v4ConfigReady(config)) throw new Error('請先填寫 Supabase URL、anon key、Workspace Key');
+                V4_CLOUD_SAVING = true;
+                v4SetCloudRuntimeStatus(silent ? '正在自動保存到雲端...' : '正在保存到雲端...', 'muted');
                 const payload = await v4BuildCloudBundle();
                 const data = await v4CloudRequest('rpc/upsert_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey, p_payload: payload });
                 config.lastSyncAt = new Date().toISOString();
                 config.lastCloudUpdatedAt = data && data.updated_at ? data.updated_at : config.lastSyncAt;
                 localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
-                showToast('已上傳到 Supabase 雲端');
+                v4SetCloudRuntimeStatus(`雲端已保存：${v4FmtTime(config.lastSyncAt)}`, 'ok');
+                if (!silent) showToast('已保存到 Supabase 雲端');
                 renderV4CloudPane();
+                renderV5SessionBar();
+                return true;
             } catch (err) {
                 console.error(err);
-                alert('上傳失敗：' + err.message);
+                v4SetCloudRuntimeStatus('雲端保存失敗：' + err.message, 'error');
+                if (!silent) alert('保存失敗：' + err.message);
+                return false;
+            } finally {
+                V4_CLOUD_SAVING = false;
             }
         }
 
@@ -3944,6 +4021,82 @@
                 console.error(err);
                 alert('連線測試失敗：' + err.message + '\n\n請確認 SQL 已建立、URL/anon key 正確、RLS policy 已啟用。');
             }
+        }
+
+
+        function v4QueueAutoSave(reason = '修改') {
+            if (V4_CLOUD_APPLYING || V4_CLOUD_SAVING) return;
+            const config = v4GetCloudConfig();
+            if (!v4ConfigReady(config)) {
+                v4SetCloudRuntimeStatus('本機已保存；雲端未配置，尚未同步。', 'warn');
+                return;
+            }
+            if (config.autoSave === false) {
+                v4SetCloudRuntimeStatus('本機已保存；自動雲端保存已關閉。', 'warn');
+                return;
+            }
+            if (!v5CurrentUser()) {
+                v4SetCloudRuntimeStatus('本機已保存；未登入，暫不自動保存到雲端。', 'warn');
+                return;
+            }
+            clearTimeout(V4_AUTO_SAVE_TIMER);
+            const delay = Math.max(800, Number(config.autoSaveDelayMs || 2500));
+            v4SetCloudRuntimeStatus(`${reason}已更新，${Math.round(delay/1000)} 秒後自動保存到雲端...`, 'muted');
+            V4_AUTO_SAVE_TIMER = setTimeout(() => {
+                V4_AUTO_SAVE_TIMER = null;
+                v4UploadToCloud({ silent: true, reason });
+            }, delay);
+        }
+
+        async function v4AutoSyncLatestFromCloud(options = {}) {
+            const silent = options.silent !== false;
+            if (V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return false;
+            const config = v4GetCloudConfig();
+            if (!v4ConfigReady(config)) {
+                v4SetCloudRuntimeStatus('雲端未配置：請在數據管理填入 Supabase 設定。', 'warn');
+                return false;
+            }
+            try {
+                v4SetCloudRuntimeStatus(options.source || '正在自動同步雲端資料...', 'muted');
+                const data = await v4CloudRequest('rpc/get_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey });
+                if (!data || !data.payload) {
+                    v4SetCloudRuntimeStatus('雲端尚無資料；請 owner 先保存一次。', 'warn');
+                    return false;
+                }
+                await v4ApplyCloudBundle(data.payload, '雲端最新', { silent: true });
+                config.lastCloudUpdatedAt = data.updated_at || '';
+                config.lastSyncAt = new Date().toISOString();
+                localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
+                v4SetCloudRuntimeStatus(`已自動同步雲端：${v4FmtTime(config.lastSyncAt)}`, 'ok');
+                renderV4CloudPane();
+                renderV5SessionBar();
+                if (!silent) showToast('已同步最新資料');
+                return true;
+            } catch (err) {
+                console.error(err);
+                v4SetCloudRuntimeStatus('自動同步失敗：' + err.message, 'error');
+                if (!silent) alert('同步最新失敗：' + err.message);
+                return false;
+            }
+        }
+
+        async function v4AutoSyncOnStartup() {
+            if (V4_STARTUP_SYNC_DONE) return;
+            V4_STARTUP_SYNC_DONE = true;
+            const config = v4GetCloudConfig();
+            if (config.autoSyncOnOpen === false) return;
+            await v4AutoSyncLatestFromCloud({ silent: true, source: '打開系統，自動同步雲端資料...' });
+        }
+
+        function v4SetupAutoRefresh() {
+            if (V4_SYNC_INTERVAL_ID) return;
+            const syncIfSafe = () => {
+                if (document.hidden || V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return;
+                v4AutoSyncLatestFromCloud({ silent: true, source: '正在刷新雲端最新資料...' });
+            };
+            window.addEventListener('focus', syncIfSafe);
+            document.addEventListener('visibilitychange', () => { if (!document.hidden) syncIfSafe(); });
+            V4_SYNC_INTERVAL_ID = setInterval(syncIfSafe, 60000);
         }
 
         function v4ExportLocalBundleJson() {
@@ -4003,6 +4156,7 @@
                         </section>
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
+                            <div class="text-xs text-slate-500 mb-2">系統會在打開、回到頁面時自動同步；修改後會自動保存到 Supabase。下面按鈕保留給手動確認使用。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn v1-primary-btn" onclick="v4UploadToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>上傳本機到雲端</button>
                                 <button class="v1-small-btn" onclick="v4DownloadFromCloud()"><i class="fas fa-cloud-arrow-down mr-1"></i>下載雲端覆蓋本機</button>
@@ -4090,9 +4244,12 @@
             const passwordHash = await v5HashPassword(password);
             const idx = users.findIndex(u => u.username === username);
             const next = v5SafeUser({ username, displayName, role, passwordHash, createdAt: idx >= 0 ? users[idx].createdAt : new Date().toISOString() });
+            const wasFirstUser = users.length === 0;
             if (idx >= 0) users[idx] = next; else users.push(next);
             v5SetUsers(users);
-            showToast(users.length === 1 && role === 'owner' ? 'Owner 已建立' : '用戶已保存');
+            if (wasFirstUser) v5SetSession(next);
+            showToast(wasFirstUser ? 'Owner 已建立，正在保存到雲端' : '用戶已保存，正在保存到雲端');
+            v4QueueAutoSave('用戶權限');
             renderV4CloudPane();
         }
         function v5DeleteUser(username) {
@@ -4103,6 +4260,7 @@
             if (target.role === 'owner') return alert('不能刪除 owner。');
             if (!confirm(`確定刪除用戶 ${username}？`)) return;
             v5SetUsers(users.filter(u => u.username !== username));
+            v4QueueAutoSave('用戶權限');
             renderV4CloudPane();
         }
         async function v5Login() {
@@ -4117,23 +4275,16 @@
         }
         function v5Logout() { v5SetSession(null); showToast('已登出'); }
         async function v5SyncLatest() {
-            try {
-                const config = v4GetCloudConfig();
-                const data = await v4CloudRequest('rpc/get_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey });
-                if (!data || !data.payload) { alert('雲端沒有找到此 Workspace Key 的資料。'); return; }
-                await v4ApplyCloudBundle(data.payload, '雲端最新');
-                config.lastCloudUpdatedAt = data.updated_at || '';
-                config.lastSyncAt = new Date().toISOString();
-                localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
-                showToast('已同步最新資料');
-                renderV4CloudPane();
-            } catch (err) { console.error(err); alert('同步最新失敗：' + err.message); }
+            await v4AutoSyncLatestFromCloud({ silent: false, source: '正在同步最新雲端資料...' });
         }
         async function v5SaveChangesToCloud() {
             if (!v5RequireLogin('請先登入後再保存修改。')) return;
-            await v4UploadToCloud();
+            clearTimeout(V4_AUTO_SAVE_TIMER);
+            V4_AUTO_SAVE_TIMER = null;
+            await v4UploadToCloud({ silent: false, reason: '手動保存' });
             renderV5SessionBar();
         }
+
         function renderV5SessionBar() {
             const root = document.getElementById('v5TopStatus');
             if (!root) return;
@@ -4146,7 +4297,7 @@
                     <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
                     <button class="v5-sync-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改</button>
                     <button class="v5-sync-btn" onclick="v5Logout()">登出</button>
-                    <span class="text-slate-500">${configReady ? '雲端已配置' : '尚未配置 Supabase'}</span>
+                    ${v4CloudStatusHtml()}
                 </div>` : `
                 <div class="v5-session-bar">
                     <span class="v5-role-pill"><i class="fas fa-lock"></i>${users.length ? '未登入' : '尚未建立 owner'}</span>
@@ -4154,7 +4305,7 @@
                     <input id="v5-login-password" type="password" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="密碼" onkeydown="if(event.key==='Enter') v5Login()">
                     <button class="v5-sync-btn" onclick="v5Login()">登入</button>
                     <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
-                    <span class="text-slate-500">${users.length ? '登入後可保存修改' : '請到數據管理建立 owner'}</span>
+                    ${v4CloudStatusHtml()}
                 </div>`;
         }
         function v5UserAdminHtml() {
@@ -4189,7 +4340,7 @@
             root.innerHTML = `
                 <div class="v1-page-card">
                     <h2 class="v1-page-title"><i class="fas fa-shield-halved mr-2"></i>數據管理</h2>
-                    <div class="v1-page-subtitle">V5：多人協作、應用內帳號密碼、權限管理與雲端同步。無需 Supabase email confirmation。</div>
+                    <div class="v1-page-subtitle">V5：雲端資料為準；打開系統會自動同步 Supabase，操作員修改後會自動保存，也可手動同步 / 保存。</div>
                     ${!canManage && v5GetUsers().length ? '<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>' : `
                     <div class="v1-category-grid">
                         <section class="v1-category-card">
@@ -4212,6 +4363,7 @@
                         </section>
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
+                            <div class="text-xs text-slate-500 mb-2">系統會在打開、回到頁面時自動同步；修改後會自動保存到 Supabase。下面按鈕保留給手動確認使用。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn" onclick="v5SyncLatest()"><i class="fas fa-cloud-arrow-down mr-1"></i>同步最新 / 下載雲端</button>
                                 <button class="v1-small-btn v1-primary-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改 / 上傳雲端</button>
@@ -4221,12 +4373,17 @@
                         </section>
                     </div>
                     <div class="mt-3">${v5UserAdminHtml()}</div>
-                    <div class="v1-note-box mt-3"><b>安全說明：</b>此版本採用應用內帳號密碼，密碼以 SHA-256 hash 保存在雲端資料包內；不使用 Supabase email 登入。Workspace Key 仍需保密。</div>`}
+                    <div class="v1-note-box mt-3"><b>同步說明：</b>正式使用時 Supabase URL / anon public key / Workspace Key 應放在 <code>supabase-config.js</code>，大家打開同一網址會自動讀取同一份雲端資料。Workspace Key 仍需視為內部共享密鑰，請勿公開。</div>`}
                 </div>`;
         };
 
 
-        window.onload = async function() { await initApp(); setupV1Shell(); };
+        window.onload = async function() {
+            await initApp();
+            setupV1Shell();
+            await v4AutoSyncOnStartup();
+            v4SetupAutoRefresh();
+        };
     </script>
 </body>
 </html>
