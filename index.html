@@ -1063,21 +1063,9 @@
         .v1-pdf-index { width:24px; height:24px; border-radius:999px; background:#4f46e5; color:#fff; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:900; }
         .v1-pdf-columns { display:flex; gap:10px; align-items:stretch; }
         .v1-pdf-col { flex:1 1 0; min-width:0; }
-        .v1-editor-like-pdf { max-width: none; }
-        .v1-editor-pdf-head { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:10px; border-bottom:2px solid #c7d2fe; padding:10px 0 14px; margin-bottom:12px; color:#312e81; }
-        .v1-editor-pdf-head h1 { margin:0; text-align:center; font-size:24px; font-weight:900; color:#312e81; }
-        .v1-editor-pdf-period, .v1-editor-pdf-date { font-weight:800; font-size:13px; color:#4338ca; }
-        .v1-editor-pdf-date { text-align:right; }
-        .v1-editor-pdf-table { width:100%; border-collapse:collapse; table-layout:fixed; background:#fff; }
-        .v1-editor-pdf-table th { border:1px solid #c7d2fe; background:#f8fafc; color:#1e293b; padding:8px; text-align:center; font-weight:900; }
-        .v1-editor-pdf-table td { border:1px solid #c7d2fe; vertical-align:top; padding:8px; }
-        .v1-editor-pdf-index-col { width:64px; }
-        .v1-editor-pdf-title-col { width:190px; }
-        .v1-editor-pdf-index-cell { text-align:center; background:#eef2ff55; }
-        .v1-editor-pdf-index-wrap { display:flex; flex-direction:column; gap:8px; align-items:center; justify-content:center; min-height:80px; color:#312e81; }
-        .v1-editor-pdf-title-cell { color:#3730a3; }
-        .v1-editor-pdf-content-cell { min-width:0; }
-        .v1-editor-pdf-content-cell .editable-div { outline:none !important; }
+        .v1-selected-editor-print-clone { width: 100%; max-width: none; box-shadow: none; }
+        .v1-preview-shell .v1-selected-editor-print-clone { min-width: 980px; transform-origin: top left; }
+        #pdfPrintArea .v1-selected-editor-print-clone { width: 100%; }
         .v1-empty-state { color:#94a3b8; text-align:center; padding:24px; border:1px dashed #cbd5e1; border-radius:12px; background:#fff; }
         .v1-history-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
         .v1-note-box { border-left:4px solid #8b5cf6; background:#faf5ff; color:#5b21b6; padding:10px 12px; border-radius:8px; font-size:13px; }
@@ -1102,9 +1090,9 @@
             pointer-events: none !important;
             z-index: -1 !important;
         }
-        body.pdf-render-prep #pdfPrintArea .v1-pdf-paper {
-            width: 980px !important;
-            max-width: 980px !important;
+        body.pdf-render-prep #pdfPrintArea .v1-selected-editor-print-clone {
+            width: 1100px !important;
+            max-width: 1100px !important;
             box-shadow: none !important;
         }
         body.pdf-render-prep #pdfPrintArea .chart-table-area { display: block !important; }
@@ -1124,6 +1112,7 @@
             body.pdf-print-mode .v1-pdf-paper { max-width:none !important; width:100% !important; box-shadow:none !important; border-radius:0 !important; padding:0 !important; }
             body.pdf-print-mode .v1-pdf-cover { margin-top:0 !important; }
             body.pdf-print-mode .no-print { display:none !important; }
+            body.pdf-print-mode #pdfPrintArea .chart-table-area { display:block !important; }
             body.pdf-print-mode .v1-pdf-module { page-break-inside: avoid !important; break-inside: avoid !important; }
             body.pdf-print-mode .v1-pdf-toc ol { columns:2; }
         }
@@ -3350,64 +3339,50 @@
         }
 
         function buildV1PdfHtml() {
+            return buildV1EditorPrintCloneHtml();
+        }
+
+        function buildV1EditorPrintCloneHtml() {
             const selected = v1GetSelectedModules();
-            const title = document.getElementById('mainTitle')?.innerText || '月度安全會議報告';
-            const date = document.getElementById('reportDate')?.value || '';
-            const period = `${document.getElementById('startMonth')?.value || ''}/${String(document.getElementById('startDay')?.value || '').padStart(2,'0')} - ${document.getElementById('endMonth')?.value || ''}/${String(document.getElementById('endDay')?.value || '').padStart(2,'0')}`;
             if (!selected.length) {
-                return `<div class="v1-pdf-paper v1-editor-like-pdf"><div class="v1-empty-state">尚未勾選任何模塊，請先在左側或「模塊庫」選擇要輸出的內容。</div></div>`;
+                return `<div class="v1-empty-state">尚未勾選任何模塊，請先在左側或「模塊庫」選擇要輸出的內容。</div>`;
             }
-            return `
-                <article class="v1-pdf-paper v1-editor-like-pdf">
-                    <section class="v1-editor-pdf-head">
-                        <div class="v1-editor-pdf-period"><i class="fas fa-calendar mr-1"></i>區間：${period}</div>
-                        <h1>${title}</h1>
-                        <div class="v1-editor-pdf-date"><i class="far fa-clock mr-1"></i>報告時間：${date}</div>
-                    </section>
-                    <table class="v1-editor-pdf-table">
-                        <thead>
-                            <tr>
-                                <th class="v1-editor-pdf-index-col">項次</th>
-                                <th class="v1-editor-pdf-title-col">報告條目</th>
-                                <th>具體報告內容</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${selected.map((x, i) => buildV1PdfModuleHtml(x.item, i + 1)).join('')}
-                        </tbody>
-                    </table>
-                </article>
-            `;
+            const source = document.getElementById('reportContainer');
+            if (!source) return `<div class="v1-empty-state">找不到月報編輯版面。</div>`;
+            const clone = source.cloneNode(true);
+            clone.classList.add('v1-selected-editor-print-clone');
+            clone.querySelectorAll('[contenteditable="true"]').forEach(el => el.removeAttribute('contenteditable'));
+            clone.querySelectorAll('.no-print:not(.chart-table-area)').forEach(el => el.remove());
+            const selectedIndexes = selected.map(x => x.index);
+            const selectedIndexSet = new Set(selectedIndexes.map(String));
+            const tbody = clone.querySelector('#tableBody');
+            if (tbody) {
+                const rowsByIndex = new Map(Array.from(tbody.querySelectorAll('tr[data-index]')).map(row => [String(row.dataset.index), row]));
+                tbody.innerHTML = '';
+                selectedIndexes.forEach((idx, order) => {
+                    const row = rowsByIndex.get(String(idx));
+                    if (!row) return;
+                    row.dataset.pdfSelectedOrder = String(order + 1);
+                    const input = row.querySelector('.no-print-input input');
+                    if (input) input.value = order + 1;
+                    const printOnly = row.querySelector('.print-only');
+                    if (printOnly) printOnly.textContent = String(order + 1);
+                    tbody.appendChild(row);
+                });
+                Array.from(tbody.querySelectorAll('tr[data-index]')).forEach(row => {
+                    if (!selectedIndexSet.has(String(row.dataset.index))) row.remove();
+                });
+            }
+            // 避免預覽中的重複 id 影響主畫面取值；列印樣式不依賴這些子 id。
+            clone.querySelectorAll('[id]').forEach(el => {
+                if (el.id !== 'reportContainer') el.setAttribute('data-cloned-id', el.id);
+                if (el.id !== 'reportContainer') el.removeAttribute('id');
+            });
+            return clone.outerHTML;
         }
 
         function buildV1PdfModuleHtml(item, displayIndex) {
-            const columns = Array.isArray(item.columns) ? item.columns : (item.columns ? [item.columns] : ['']);
-            const layoutParts = String(item.colLayout || '1').split(':').map(v => Math.max(1, Number(v) || 1));
-            const iconClass = item.icon || 'fas fa-angle-right';
-            const iconColor = item.iconColor || '#4f46e5';
-            const columnsHtml = `
-                <div class="flex flex-col sm:flex-row gap-3 w-full h-full items-stretch v1-editor-pdf-columns">
-                    ${columns.map((col, idx) => {
-                        const flexGrow = layoutParts[idx] || 1;
-                        const borderClass = idx > 0 ? 'sm:border-l sm:border-indigo-100 sm:pl-3' : '';
-                        return `<div class="${borderClass} flex flex-col" style="flex:${flexGrow} ${flexGrow} 0%; min-width:0;"><div class="editable-div w-full flex-1">${col || ''}</div></div>`;
-                    }).join('')}
-                </div>`;
-            return `
-                <tr class="v1-editor-pdf-row">
-                    <td class="v1-editor-pdf-index-cell">
-                        <div class="v1-editor-pdf-index-wrap">
-                            <b>${displayIndex}</b>
-                            <i class="${iconClass}" style="color:${iconColor}"></i>
-                        </div>
-                    </td>
-                    <td class="v1-editor-pdf-title-cell">
-                        <div class="font-bold text-indigo-800 text-base">${item.title || '未命名模塊'}</div>
-                        ${item.attachments && item.attachments.length ? `<div class="text-xs text-gray-500 mt-1">附件：${item.attachments.map(a => v1EscapeAttr(a.name)).join('、')}</div>` : ''}
-                    </td>
-                    <td class="v1-editor-pdf-content-cell">${columnsHtml}</td>
-                </tr>
-            `;
+            return '';
         }
 
         function waitForV1PdfCharts(timeoutMs = 900) {
