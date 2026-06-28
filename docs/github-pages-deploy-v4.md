@@ -14,7 +14,7 @@ index.html
 月度安全會議報告-v4.html
 ```
 
-> 文件名保留 v4 以免破壞既有連結；目前實際功能版本為 V5。
+> 文件名保留 v4 以免破壞既有連結；目前實際功能版本為 V6。
 
 建議 GitHub repo 結構：
 
@@ -24,6 +24,7 @@ index.html
 ├─ 月度安全會議報告-v4.html
 ├─ docs/
 │  ├─ supabase-schema-v4.sql
+│  ├─ supabase-schema-v6.sql
 │  └─ github-pages-deploy-v4.md
 └─ archive/
 ```
@@ -32,7 +33,7 @@ index.html
 
 1. 到 https://supabase.com 建立免費 project。
 2. 打開 SQL Editor。
-3. 複製 `docs/supabase-schema-v4.sql` 全文並執行。
+3. 複製 `docs/supabase-schema-v6.sql` 全文並執行。這一步是 V6 必須項，會建立 revision、保存歷史與區塊鎖 RPC。
 4. 到 Project Settings → API，取得：
    - Project URL
    - anon public key
@@ -56,11 +57,10 @@ index.html
 
 ## 4. 多人協作使用方式
 
-- A 使用者修改前：先點「同步最新」。
-- 修改後：登入狀態下點「保存修改」。
-- B 使用者打開後：先點「同步最新」。
-
-目前是共享資料包同步，不是 Google Docs 式即時多人共同編輯；若兩人同時修改，最後保存的人會覆蓋雲端版本。
+- 打開系統會自動同步最新雲端資料，並記錄當前 revision。
+- 修改後會自動保存；保存前會檢查雲端 revision 是否仍一致。
+- 如果其他人已先保存，系統會阻止覆蓋並提示先「同步最新」。
+- 進入主要工作區塊時會取得區塊軟鎖；其他人看到鎖定提示時只能查看，鎖會定時續期並在過期後自動釋放。
 
 ## 5. 權限
 

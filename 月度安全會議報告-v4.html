@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>月度安全會議報告 V5</title>
+    <title>月度安全會議報告 V6</title>
     <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- SheetJS for Excel Import/Export -->
@@ -2826,7 +2826,7 @@
                 <button class="v1-tab-btn" data-v1-tab="records" onclick="switchV1Tab('records')"><i class="fas fa-database mr-1"></i>資料記錄</button>
                 <button class="v1-tab-btn" data-v1-tab="trends" onclick="switchV1Tab('trends')"><i class="fas fa-chart-line mr-1"></i>KPI / 趨勢 V3</button>
                 <button class="v1-tab-btn" data-v1-tab="cloud" onclick="switchV1Tab('cloud')"><i class="fas fa-shield-halved mr-1"></i>數據管理</button>
-                <span class="ml-auto text-xs text-indigo-700 font-bold px-2">V5：多人協作 / 權限管理 / 穩定趨勢圖</span>
+                <span class="ml-auto text-xs text-indigo-700 font-bold px-2">V6：多人協作安全 / 區塊鎖 / 防覆蓋</span>
             `;
 
             const editor = document.createElement('div');
@@ -2885,6 +2885,8 @@
             }
             const editor = document.getElementById('v1-editor-workspace');
             if (!editor) return;
+            if (V6_ACTIVE_TAB !== tab) v6ReleaseCurrentLock();
+            V6_ACTIVE_TAB = tab;
             document.querySelectorAll('.v1-tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.v1Tab === tab));
             editor.classList.toggle('v1-workspace-hidden', tab !== 'editor');
             document.querySelectorAll('.v1-pane').forEach(pane => pane.classList.remove('active'));
@@ -2897,6 +2899,7 @@
             if (tab === 'trends') renderV3TrendPane();
             if (tab === 'cloud') renderV4CloudPane();
             renderV5SessionBar();
+            setTimeout(() => v6ClaimCurrentSectionLock({ silent: true }), 0);
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }
 
@@ -3616,6 +3619,7 @@
             `;
             renderV2StatsPanel();
             renderV2RecordWorkbench(v2ActiveRecordTab);
+            setTimeout(() => v6ClaimCurrentSectionLock({ silent: true }), 0);
         }
 
 
@@ -3814,6 +3818,11 @@
         let V4_AUTO_SAVE_TIMER = null;
         let V4_STARTUP_SYNC_DONE = false;
         let V4_SYNC_INTERVAL_ID = null;
+        let V6_ACTIVE_TAB = 'editor';
+        let V6_ACTIVE_LOCK_SECTION = '';
+        let V6_LOCK_TIMER = null;
+        let V6_LOCK_BLOCKED = false;
+        let V6_LOCK_OWNER_TEXT = '';
         let V4_CLOUD_STATUS_TEXT = '正在初始化雲端同步...';
         let V4_CLOUD_STATUS_KIND = 'muted';
 
@@ -3827,7 +3836,9 @@
                 autoSave: cfg.autoSave !== false,
                 autoSaveDelayMs: Number(cfg.autoSaveDelayMs || 2500) || 2500,
                 lastCloudUpdatedAt: '',
-                lastSyncAt: ''
+                lastSyncAt: '',
+                cloudRevision: null,
+                lastUpdatedBy: ''
             };
         }
 
@@ -3835,9 +3846,10 @@
             const base = v4GetDefaultCloudConfig();
             try {
                 const saved = JSON.parse(localStorage.getItem(V4_CLOUD_CONFIG_KEY) || '{}');
-                ['supabaseUrl','anonKey','workspaceKey','lastCloudUpdatedAt','lastSyncAt'].forEach(key => {
+                ['supabaseUrl','anonKey','workspaceKey','lastCloudUpdatedAt','lastSyncAt','lastUpdatedBy'].forEach(key => {
                     if (String(saved[key] || '').trim()) base[key] = String(saved[key]).trim();
                 });
+                if (Number.isFinite(Number(saved.cloudRevision))) base.cloudRevision = Number(saved.cloudRevision);
                 if (typeof saved.autoSyncOnOpen === 'boolean') base.autoSyncOnOpen = saved.autoSyncOnOpen;
                 if (typeof saved.autoSave === 'boolean') base.autoSave = saved.autoSave;
                 if (Number(saved.autoSaveDelayMs)) base.autoSaveDelayMs = Number(saved.autoSaveDelayMs);
@@ -3915,13 +3927,44 @@
             return data;
         }
 
+        function v6CurrentActor() {
+            const user = v5CurrentUser();
+            if (user) return {
+                id: String(user.username || 'user'),
+                name: String(user.displayName || user.username || '使用者')
+            };
+            let anon = localStorage.getItem('monthly_report_v6_actor_id');
+            if (!anon) {
+                anon = 'anon-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+                localStorage.setItem('monthly_report_v6_actor_id', anon);
+            }
+            return { id: anon, name: '未登入使用者' };
+        }
+
+        function v6SaveCloudMetaToConfig(config, data) {
+            if (!config || !data) return config;
+            if (Number.isFinite(Number(data.revision))) config.cloudRevision = Number(data.revision);
+            if (Number.isFinite(Number(data.latest_revision))) config.cloudRevision = Number(data.latest_revision);
+            config.lastCloudUpdatedAt = data.updated_at || data.latest_updated_at || config.lastCloudUpdatedAt || '';
+            config.lastUpdatedBy = data.updated_by || data.latest_updated_by || config.lastUpdatedBy || '';
+            config.lastSyncAt = new Date().toISOString();
+            localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
+            return config;
+        }
+
+        function v6ConflictMessage(data) {
+            const who = data?.latest_updated_by ? `，最後保存者：${data.latest_updated_by}` : '';
+            const rev = data?.latest_revision ? `，雲端版本：${data.latest_revision}` : '';
+            return `雲端資料已被其他人更新${who}${rev}。為避免覆蓋，請先按「同步最新」，確認內容後再保存。`;
+        }
+
         async function v4BuildCloudBundle() {
             if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
             await saveToDB(reportData, Date.now());
             const records = await loadV2Records();
             return {
                 app: 'monthly-safety-report-system',
-                version: 4,
+                version: 6,
                 exportedAt: new Date().toISOString(),
                 fileId: window.currentFileId,
                 report: {
@@ -3979,13 +4022,21 @@
                 if (!v4ConfigReady(config)) throw new Error('請先填寫 Supabase URL、anon key、Workspace Key');
                 V4_CLOUD_SAVING = true;
                 v4SetCloudRuntimeStatus(silent ? '正在自動保存到雲端...' : '正在保存到雲端...', 'muted');
+                if (V6_LOCK_BLOCKED) throw new Error('目前區塊被其他人鎖定，不能保存。');
+                const actor = v6CurrentActor();
                 const payload = await v4BuildCloudBundle();
-                const data = await v4CloudRequest('rpc/upsert_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey, p_payload: payload });
-                config.lastSyncAt = new Date().toISOString();
-                config.lastCloudUpdatedAt = data && data.updated_at ? data.updated_at : config.lastSyncAt;
-                localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
-                v4SetCloudRuntimeStatus(`雲端已保存：${v4FmtTime(config.lastSyncAt)}`, 'ok');
-                if (!silent) showToast('已保存到 Supabase 雲端');
+                const expectedRevision = Number.isFinite(Number(config.cloudRevision)) ? Number(config.cloudRevision) : null;
+                const data = await v4CloudRequest('rpc/upsert_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey, p_payload: payload, p_expected_revision: expectedRevision, p_saved_by: actor.name });
+                if (data && data.conflict) {
+                    v6SaveCloudMetaToConfig(config, data);
+                    const msg = v6ConflictMessage(data);
+                    v4SetCloudRuntimeStatus(msg, 'error');
+                    if (!silent) alert(msg);
+                    return false;
+                }
+                v6SaveCloudMetaToConfig(config, data || {});
+                v4SetCloudRuntimeStatus(`雲端已保存：${v4FmtTime(config.lastSyncAt)}｜版本 ${config.cloudRevision || '—'}`, 'ok');
+                if (!silent) showToast('已安全保存到 Supabase 雲端');
                 renderV4CloudPane();
                 renderV5SessionBar();
                 return true;
@@ -4006,9 +4057,7 @@
                 if (!data || !data.payload) { alert('雲端沒有找到此 Workspace Key 的資料。'); return; }
                 if (!confirm('確定用雲端資料覆蓋目前本機資料嗎？建議先在數據管理匯出完整 JSON 備份。')) return;
                 await v4ApplyCloudBundle(data.payload, '雲端');
-                config.lastCloudUpdatedAt = data.updated_at || '';
-                config.lastSyncAt = new Date().toISOString();
-                localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
+                v6SaveCloudMetaToConfig(config, data);
                 renderV4CloudPane();
             } catch (err) {
                 console.error(err);
@@ -4085,10 +4134,8 @@
                     return false;
                 }
                 await v4ApplyCloudBundle(data.payload, '雲端最新', { silent: true });
-                config.lastCloudUpdatedAt = data.updated_at || '';
-                config.lastSyncAt = new Date().toISOString();
-                localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
-                v4SetCloudRuntimeStatus(`已自動同步雲端：${v4FmtTime(config.lastSyncAt)}`, 'ok');
+                v6SaveCloudMetaToConfig(config, data);
+                v4SetCloudRuntimeStatus(`已自動同步雲端：${v4FmtTime(config.lastSyncAt)}｜版本 ${config.cloudRevision || '—'}`, 'ok');
                 renderV4CloudPane();
                 renderV5SessionBar();
                 if (!silent) showToast('已同步最新資料');
@@ -4107,6 +4154,145 @@
             const config = v4GetCloudConfig();
             if (config.autoSyncOnOpen === false) return;
             await v4AutoSyncLatestFromCloud({ silent: true, source: '打開系統，自動同步雲端資料...' });
+        }
+
+        function v6SectionLabel(sectionKey) {
+            const map = {
+                'editor': '月報編輯', 'modules': '模塊庫 / 勾選', 'pdf': 'PDF 輸出中心',
+                'history': '歷史 / 備份', 'trends': 'KPI / 趨勢', 'cloud': '數據管理',
+                'records:inspections': '資料記錄：檢查', 'records:deficiencies': '資料記錄：缺失 / 觀察',
+                'records:detentions': '資料記錄：PSC 滯留', 'records:actions': '資料記錄：行動項'
+            };
+            return map[sectionKey] || sectionKey || '目前區塊';
+        }
+
+        function v6CurrentSectionKey() {
+            return V6_ACTIVE_TAB === 'records' ? `records:${v2ActiveRecordTab || 'inspections'}` : V6_ACTIVE_TAB;
+        }
+
+        function v6SectionRoot(sectionKey = v6CurrentSectionKey()) {
+            if (!sectionKey) return null;
+            const tab = sectionKey.split(':')[0];
+            return tab === 'editor' ? document.getElementById('v1-editor-workspace') : document.getElementById(`v1-pane-${tab}`);
+        }
+
+        function v6ClearLockUi() {
+            const banner = document.getElementById('v6-lock-banner');
+            if (banner) banner.remove();
+            document.querySelectorAll('[data-v6-lock-disabled="1"]').forEach(el => {
+                el.disabled = el.dataset.v6PrevDisabled === '1';
+                delete el.dataset.v6LockDisabled;
+                delete el.dataset.v6PrevDisabled;
+            });
+            document.querySelectorAll('[data-v6-lock-contenteditable]').forEach(el => {
+                el.setAttribute('contenteditable', el.dataset.v6LockContenteditable || 'true');
+                delete el.dataset.v6LockContenteditable;
+            });
+        }
+
+        function v6ApplyLockUi(result) {
+            v6ClearLockUi();
+            if (!result || result.ok) {
+                V6_LOCK_BLOCKED = false;
+                V6_LOCK_OWNER_TEXT = '';
+                return;
+            }
+            V6_LOCK_BLOCKED = true;
+            V6_LOCK_OWNER_TEXT = result.locked_by_name || result.locked_by || '其他使用者';
+            const sectionKey = result.section_key || v6CurrentSectionKey();
+            const label = v6SectionLabel(sectionKey);
+            const banner = document.createElement('div');
+            banner.id = 'v6-lock-banner';
+            banner.className = 'no-print';
+            banner.style.cssText = 'margin:8px 12px;padding:10px 12px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;border-radius:10px;font-weight:800;font-size:13px;';
+            banner.textContent = `${label} 正由 ${V6_LOCK_OWNER_TEXT} 編輯，暫時只讀。請稍後或請對方保存/離開此區塊。`;
+            document.getElementById('v1TabsBar')?.insertAdjacentElement('afterend', banner);
+            const root = v6SectionRoot(sectionKey);
+            root?.querySelectorAll('input, textarea, select, button').forEach(el => {
+                if (el.closest('.v5-session-bar') || el.closest('#v6-lock-banner')) return;
+                el.dataset.v6PrevDisabled = el.disabled ? '1' : '0';
+                el.disabled = true;
+                el.dataset.v6LockDisabled = '1';
+            });
+            root?.querySelectorAll('[contenteditable="true"]').forEach(el => {
+                el.dataset.v6LockContenteditable = el.getAttribute('contenteditable') || 'true';
+                el.setAttribute('contenteditable', 'false');
+            });
+        }
+
+        async function v6ReleaseCurrentLock() {
+            const config = v4GetCloudConfig();
+            const actor = v6CurrentActor();
+            const section = V6_ACTIVE_LOCK_SECTION;
+            if (!section || !v4ConfigReady(config)) return;
+            try {
+                await v4CloudRequest('rpc/release_monthly_report_edit_lock', 'POST', { p_workspace_key: config.workspaceKey, p_section_key: section, p_locked_by: actor.id });
+            } catch (err) {
+                console.warn('release lock failed', err);
+            }
+            if (V6_ACTIVE_LOCK_SECTION === section) V6_ACTIVE_LOCK_SECTION = '';
+        }
+
+        async function v6ClaimCurrentSectionLock(options = {}) {
+            const user = v5CurrentUser();
+            const config = v4GetCloudConfig();
+            const section = v6CurrentSectionKey();
+            if (!user || !v4ConfigReady(config) || !section) {
+                v6ApplyLockUi({ ok: true });
+                return true;
+            }
+            const actor = v6CurrentActor();
+            try {
+                const data = await v4CloudRequest('rpc/claim_monthly_report_edit_lock', 'POST', {
+                    p_workspace_key: config.workspaceKey,
+                    p_section_key: section,
+                    p_locked_by: actor.id,
+                    p_locked_by_name: actor.name,
+                    p_ttl_seconds: 75
+                });
+                v6ApplyLockUi(data || { ok: true });
+                if (data && data.ok) {
+                    V6_ACTIVE_LOCK_SECTION = section;
+                    if (!options.silent) v4SetCloudRuntimeStatus(`${v6SectionLabel(section)} 已取得編輯鎖，可安全修改。`, 'ok');
+                    clearInterval(V6_LOCK_TIMER);
+                    V6_LOCK_TIMER = setInterval(() => v6ClaimCurrentSectionLock({ silent: true }), 30000);
+                    return true;
+                }
+                v4SetCloudRuntimeStatus(`${v6SectionLabel(section)} 被 ${data.locked_by_name || data.locked_by || '其他使用者'} 鎖定，暫時只讀。`, 'warn');
+                return false;
+            } catch (err) {
+                console.error(err);
+                v4SetCloudRuntimeStatus('V6 區塊鎖不可用：請先在 Supabase 執行 docs/supabase-schema-v6.sql。', 'error');
+                return false;
+            }
+        }
+
+        function v6SetupEditLockGuards() {
+            if (window.__v6EditLockGuardsReady) return;
+            window.__v6EditLockGuardsReady = true;
+            const block = (event) => {
+                if (!V6_LOCK_BLOCKED) return;
+                const root = v6SectionRoot();
+                if (root && root.contains(event.target)) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    showToast(`此區塊正由 ${V6_LOCK_OWNER_TEXT || '其他使用者'} 編輯，暫時只讀`);
+                }
+            };
+            ['beforeinput','input','change','paste','drop'].forEach(type => document.addEventListener(type, block, true));
+            window.addEventListener('beforeunload', () => {
+                const config = v4GetCloudConfig();
+                const actor = v6CurrentActor();
+                if (!V6_ACTIVE_LOCK_SECTION || !v4ConfigReady(config)) return;
+                try {
+                    const payload = JSON.stringify({ p_workspace_key: config.workspaceKey, p_section_key: V6_ACTIVE_LOCK_SECTION, p_locked_by: actor.id });
+                    fetch(`${config.supabaseUrl}/rest/v1/rpc/release_monthly_report_edit_lock`, {
+                        method: 'POST', keepalive: true,
+                        headers: { 'apikey': config.anonKey, 'Authorization': 'Bearer ' + config.anonKey, 'Content-Type': 'application/json' },
+                        body: payload
+                    });
+                } catch {}
+            });
         }
 
         function v4SetupAutoRefresh() {
@@ -4177,7 +4363,7 @@
                         </section>
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
-                            <div class="text-xs text-slate-500 mb-2">系統會在打開、回到頁面時自動同步；修改後會自動保存到 Supabase。下面按鈕保留給手動確認使用。</div>
+                            <div class="text-xs text-slate-500 mb-2">系統會在打開、回到頁面時自動同步；修改後會自動保存到 Supabase。V6 會檢查 revision，若別人先保存，會阻止覆蓋並要求先同步。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn v1-primary-btn" onclick="v4UploadToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>上傳本機到雲端</button>
                                 <button class="v1-small-btn" onclick="v4DownloadFromCloud()"><i class="fas fa-cloud-arrow-down mr-1"></i>下載雲端覆蓋本機</button>
@@ -4440,7 +4626,7 @@
             root.innerHTML = `
                 <div class="v1-page-card">
                     <h2 class="v1-page-title"><i class="fas fa-shield-halved mr-2"></i>數據管理</h2>
-                    <div class="v1-page-subtitle">V5：雲端資料為準；打開系統會自動同步 Supabase，操作員修改後會自動保存，也可手動同步 / 保存。</div>
+                    <div class="v1-page-subtitle">V6：雲端資料為準；保存前檢查雲端版本，區塊編輯會上鎖，避免多人同時覆蓋。</div>
                     ${!canManage && v5GetUsers().length ? '<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>' : `
                     <div class="v1-category-grid">
                         ${supabaseConfigHtml}
@@ -4451,7 +4637,7 @@
                                 <button class="v1-small-btn" onclick="v5SyncLatest()"><i class="fas fa-cloud-arrow-down mr-1"></i>同步最新 / 下載雲端</button>
                                 <button class="v1-small-btn v1-primary-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改 / 上傳雲端</button>
                             </div>
-                            <div class="text-sm text-slate-600 leading-6"><div><b>最近同步：</b>${v4FmtTime(c.lastSyncAt)}</div><div><b>雲端更新：</b>${v4FmtTime(c.lastCloudUpdatedAt)}</div></div>
+                            <div class="text-sm text-slate-600 leading-6"><div><b>最近同步：</b>${v4FmtTime(c.lastSyncAt)}</div><div><b>雲端更新：</b>${v4FmtTime(c.lastCloudUpdatedAt)}</div><div><b>雲端版本：</b>${c.cloudRevision || '尚未同步 V6'}</div><div><b>最後保存者：</b>${v2RecordText(c.lastUpdatedBy || '尚無')}</div></div>
                             <div class="v1-action-row mt-2"><button class="v1-small-btn" onclick="v4ExportLocalBundleJson()"><i class="fas fa-file-export mr-1"></i>匯出完整 JSON 備份</button><button class="v1-small-btn" onclick="document.getElementById('v4-bundle-import').click()"><i class="fas fa-file-import mr-1"></i>匯入完整 JSON 備份</button><input id="v4-bundle-import" type="file" accept=".json" class="hidden" onchange="v4ImportLocalBundleJson(event)"></div>
                         </section>
                     </div>
@@ -4466,6 +4652,7 @@
             await initApp();
             setupV1Shell();
             v5SetupFormDraftPersistence();
+            v6SetupEditLockGuards();
             await v4AutoSyncOnStartup();
             v4SetupAutoRefresh();
         };
