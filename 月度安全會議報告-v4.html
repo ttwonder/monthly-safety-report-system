@@ -608,8 +608,9 @@
 
         // --- 全新升級：插入多維度動態趨勢圖 ---
         function insertTrendChart() {
+            const layout = layoutStyle({ inlineWidth: '48%' });
             const html = `
-            <div class="trend-chart-container" data-trend-chart="1" contenteditable="false" style="border: 2px solid #cbd5e1; padding: 8px; border-radius: 6px; background-color: #ffffff; width: 100%; margin-bottom: 8px; break-inside: avoid; page-break-inside: avoid; display: block;">
+            <div class="trend-chart-container ${layout.extraClass}" data-layout="${layout.dataLayout}" data-trend-chart="1" contenteditable="false" style="border: 2px solid #cbd5e1; padding: 8px; border-radius: 6px; background-color: #ffffff; ${layout.style}; break-inside: avoid; page-break-inside: avoid;">
                 
                 <!-- 標題與控制列 -->
                 <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 6px; flex-wrap: wrap; gap: 4px;">
@@ -676,9 +677,9 @@
                         <canvas class="trend-canvas"></canvas>
                     </div>
                 </div>
-            </div>&nbsp;`;
+            </div>`;
             
-            const inserted = insertHtmlAtSelection(html, { scrollToInserted: true });
+            const inserted = insertHtmlAtSelection(wrapInsertedHtmlForLayout(html), { scrollToInserted: true });
             const chart = inserted && inserted.primary && inserted.primary.classList && inserted.primary.classList.contains('trend-chart-container')
                 ? inserted.primary
                 : (inserted && inserted.editable ? inserted.editable.querySelector('[data-trend-chart="1"]') : document.querySelector('[data-trend-chart="1"]'));
@@ -1219,6 +1220,12 @@
 
                     <!-- 新增卡片系列按鈕 -->
                     <span class="mx-1 text-gray-300">|</span>
+                    <select id="insertLayoutSelector" class="toolbar-btn" title="控制新插入物件並排或換行">
+                        <option value="inline-30" selected>並排 30%</option>
+                        <option value="inline-48">半寬 48%</option>
+                        <option value="block-100">整行 100%</option>
+                        <option value="newline-100">換行整行</option>
+                    </select>
                     <button class="toolbar-btn !bg-cyan-50 !border-cyan-300 text-cyan-700 font-bold" onclick="insertDataCard('white')" title="插入白底數據指標卡">
                         <i class="fas fa-id-card mr-1"></i>指標卡(白)
                     </button>
@@ -1551,6 +1558,7 @@
             });
             const mainElements = editableDiv.querySelectorAll('.content-block, table.custom-data-table:not(.data-card-table), .kpi-card-container, .progress-card-container, .zone-card-container, .trend-chart-container, .content-inline-img');
             mainElements.forEach(el => {
+                if (el.classList && (el.classList.contains('layout-inline') || el.dataset.layout === 'inline')) return;
                 let next = el.nextSibling;
                 let hasSpacer = false;
                 if (next && next.nodeType === 1 && next.classList.contains('block-spacer')) {
@@ -1784,10 +1792,11 @@
             ensureCursorOutsideBlock();
             
             const bgColor = theme === 'orange' ? '#fff7ed' : '#ffffff';
-            const borderColor = theme === 'orange' ? '#f97316' : '#3b82f6'; 
+            const borderColor = theme === 'orange' ? '#f97316' : '#3b82f6';
+            const layout = layoutStyle({ inlineWidth: '30%', display: 'inline-table', blockDisplay: 'table' });
             
             const html = `
-            <table class="custom-data-table data-card-table" style="display: inline-table; width: 30%; margin: 0 6px 6px 0; vertical-align: top; border: 2px solid ${borderColor}; border-collapse: collapse; background-color: ${bgColor}; font-family: inherit; break-inside: avoid; page-break-inside: avoid; table-layout: fixed;">
+            <table class="custom-data-table data-card-table ${layout.extraClass}" data-layout="${layout.dataLayout}" style="${layout.style}; border: 2px solid ${borderColor}; border-collapse: collapse; background-color: ${bgColor}; font-family: inherit; break-inside: avoid; page-break-inside: avoid; table-layout: fixed;">
                 <colgroup><col style="width: 66.66%;"><col style="width: 33.33%;"></colgroup>
                 <thead>
                     <tr>
@@ -1808,9 +1817,9 @@
                         <td style="padding: 2px 4px; text-align: center; border: none; font-weight: bold; border-bottom: 1px solid #333; font-size: 15px;">0.0</td>
                     </tr>
                 </tbody>
-            </table>&nbsp;`;
+            </table>`;
             
-            insertHtmlAtSelection(html);
+            insertHtmlAtSelection(wrapInsertedHtmlForLayout(html));
             setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
         }
 
@@ -1818,8 +1827,9 @@
         function insertKpiCard() {
             restoreSelection();
             ensureCursorOutsideBlock();
+            const layout = layoutStyle({ inlineWidth: '30%' });
             const html = `
-            <div class="kpi-card-container" style="border: 2px solid #cbd5e1; padding: 12px 14px; border-radius: 6px; background-color: #ffffff; position: relative; width: 30%; margin: 0 6px 6px 0; display: inline-block; vertical-align: top; box-sizing: border-box; break-inside: avoid; page-break-inside: avoid;">
+            <div class="kpi-card-container ${layout.extraClass}" data-layout="${layout.dataLayout}" style="border: 2px solid #cbd5e1; padding: 12px 14px; border-radius: 6px; background-color: #ffffff; position: relative; ${layout.style}; break-inside: avoid; page-break-inside: avoid;">
                 
                 <!-- 第一排：指標名稱與現值/KPI/Avg值 -->
                 <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 8px;">
@@ -1863,9 +1873,9 @@
                     <span contenteditable="true" class="kpi-min" style="outline:none; border-bottom: 1px dashed transparent;" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">0</span>
                     <span contenteditable="true" class="kpi-max" style="outline:none; border-bottom: 1px dashed transparent;" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">100</span>
                 </div>
-            </div>&nbsp;`;
+            </div>`;
             
-            insertHtmlAtSelection(html);
+            insertHtmlAtSelection(wrapInsertedHtmlForLayout(html));
             // 插入後觸發一次更新讓標線就位
             setTimeout(() => { 
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); 
@@ -1877,8 +1887,9 @@
         function insertProgressCard() {
             restoreSelection();
             ensureCursorOutsideBlock();
+            const layout = layoutStyle({ inlineWidth: '30%' });
             const html = `
-            <div class="progress-card-container" style="border: 2px solid #cbd5e1; padding: 12px 14px; border-radius: 6px; background-color: #ffffff; position: relative; width: 30%; margin: 0 6px 6px 0; display: inline-block; vertical-align: top; box-sizing: border-box; break-inside: avoid; page-break-inside: avoid;">
+            <div class="progress-card-container ${layout.extraClass}" data-layout="${layout.dataLayout}" style="border: 2px solid #cbd5e1; padding: 12px 14px; border-radius: 6px; background-color: #ffffff; position: relative; ${layout.style}; break-inside: avoid; page-break-inside: avoid;">
                 
                 <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 8px;">
                     <div style="font-weight: bold; color: #334155; font-size: 14px; outline: none; border-bottom: 1px dashed #94a3b8; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" contenteditable="true" onblur="triggerAutoSave(this)">項目名稱</div>
@@ -1896,9 +1907,9 @@
                     <!-- 完成度標記 (短黑線) -->
                     <div class="progress-marker" style="position: absolute; left: 50%; top: -3px; bottom: -3px; width: 4px; background-color: #0f172a; transform: translateX(-50%); z-index: 2; border: 1px solid white; border-radius: 2px; transition: left 0.3s ease-out;"></div>
                 </div>
-            </div>&nbsp;`;
+            </div>`;
             
-            insertHtmlAtSelection(html);
+            insertHtmlAtSelection(wrapInsertedHtmlForLayout(html));
             setTimeout(() => { 
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); 
                 document.querySelectorAll('.progress-card-container').forEach(card => window.updateProgressCard(card));
@@ -1909,8 +1920,9 @@
         function insertZoneCard() {
             restoreSelection();
             ensureCursorOutsideBlock();
+            const layout = layoutStyle({ inlineWidth: '30%' });
             const html = `
-            <div class="zone-card-container" style="border: 2px solid #cbd5e1; padding: 12px 14px; border-radius: 6px; background-color: #ffffff; position: relative; width: 30%; margin: 0 6px 6px 0; display: inline-block; vertical-align: top; box-sizing: border-box; break-inside: avoid; page-break-inside: avoid;">
+            <div class="zone-card-container ${layout.extraClass}" data-layout="${layout.dataLayout}" style="border: 2px solid #cbd5e1; padding: 12px 14px; border-radius: 6px; background-color: #ffffff; position: relative; ${layout.style}; break-inside: avoid; page-break-inside: avoid;">
                 
                 <!-- 標題與現值 -->
                 <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 2px;">
@@ -1939,9 +1951,9 @@
                     <span contenteditable="true" class="zone-limit2" style="position: absolute; left: 69%; top: 0px; transform: translateX(-50%); outline:none; border-bottom: 1px dashed #cbd5e1; transition: left 0.3s ease-out;" onblur="triggerAutoSave(this)">3.45</span>
                     <span contenteditable="true" class="zone-max" style="position: absolute; right: 0; top: 0px; outline:none; border-bottom: 1px dashed transparent;" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">5</span>
                 </div>
-            </div>&nbsp;`;
+            </div>`;
             
-            insertHtmlAtSelection(html);
+            insertHtmlAtSelection(wrapInsertedHtmlForLayout(html));
             setTimeout(() => { 
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); 
                 document.querySelectorAll('.zone-card-container').forEach(card => window.updateZoneCard(card));
@@ -2326,6 +2338,41 @@
                 insertHtmlAtSelection(symbol); 
             } 
         }
+
+        function getInsertLayoutMode() {
+            const sel = document.getElementById('insertLayoutSelector');
+            return sel ? sel.value : 'inline-30';
+        }
+
+        function getInsertLayout(mode = getInsertLayoutMode(), preferred = {}) {
+            const base = {
+                inline: true,
+                width: preferred.inlineWidth || '30%',
+                display: preferred.display || 'inline-block',
+                prefix: '',
+                suffix: '&nbsp;',
+                extraClass: 'layout-inline',
+                dataLayout: 'inline'
+            };
+            if (mode === 'inline-48') return { ...base, width: '48%', extraClass: 'layout-inline layout-half' };
+            if (mode === 'block-100') return { ...base, inline: false, width: '100%', display: preferred.blockDisplay || 'block', suffix: '<div class="block-spacer"><br></div>', extraClass: 'layout-block', dataLayout: 'block' };
+            if (mode === 'newline-100') return { ...base, inline: false, width: '100%', display: preferred.blockDisplay || 'block', prefix: '<div class="block-spacer"><br></div>', suffix: '<div class="block-spacer"><br></div>', extraClass: 'layout-newline layout-block', dataLayout: 'block' };
+            return base;
+        }
+
+        function layoutStyle(preferred = {}, mode = getInsertLayoutMode()) {
+            const l = getInsertLayout(mode, preferred);
+            const margin = l.inline ? '0 6px 6px 0' : '0 0 8px 0';
+            return {
+                ...l,
+                style: `width: ${l.width}; margin: ${margin}; display: ${l.display}; vertical-align: top; box-sizing: border-box;`
+            };
+        }
+
+        function wrapInsertedHtmlForLayout(html, mode = getInsertLayoutMode()) {
+            const l = getInsertLayout(mode);
+            return `${l.prefix || ''}${html}${l.suffix || '&nbsp;'}`;
+        }
         
         function insertHighlight() {
             restoreSelection();
@@ -2352,8 +2399,9 @@
 
         function insertContentTable() {
             restoreSelection();
+            const layout = layoutStyle({ inlineWidth: '48%', display: 'inline-table', blockDisplay: 'table' });
             const html = `
-            <table class="custom-data-table" style="width: 100%; border-collapse: collapse; margin-bottom: 8px;">
+            <table class="custom-data-table ${layout.extraClass}" data-layout="${layout.dataLayout}" style="${layout.style}; border-collapse: collapse;">
                 <tbody>
                     <tr>
                         <th style="border: 1px solid #94a3b8; padding: 4px; background: #f1f5f9; text-align: center; font-weight: bold; min-width: 50px;">標題 1</th>
@@ -2366,8 +2414,8 @@
                         <td style="border: 1px solid #94a3b8; padding: 4px;">數據</td>
                     </tr>
                 </tbody>
-            </table><br>`;
-            insertHtmlAtSelection(html);
+            </table>`;
+            insertHtmlAtSelection(wrapInsertedHtmlForLayout(html));
             setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
         }
 
@@ -2393,10 +2441,11 @@
 
             Promise.all(promises).then(bases => {
                 let html = '';
+                const layout = layoutStyle({ inlineWidth: '48%' });
                 bases.forEach(base64 => {
-                    html += `<img src="${base64}" class="content-inline-img" style="width: 48%; margin: 4px; cursor: pointer; border-radius: 4px; vertical-align: top; display: inline-block;">`;
+                    html += `<img src="${base64}" class="content-inline-img ${layout.extraClass}" data-layout="${layout.dataLayout}" style="${layout.style}; cursor: pointer; border-radius: 4px;">`;
                 });
-                insertHtmlAtSelection(html + '&nbsp;');
+                insertHtmlAtSelection(wrapInsertedHtmlForLayout(html));
                 hideLoader();
                 event.target.value = ''; 
                 setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
@@ -2426,13 +2475,13 @@
                 toolbar.style.top = (rect.top - 45) + 'px';
                 toolbar.style.left = rect.left + 'px';
                 if (parseInt(toolbar.style.top) < 0) toolbar.style.top = (rect.bottom + 5) + 'px';
-            } else if (e.target.closest('.custom-data-table, .kpi-card-container, .progress-card-container, .zone-card-container')) {
+            } else if (e.target.closest('.custom-data-table, .kpi-card-container, .progress-card-container, .zone-card-container, .trend-chart-container')) {
                 hideImgToolbar(); hideBlockToolbar(); hideHighlightToolbar();
                 
-                const cellOrContainer = e.target.closest('.custom-data-table th, .custom-data-table td, .kpi-card-container, .progress-card-container, .zone-card-container');
+                const cellOrContainer = e.target.closest('.custom-data-table th, .custom-data-table td, .kpi-card-container, .progress-card-container, .zone-card-container, .trend-chart-container');
                 if (activeTableCell) activeTableCell.style.outline = 'none';
                 
-                if (cellOrContainer && (cellOrContainer.classList.contains('kpi-card-container') || cellOrContainer.classList.contains('progress-card-container') || cellOrContainer.classList.contains('zone-card-container'))) {
+                if (cellOrContainer && (cellOrContainer.classList.contains('kpi-card-container') || cellOrContainer.classList.contains('progress-card-container') || cellOrContainer.classList.contains('zone-card-container') || cellOrContainer.classList.contains('trend-chart-container'))) {
                     activeTableCell = cellOrContainer;
                     activeTable = cellOrContainer; 
                 } else if (cellOrContainer) {
@@ -2456,9 +2505,6 @@
                     toolbar.style.left = rect.left + 'px';
                     if (parseInt(toolbar.style.top) < 0) toolbar.style.top = (rect.bottom + 5) + 'px';
                 }
-            } else if (e.target.closest('.trend-chart-container')) {
-                markTrendAnchor(e.target.closest('.trend-chart-container'));
-                hideImgToolbar(); hideTableToolbar(); hideBlockToolbar(); hideHighlightToolbar();
             } else if (e.target.closest('.content-block')) {
                 hideImgToolbar(); hideTableToolbar(); hideHighlightToolbar();
                 const block = e.target.closest('.content-block');
@@ -2496,21 +2542,71 @@
             }
         }
 
+        function ensureSpacerAfterElement(el) {
+            if (!el || !el.parentNode) return;
+            let next = el.nextSibling;
+            if (next && next.nodeType === 3 && next.textContent.trim() === '') next = next.nextSibling;
+            if (!(next && next.nodeType === 1 && next.classList.contains('block-spacer'))) {
+                const spacer = document.createElement('div');
+                spacer.className = 'block-spacer';
+                spacer.innerHTML = '<br>';
+                if (el.nextSibling) el.parentNode.insertBefore(spacer, el.nextSibling);
+                else el.parentNode.appendChild(spacer);
+            }
+        }
+
+        function removeSpacerAfterElement(el) {
+            if (!el || !el.parentNode) return;
+            let next = el.nextSibling;
+            if (next && next.nodeType === 3 && next.textContent.trim() === '') next = next.nextSibling;
+            if (next && next.nodeType === 1 && next.classList.contains('block-spacer')) next.remove();
+        }
+
+        function applyElementLayoutWidth(el, w) {
+            if (!el) return;
+            const numeric = parseFloat(String(w).replace('%', '')) || 0;
+            const isFull = numeric >= 99;
+            el.style.width = w;
+            el.style.boxSizing = 'border-box';
+            el.style.verticalAlign = 'top';
+            if (isFull) {
+                el.dataset.layout = 'block';
+                el.classList.remove('layout-inline', 'layout-half');
+                el.classList.add('layout-block');
+                el.style.display = el.tagName === 'TABLE' ? 'table' : 'block';
+                el.style.margin = '0 0 8px 0';
+                ensureSpacerAfterElement(el);
+            } else {
+                el.dataset.layout = 'inline';
+                el.classList.remove('layout-block', 'layout-newline');
+                el.classList.add('layout-inline');
+                if (numeric >= 45) el.classList.add('layout-half'); else el.classList.remove('layout-half');
+                el.style.display = el.tagName === 'TABLE' ? 'inline-table' : 'inline-block';
+                el.style.margin = '0 6px 6px 0';
+                removeSpacerAfterElement(el);
+            }
+            if (el.classList.contains('trend-chart-container') && window.renderAllCharts) {
+                markTrendAnchor(el);
+                setTimeout(window.renderAllCharts, 80);
+            }
+            triggerAutoSave(el);
+        }
+
         function hideImgToolbar() {
             const toolbar = document.getElementById('imgFloatToolbar');
             if (toolbar) toolbar.classList.add('hidden');
             if (activeImg) { activeImg.style.outline = 'none'; triggerAutoSave(activeImg); activeImg = null; }
         }
-        function setImgWidth(w) { if(activeImg) { activeImg.style.width = w; triggerAutoSave(activeImg); } }
+        function setImgWidth(w) { if(activeImg) applyElementLayoutWidth(activeImg, w); }
         function setImgMargin(m) { if(activeImg) { activeImg.style.margin = m; triggerAutoSave(activeImg); } }
-        function deleteSelectedImg() { if(activeImg) { activeImg.remove(); triggerAutoSave(activeImg); hideImgToolbar(); } }
+        function deleteSelectedImg() { if(activeImg) { const target = activeImg; activeImg = null; target.remove(); triggerAutoSave(target); hideImgToolbar(); } }
 
         function hideTableToolbar() {
             const toolbar = document.getElementById('tableFloatToolbar');
             if (toolbar) toolbar.classList.add('hidden');
             if (activeTableCell) { activeTableCell.style.outline = 'none'; triggerAutoSave(activeTable); activeTableCell = null; activeTable = null; }
         }
-        function setTableWidth(w) { if(activeTable) { activeTable.style.width = w; triggerAutoSave(activeTable); } }
+        function setTableWidth(w) { if(activeTable) applyElementLayoutWidth(activeTable, w); }
         function addTableRow(direction) {
             if (!activeTableCell || !activeTable) return;
             if (activeTable.classList.contains('kpi-card-container') || activeTable.classList.contains('progress-card-container') || activeTable.classList.contains('zone-card-container') || activeTable.classList.contains('chart-data-table')) {
