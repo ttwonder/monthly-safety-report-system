@@ -1065,6 +1065,9 @@
         .v1-pdf-col { flex:1 1 0; min-width:0; }
         .v1-selected-editor-print-clone { width: 100%; max-width: none; box-shadow: none; }
         .v1-preview-shell .v1-selected-editor-print-clone { min-width: 980px; transform-origin: top left; }
+        .v1-preview-shell .v1-selected-editor-print-clone .no-print-input input { display:none !important; }
+        .v1-preview-shell .v1-selected-editor-print-clone .print-only { display:block !important; text-align:center; font-size:14px; margin-bottom:6px; }
+        .v1-preview-shell .v1-selected-editor-print-clone .print-icon-show { display:block !important; }
         #pdfPrintArea .v1-selected-editor-print-clone { width: 100%; }
         .v1-empty-state { color:#94a3b8; text-align:center; padding:24px; border:1px dashed #cbd5e1; border-radius:12px; background:#fff; }
         .v1-history-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
@@ -3309,14 +3312,14 @@
                         <aside class="v1-pdf-side">
                             <div class="v1-action-row">
                                 <button class="v1-small-btn v1-primary-btn" onclick="printV1SelectedPdf()"><i class="fas fa-print mr-1"></i>輸出勾選 PDF</button>
-                                <button class="v1-small-btn" onclick="renderV1PdfCenter()"><i class="fas fa-rotate mr-1"></i>刷新預覽</button>
+                                <button class="v1-small-btn" onclick="syncV1PdfSelectionFromDom(); renderV1PdfCenter()"><i class="fas fa-rotate mr-1"></i>刷新預覽</button>
                                 <button class="v1-small-btn" onclick="switchV1Tab('modules')"><i class="fas fa-check-square mr-1"></i>管理模塊</button>
                             </div>
                             <div class="v1-note-box mb-2">目前已選 ${selected.length} 個模塊。若有趨勢圖，請先在「月報編輯」中確認圖表已正常顯示，再輸出 PDF。</div>
                             <div class="v1-check-list">
                                 ${reportData.map((item, index) => `
                                     <label class="v1-check-item">
-                                        <input type="checkbox" ${item.selectedForPdf !== false ? 'checked' : ''} onchange="toggleV1Module(${index}, this.checked)">
+                                        <input type="checkbox" data-v1-pdf-index="${index}" ${item.selectedForPdf !== false ? 'checked' : ''} onchange="toggleV1Module(${index}, this.checked)">
                                         <div>
                                             <div class="v1-module-title">${item.pdfOrder || index + 1}. ${item.title || '未命名模塊'}</div>
                                             <div class="v1-module-meta">
@@ -3339,46 +3342,86 @@
         }
 
         function buildV1PdfHtml() {
-            return buildV1EditorPrintCloneHtml();
+            return buildV1SelectedEditorPrintHtml();
         }
 
-        function buildV1EditorPrintCloneHtml() {
+        function syncV1PdfSelectionFromDom() {
+            const checks = document.querySelectorAll('#v1-pane-pdf input[data-v1-pdf-index]');
+            if (!checks.length) return;
+            checks.forEach(input => {
+                const index = Number(input.dataset.v1PdfIndex);
+                if (reportData[index]) reportData[index].selectedForPdf = !!input.checked;
+            });
+        }
+
+        function stripCloneIds(root) {
+            root.querySelectorAll('[id]').forEach(el => {
+                el.setAttribute('data-cloned-id', el.id);
+                el.removeAttribute('id');
+            });
+        }
+
+        function normalizeSelectedPdfRow(row, displayIndex) {
+            row.dataset.pdfSelectedOrder = String(displayIndex);
+            const input = row.querySelector('.no-print-input input');
+            if (input) input.value = displayIndex;
+            const printOnly = row.querySelector('.print-only');
+            if (printOnly) printOnly.textContent = String(displayIndex);
+            row.querySelectorAll('[contenteditable="true"]').forEach(el => el.removeAttribute('contenteditable'));
+            row.querySelectorAll('.no-print:not(.chart-table-area)').forEach(el => el.remove());
+            stripCloneIds(row);
+            return row;
+        }
+
+        function buildV1SelectedEditorPrintHtml() {
+            syncV1PdfSelectionFromDom();
             const selected = v1GetSelectedModules();
             if (!selected.length) {
                 return `<div class="v1-empty-state">尚未勾選任何模塊，請先在左側或「模塊庫」選擇要輸出的內容。</div>`;
             }
             const source = document.getElementById('reportContainer');
-            if (!source) return `<div class="v1-empty-state">找不到月報編輯版面。</div>`;
-            const clone = source.cloneNode(true);
-            clone.classList.add('v1-selected-editor-print-clone');
-            clone.querySelectorAll('[contenteditable="true"]').forEach(el => el.removeAttribute('contenteditable'));
-            clone.querySelectorAll('.no-print:not(.chart-table-area)').forEach(el => el.remove());
-            const selectedIndexes = selected.map(x => x.index);
-            const selectedIndexSet = new Set(selectedIndexes.map(String));
-            const tbody = clone.querySelector('#tableBody');
-            if (tbody) {
-                const rowsByIndex = new Map(Array.from(tbody.querySelectorAll('tr[data-index]')).map(row => [String(row.dataset.index), row]));
-                tbody.innerHTML = '';
-                selectedIndexes.forEach((idx, order) => {
-                    const row = rowsByIndex.get(String(idx));
-                    if (!row) return;
-                    row.dataset.pdfSelectedOrder = String(order + 1);
-                    const input = row.querySelector('.no-print-input input');
-                    if (input) input.value = order + 1;
-                    const printOnly = row.querySelector('.print-only');
-                    if (printOnly) printOnly.textContent = String(order + 1);
-                    tbody.appendChild(row);
-                });
-                Array.from(tbody.querySelectorAll('tr[data-index]')).forEach(row => {
-                    if (!selectedIndexSet.has(String(row.dataset.index))) row.remove();
-                });
+            const sourceTable = source ? source.querySelector('#reportTable') : null;
+            const sourceTbody = source ? source.querySelector('#tableBody') : null;
+            if (!source || !sourceTable || !sourceTbody) return `<div class="v1-empty-state">找不到月報編輯版面。</div>`;
+
+            const container = source.cloneNode(false);
+            container.classList.add('v1-selected-editor-print-clone');
+            container.removeAttribute('id');
+            container.setAttribute('data-cloned-id', 'reportContainer');
+
+            const header = source.querySelector('.report-header-section')?.cloneNode(true);
+            if (header) {
+                header.querySelectorAll('[contenteditable="true"]').forEach(el => el.removeAttribute('contenteditable'));
+                header.querySelectorAll('.no-print').forEach(el => el.remove());
+                stripCloneIds(header);
+                container.appendChild(header);
             }
-            // 避免預覽中的重複 id 影響主畫面取值；列印樣式不依賴這些子 id。
-            clone.querySelectorAll('[id]').forEach(el => {
-                if (el.id !== 'reportContainer') el.setAttribute('data-cloned-id', el.id);
-                if (el.id !== 'reportContainer') el.removeAttribute('id');
+
+            const table = sourceTable.cloneNode(false);
+            table.removeAttribute('id');
+            table.setAttribute('data-cloned-id', 'reportTable');
+            const thead = sourceTable.querySelector('thead')?.cloneNode(true);
+            if (thead) {
+                thead.querySelectorAll('.no-print').forEach(el => el.remove());
+                stripCloneIds(thead);
+                table.appendChild(thead);
+            }
+            const tbody = document.createElement('tbody');
+            tbody.setAttribute('data-cloned-id', 'tableBody');
+            const rowsByIndex = new Map(Array.from(sourceTbody.querySelectorAll('tr[data-index]')).map(row => [String(row.dataset.index), row]));
+            selected.forEach((entry, order) => {
+                const sourceRow = rowsByIndex.get(String(entry.index));
+                if (!sourceRow) return;
+                const row = normalizeSelectedPdfRow(sourceRow.cloneNode(true), order + 1);
+                tbody.appendChild(row);
             });
-            return clone.outerHTML;
+            table.appendChild(tbody);
+            container.appendChild(table);
+            return container.outerHTML;
+        }
+
+        function buildV1EditorPrintCloneHtml() {
+            return buildV1SelectedEditorPrintHtml();
         }
 
         function buildV1PdfModuleHtml(item, displayIndex) {
@@ -3418,8 +3461,10 @@
         }
 
         function printV1SelectedPdf() {
+            syncV1PdfSelectionFromDom();
             if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
             setTimeout(async () => {
+                syncV1PdfSelectionFromDom();
                 await saveToDB(reportData, Date.now());
                 const ok = await prepareV1PdfPrintArea();
                 if (!ok) return;
