@@ -4895,6 +4895,7 @@
         const SITE_ACCESS_PASSWORD_HASH_KEY = 'monthly_report_site_access_password_hash';
         const SITE_ACCESS_PASSWORD_UPDATED_KEY = 'monthly_report_site_access_password_updated_at';
         const SITE_ACCESS_UNLOCK_KEY = 'monthly_report_site_access_unlocked_hash';
+        const SITE_ACCESS_REMEMBER_KEY = 'monthly_report_site_access_remembered_hash';
         const SITE_ACCESS_DEFAULT_PASSWORD_HASH = '38adfff5529d37b7699dadcc02aba2877a44fb6f6b788b3bfae859be6ebbc432';
         let SITE_ACCESS_BOOTED = false;
 
@@ -4911,7 +4912,16 @@
             return localStorage.getItem(SITE_ACCESS_PASSWORD_UPDATED_KEY) || '';
         }
         function siteAccessIsUnlocked() {
-            return sessionStorage.getItem(SITE_ACCESS_UNLOCK_KEY) === siteAccessGetPasswordHash();
+            const current = siteAccessGetPasswordHash();
+            return sessionStorage.getItem(SITE_ACCESS_UNLOCK_KEY) === current || localStorage.getItem(SITE_ACCESS_REMEMBER_KEY) === current;
+        }
+        function siteAccessRememberUnlock(hash) {
+            sessionStorage.setItem(SITE_ACCESS_UNLOCK_KEY, hash);
+            localStorage.setItem(SITE_ACCESS_REMEMBER_KEY, hash);
+        }
+        function siteAccessForgetUnlock() {
+            sessionStorage.removeItem(SITE_ACCESS_UNLOCK_KEY);
+            localStorage.removeItem(SITE_ACCESS_REMEMBER_KEY);
         }
         async function siteAccessHashPassword(password) {
             const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(password || '')));
@@ -4933,7 +4943,7 @@
                 if (input) { input.value = ''; input.focus(); }
                 return false;
             }
-            sessionStorage.setItem(SITE_ACCESS_UNLOCK_KEY, hash);
+            siteAccessRememberUnlock(hash);
             if (error) error.textContent = '';
             siteAccessRenderGate();
             await monthlyReportBoot();
@@ -4947,7 +4957,7 @@
             if (p1 !== p2) return alert('兩次輸入的新網站密碼不一致。');
             const hash = await siteAccessHashPassword(p1);
             siteAccessSetPasswordHash(hash);
-            sessionStorage.setItem(SITE_ACCESS_UNLOCK_KEY, hash);
+            siteAccessRememberUnlock(hash);
             v5ClearFormDraftIds(['site-access-new-password', 'site-access-confirm-password']);
             const a = document.getElementById('site-access-new-password');
             const b = document.getElementById('site-access-confirm-password');
@@ -4962,7 +4972,7 @@
             return `
                 <section class="v1-category-card">
                     <div class="v1-category-title mb-2"><i class="fas fa-door-closed mr-1"></i>網站進入密碼</div>
-                    <div class="text-xs text-slate-500 mb-2">進入網站前需輸入此密碼。解鎖狀態只保存在本次瀏覽器 session；關閉瀏覽器後需重新輸入。密碼只保存 SHA-256 hash，不保存明文。</div>
+                    <div class="text-xs text-slate-500 mb-2">進入網站前需輸入此密碼。此電腦/瀏覽器會記住解鎖狀態，直到手動登出或網站密碼被修改。密碼只保存 SHA-256 hash，不保存明文。</div>
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
                         <input id="site-access-new-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="新網站密碼">
                         <input id="site-access-confirm-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="再次輸入新密碼" onkeydown="if(event.key==='Enter') siteAccessUpdatePasswordFromForm()">
@@ -4976,6 +4986,7 @@
         // === V5 多人協作與應用內權限管理（無 email） ===
         const V5_USERS_KEY = 'monthly_report_v5_users';
         const V5_SESSION_KEY = 'monthly_report_v5_session';
+        const V5_REMEMBERED_SESSION_KEY = 'monthly_report_v5_remembered_session';
         const V5_FORM_DRAFTS_KEY = 'monthly_report_v5_form_drafts';
 
         function v5GetFormDrafts() {
@@ -5079,12 +5090,27 @@
             localStorage.setItem(V5_USERS_KEY, JSON.stringify(Array.isArray(users) ? users : []));
             renderV5SessionBar();
         }
-        function v5CurrentUser() {
-            try { return JSON.parse(sessionStorage.getItem(V5_SESSION_KEY) || 'null'); } catch { return null; }
+        function v5SessionPayload(user) {
+            return { username: user.username, displayName: user.displayName || user.username, role: user.role || 'operator' };
         }
-        function v5SetSession(user) {
-            if (user) sessionStorage.setItem(V5_SESSION_KEY, JSON.stringify({ username: user.username, displayName: user.displayName || user.username, role: user.role || 'operator' }));
-            else sessionStorage.removeItem(V5_SESSION_KEY);
+        function v5CurrentUser() {
+            try {
+                const raw = sessionStorage.getItem(V5_SESSION_KEY) || localStorage.getItem(V5_REMEMBERED_SESSION_KEY) || 'null';
+                const user = JSON.parse(raw);
+                if (user && !sessionStorage.getItem(V5_SESSION_KEY)) sessionStorage.setItem(V5_SESSION_KEY, JSON.stringify(user));
+                return user;
+            } catch { return null; }
+        }
+        function v5SetSession(user, options = {}) {
+            if (user) {
+                const payload = v5SessionPayload(user);
+                const text = JSON.stringify(payload);
+                sessionStorage.setItem(V5_SESSION_KEY, text);
+                if (options.remember !== false) localStorage.setItem(V5_REMEMBERED_SESSION_KEY, text);
+            } else {
+                sessionStorage.removeItem(V5_SESSION_KEY);
+                localStorage.removeItem(V5_REMEMBERED_SESSION_KEY);
+            }
             renderV5SessionBar();
             renderTable();
             if (document.getElementById('v1-pane-cloud')?.classList.contains('active') && !v5CanManageData() && v5GetUsers().length > 0) {
@@ -5159,7 +5185,7 @@
             v5SetSession(user);
             showToast(`已登入：${user.displayName || user.username}`);
         }
-        function v5Logout() { v5SetSession(null); showToast('已登出'); }
+        function v5Logout() { v5SetSession(null); siteAccessForgetUnlock(); showToast('已登出，已清除本機記住狀態'); siteAccessRenderGate(); }
         async function v5SyncLatest() {
             await v4AutoSyncLatestFromCloud({ silent: false, source: '正在同步最新雲端資料...' });
         }
@@ -5183,6 +5209,7 @@
                     <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
                     <button class="v5-sync-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改</button>
                     <button class="v5-sync-btn" onclick="v5Logout()">登出</button>
+                    <span class="text-[11px] text-slate-500">本機已記住登入</span>
                     ${v4CloudStatusHtml()}
                 </div>` : `
                 <div class="v5-session-bar">
