@@ -1120,9 +1120,67 @@
             body.pdf-print-mode .v1-pdf-toc ol { columns:2; }
         }
 
+
+        /* 網站進入密碼門：鎖定時只顯示密碼畫面 */
+        body.site-access-locked > :not(#siteAccessGate) {
+            display: none !important;
+        }
+        #siteAccessGate {
+            display: none;
+        }
+        body.site-access-locked #siteAccessGate {
+            display: flex !important;
+        }
+        .site-access-card {
+            width: min(420px, calc(100vw - 32px));
+            background: rgba(255,255,255,0.96);
+            border: 1px solid #dbeafe;
+            box-shadow: 0 24px 80px rgba(30,64,175,0.18);
+            border-radius: 22px;
+            padding: 26px;
+        }
+        .site-access-input {
+            width: 100%;
+            border: 1px solid #bfdbfe;
+            border-radius: 12px;
+            padding: 11px 13px;
+            font-size: 15px;
+            outline: none;
+        }
+        .site-access-input:focus {
+            border-color: #2563eb;
+            box-shadow: 0 0 0 3px rgba(37,99,235,0.14);
+        }
+        .site-access-btn {
+            width: 100%;
+            border: 0;
+            border-radius: 12px;
+            padding: 11px 14px;
+            background: linear-gradient(135deg, #2563eb, #4f46e5);
+            color: white;
+            font-weight: 800;
+            cursor: pointer;
+        }
+
     </style>
 </head>
-<body class="p-2 sm:p-4 relative">
+<body class="p-2 sm:p-4 relative site-access-locked">
+
+    <!-- 網站進入密碼門 -->
+    <div id="siteAccessGate" class="fixed inset-0 z-[10000] items-center justify-center bg-gradient-to-br from-sky-50 via-white to-indigo-100 p-4 no-print">
+        <div class="site-access-card">
+            <div class="text-center mb-5">
+                <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-600 text-white text-2xl mb-3 shadow-lg"><i class="fas fa-lock"></i></div>
+                <h1 class="text-xl font-black text-slate-800 mb-1">月度安全會議報告系統</h1>
+                <div class="text-sm text-slate-500">請輸入網站進入密碼</div>
+            </div>
+            <input id="site-access-password" type="password" class="site-access-input mb-3" placeholder="網站密碼" autocomplete="current-password" onkeydown="if(event.key==='Enter') siteAccessUnlockFromForm()">
+            <button class="site-access-btn" onclick="siteAccessUnlockFromForm()"><i class="fas fa-right-to-bracket mr-1"></i>進入系統</button>
+            <div id="site-access-error" class="text-sm text-rose-600 font-bold mt-3 min-h-[20px]"></div>
+            <div class="text-xs text-slate-400 mt-4 leading-5">密碼可由 owner / 管理員在「數據管理」頁修改。</div>
+        </div>
+    </div>
+
 
     <!-- 保存成功提示框 -->
     <div id="saveToast" class="fixed top-6 right-1/2 transform translate-x-1/2 -translate-y-4 opacity-0 transition-all duration-300 bg-green-500 text-white font-bold px-6 py-2 rounded shadow-lg z-50 pointer-events-none flex items-center">
@@ -4387,7 +4445,11 @@
                     modules: reportData
                 },
                 records,
-                users: v5GetUsers()
+                users: v5GetUsers(),
+                siteAccess: {
+                    passwordHash: siteAccessGetPasswordHash(),
+                    updatedAt: siteAccessGetUpdatedAt()
+                }
             };
         }
 
@@ -4409,6 +4471,7 @@
                 await saveToDB(reportData, Date.now());
                 if (bundle.records) await saveV2Records(Object.assign(v2BlankRecords(), bundle.records));
                 if (Array.isArray(bundle.users)) v5SetUsers(bundle.users);
+                if (bundle.siteAccess && bundle.siteAccess.passwordHash) siteAccessSetPasswordHash(bundle.siteAccess.passwordHash, bundle.siteAccess.updatedAt || new Date().toISOString());
                 v2RecordsCache = null;
                 renderTable();
                 renderV1ModuleLibrary();
@@ -4828,6 +4891,88 @@
         }
 
 
+        // === 網站進入密碼門（session 解鎖，密碼僅保存 SHA-256 hash） ===
+        const SITE_ACCESS_PASSWORD_HASH_KEY = 'monthly_report_site_access_password_hash';
+        const SITE_ACCESS_PASSWORD_UPDATED_KEY = 'monthly_report_site_access_password_updated_at';
+        const SITE_ACCESS_UNLOCK_KEY = 'monthly_report_site_access_unlocked_hash';
+        const SITE_ACCESS_DEFAULT_PASSWORD_HASH = '38adfff5529d37b7699dadcc02aba2877a44fb6f6b788b3bfae859be6ebbc432';
+        let SITE_ACCESS_BOOTED = false;
+
+        function siteAccessGetPasswordHash() {
+            return localStorage.getItem(SITE_ACCESS_PASSWORD_HASH_KEY) || SITE_ACCESS_DEFAULT_PASSWORD_HASH;
+        }
+        function siteAccessSetPasswordHash(hash, updatedAt = new Date().toISOString()) {
+            const clean = String(hash || '').trim();
+            if (clean) localStorage.setItem(SITE_ACCESS_PASSWORD_HASH_KEY, clean);
+            else localStorage.removeItem(SITE_ACCESS_PASSWORD_HASH_KEY);
+            localStorage.setItem(SITE_ACCESS_PASSWORD_UPDATED_KEY, updatedAt);
+        }
+        function siteAccessGetUpdatedAt() {
+            return localStorage.getItem(SITE_ACCESS_PASSWORD_UPDATED_KEY) || '';
+        }
+        function siteAccessIsUnlocked() {
+            return sessionStorage.getItem(SITE_ACCESS_UNLOCK_KEY) === siteAccessGetPasswordHash();
+        }
+        async function siteAccessHashPassword(password) {
+            const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(password || '')));
+            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+        function siteAccessRenderGate() {
+            const unlocked = siteAccessIsUnlocked();
+            document.body.classList.toggle('site-access-locked', !unlocked);
+            const input = document.getElementById('site-access-password');
+            if (!unlocked && input) setTimeout(() => input.focus(), 50);
+        }
+        async function siteAccessUnlockFromForm() {
+            const input = document.getElementById('site-access-password');
+            const error = document.getElementById('site-access-error');
+            const password = input ? input.value : '';
+            const hash = await siteAccessHashPassword(password);
+            if (hash !== siteAccessGetPasswordHash()) {
+                if (error) error.textContent = '密碼不正確，請重新輸入。';
+                if (input) { input.value = ''; input.focus(); }
+                return false;
+            }
+            sessionStorage.setItem(SITE_ACCESS_UNLOCK_KEY, hash);
+            if (error) error.textContent = '';
+            siteAccessRenderGate();
+            await monthlyReportBoot();
+            return true;
+        }
+        async function siteAccessUpdatePasswordFromForm() {
+            if (!v5CanManageData()) return alert('您無權修改網站進入密碼。');
+            const p1 = document.getElementById('site-access-new-password')?.value || '';
+            const p2 = document.getElementById('site-access-confirm-password')?.value || '';
+            if (!p1 || p1.length < 6) return alert('請輸入至少 6 個字元的新網站密碼。');
+            if (p1 !== p2) return alert('兩次輸入的新網站密碼不一致。');
+            const hash = await siteAccessHashPassword(p1);
+            siteAccessSetPasswordHash(hash);
+            sessionStorage.setItem(SITE_ACCESS_UNLOCK_KEY, hash);
+            v5ClearFormDraftIds(['site-access-new-password', 'site-access-confirm-password']);
+            const a = document.getElementById('site-access-new-password');
+            const b = document.getElementById('site-access-confirm-password');
+            if (a) a.value = '';
+            if (b) b.value = '';
+            showToast('網站進入密碼已更新，請手動按「保存修改」上傳雲端');
+            v4QueueAutoSave('網站進入密碼');
+            renderV4CloudPane();
+        }
+        function siteAccessAdminHtml() {
+            if (!v5CanManageData()) return '';
+            return `
+                <section class="v1-category-card">
+                    <div class="v1-category-title mb-2"><i class="fas fa-door-closed mr-1"></i>網站進入密碼</div>
+                    <div class="text-xs text-slate-500 mb-2">進入網站前需輸入此密碼。解鎖狀態只保存在本次瀏覽器 session；關閉瀏覽器後需重新輸入。密碼只保存 SHA-256 hash，不保存明文。</div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+                        <input id="site-access-new-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="新網站密碼">
+                        <input id="site-access-confirm-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="再次輸入新密碼" onkeydown="if(event.key==='Enter') siteAccessUpdatePasswordFromForm()">
+                    </div>
+                    <div class="v1-action-row"><button class="v1-small-btn v1-primary-btn" onclick="siteAccessUpdatePasswordFromForm()"><i class="fas fa-key mr-1"></i>更新網站進入密碼</button></div>
+                    <div class="text-xs text-slate-500 mt-2">最近更新：${v4FmtTime(siteAccessGetUpdatedAt())}</div>
+                </section>`;
+        }
+
+
         // === V5 多人協作與應用內權限管理（無 email） ===
         const V5_USERS_KEY = 'monthly_report_v5_users';
         const V5_SESSION_KEY = 'monthly_report_v5_session';
@@ -4845,6 +4990,7 @@
             const type = String(el.type || '').toLowerCase();
             if (['file','hidden','button','submit','reset','color'].includes(type)) return '';
             if (el.id.startsWith('v5-login-')) return '';
+            if (el.id.startsWith('site-access-')) return '';
             if (el.disabled || el.readOnly) return '';
             return `${location.pathname}::${el.id}`;
         }
@@ -5117,6 +5263,7 @@
                             <div class="v1-action-row mt-2"><button class="v1-small-btn" onclick="v4ExportLocalBundleJson()"><i class="fas fa-file-export mr-1"></i>匯出完整 JSON 備份</button><button class="v1-small-btn" onclick="document.getElementById('v4-bundle-import').click()"><i class="fas fa-file-import mr-1"></i>匯入完整 JSON 備份</button><input id="v4-bundle-import" type="file" accept=".json" class="hidden" onchange="v4ImportLocalBundleJson(event)"></div>
                         </section>
                     </div>
+                    <div class="mt-3">${siteAccessAdminHtml()}</div>
                     <div class="mt-3">${v5UserAdminHtml()}</div>
                     <div class="v1-note-box mt-3"><b>同步說明：</b>正式使用時 Supabase URL / anon public key / Workspace Key 應放在 <code>supabase-config.js</code>，大家打開同一網址會自動讀取同一份雲端資料。Workspace Key 仍需視為內部共享密鑰，請勿公開。</div>`}
                 </div>`;
@@ -5127,13 +5274,20 @@
         };
 
 
-        window.onload = async function() {
+        async function monthlyReportBoot() {
+            if (SITE_ACCESS_BOOTED) return;
+            SITE_ACCESS_BOOTED = true;
             await initApp();
             setupV1Shell();
             v5SetupFormDraftPersistence();
             v6SetupEditLockGuards();
             await v4AutoSyncOnStartup();
             v4SetupAutoRefresh();
+        }
+
+        window.onload = async function() {
+            siteAccessRenderGate();
+            if (siteAccessIsUnlocked()) await monthlyReportBoot();
         };
     </script>
 </body>
