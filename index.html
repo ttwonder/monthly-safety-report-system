@@ -4912,16 +4912,18 @@
             return localStorage.getItem(SITE_ACCESS_PASSWORD_UPDATED_KEY) || '';
         }
         function siteAccessIsUnlocked() {
-            const current = siteAccessGetPasswordHash();
-            return sessionStorage.getItem(SITE_ACCESS_UNLOCK_KEY) === current || localStorage.getItem(SITE_ACCESS_REMEMBER_KEY) === current;
+            // 進門密碼必須每次新瀏覽器 session 重新輸入；舊版曾存在的本機免輸入記錄在這裡清掉。
+            try { localStorage.removeItem(SITE_ACCESS_REMEMBER_KEY); } catch {}
+            return sessionStorage.getItem(SITE_ACCESS_UNLOCK_KEY) === siteAccessGetPasswordHash();
         }
         function siteAccessRememberUnlock(hash) {
+            // 只記住本次瀏覽器 session；不要寫入 localStorage。
+            try { localStorage.removeItem(SITE_ACCESS_REMEMBER_KEY); } catch {}
             sessionStorage.setItem(SITE_ACCESS_UNLOCK_KEY, hash);
-            localStorage.setItem(SITE_ACCESS_REMEMBER_KEY, hash);
         }
         function siteAccessForgetUnlock() {
             sessionStorage.removeItem(SITE_ACCESS_UNLOCK_KEY);
-            localStorage.removeItem(SITE_ACCESS_REMEMBER_KEY);
+            try { localStorage.removeItem(SITE_ACCESS_REMEMBER_KEY); } catch {}
         }
         async function siteAccessHashPassword(password) {
             const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(password || '')));
@@ -4972,7 +4974,7 @@
             return `
                 <section class="v1-category-card">
                     <div class="v1-category-title mb-2"><i class="fas fa-door-closed mr-1"></i>網站進入密碼</div>
-                    <div class="text-xs text-slate-500 mb-2">進入網站前需輸入此密碼。此電腦/瀏覽器會記住解鎖狀態，直到手動登出或網站密碼被修改。密碼只保存 SHA-256 hash，不保存明文。</div>
+                    <div class="text-xs text-slate-500 mb-2">進入網站前需輸入此密碼。進門密碼只記住本次瀏覽器 session；關閉瀏覽器或新 session 需重新輸入。內部用戶登入狀態則可在本機保留。密碼只保存 SHA-256 hash，不保存明文。</div>
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
                         <input id="site-access-new-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="新網站密碼">
                         <input id="site-access-confirm-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="再次輸入新密碼" onkeydown="if(event.key==='Enter') siteAccessUpdatePasswordFromForm()">
@@ -5185,7 +5187,7 @@
             v5SetSession(user);
             showToast(`已登入：${user.displayName || user.username}`);
         }
-        function v5Logout() { v5SetSession(null); siteAccessForgetUnlock(); showToast('已登出，已清除本機記住狀態'); siteAccessRenderGate(); }
+        function v5Logout() { v5SetSession(null); siteAccessForgetUnlock(); showToast('已登出，已清除本機用戶登入；進門密碼需重新輸入'); siteAccessRenderGate(); }
         async function v5SyncLatest() {
             await v4AutoSyncLatestFromCloud({ silent: false, source: '正在同步最新雲端資料...' });
         }
