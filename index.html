@@ -5167,6 +5167,34 @@
             v4QueueAutoSave('用戶權限');
             renderV4CloudPane();
         }
+        function v5OwnerRoleOptions(selectedRole) {
+            return ['owner','admin','operator'].map(role => `<option value="${role}" ${role === selectedRole ? 'selected' : ''}>${v5RoleLabel(role)}</option>`).join('');
+        }
+        function v5OwnerUpdateUserProfileFromButton(btn) {
+            if (!v5IsOwner()) return alert('只有 owner 可以修改用戶名與用戶類型。');
+            const row = btn?.closest?.('tr');
+            const oldUsername = row?.dataset?.username || '';
+            const username = (row?.querySelector?.('[data-v5-edit-username="1"]')?.value || '').trim();
+            const displayName = (row?.querySelector?.('[data-v5-edit-display="1"]')?.value || '').trim() || username;
+            const role = row?.querySelector?.('[data-v5-edit-role="1"]')?.value || 'operator';
+            if (!oldUsername) return alert('找不到要修改的用戶。');
+            if (!username) return alert('用戶名不能為空。');
+            if (!['owner','admin','operator'].includes(role)) return alert('用戶類型不正確。');
+            const users = v5GetUsers();
+            const idx = users.findIndex(u => u.username === oldUsername);
+            if (idx < 0) return alert('找不到此用戶。');
+            if (users.some((u, i) => i !== idx && u.username === username)) return alert('此用戶名已存在，請換一個。');
+            const nextUsers = users.map((u, i) => i === idx ? v5SafeUser(Object.assign({}, u, { username, displayName, role })) : u);
+            const ownerCount = nextUsers.filter(u => u.role === 'owner').length;
+            if (ownerCount < 1) return alert('至少必須保留一個 owner。');
+            if (ownerCount > 1) return alert('目前僅允許一個 owner。如需更換 owner，請先規劃轉移流程。');
+            v5SetUsers(nextUsers);
+            const current = v5CurrentUser();
+            if (current?.username === oldUsername) v5SetSession(nextUsers[idx]);
+            showToast(`已更新 ${oldUsername} 的用戶資料，請手動按「保存修改」上傳雲端`);
+            v4QueueAutoSave('用戶資料與權限');
+            renderV4CloudPane();
+        }
         async function v5OwnerResetUserPasswordFromButton(btn) {
             if (!v5IsOwner()) return alert('只有 owner 可以查看與修改所有用戶密碼。');
             const row = btn?.closest?.('tr');
@@ -5249,19 +5277,27 @@
             const canManage = v5CanManageData();
             if (!canManage && users.length) return `<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>`;
             const isOwner = v5IsOwner();
+            const usernameCell = (u) => isOwner ? `<input data-v5-edit-username="1" class="border border-indigo-100 rounded px-2 py-1 text-xs min-w-[120px]" value="${v1EscapeAttr(u.username)}">` : v2RecordText(u.username);
+            const displayCell = (u) => isOwner ? `<input data-v5-edit-display="1" class="border border-indigo-100 rounded px-2 py-1 text-xs min-w-[120px]" value="${v1EscapeAttr(u.displayName || u.username)}">` : v2RecordText(u.displayName);
+            const roleCell = (u) => isOwner ? `<select data-v5-edit-role="1" class="border border-indigo-100 rounded px-2 py-1 text-xs min-w-[92px]">${v5OwnerRoleOptions(u.role)}</select>` : v5RoleLabel(u.role);
             const passwordCell = (u) => isOwner ? `
                 <div class="flex flex-col sm:flex-row gap-1 items-stretch sm:items-center min-w-[220px]">
                     <span class="text-[11px] text-slate-500 whitespace-nowrap">已設定｜不可查看明文</span>
                     <input data-v5-reset-password="1" type="password" class="border border-indigo-100 rounded px-2 py-1 text-xs flex-1" placeholder="輸入新密碼">
                     <button class="v1-small-btn v1-primary-btn" onclick="v5OwnerResetUserPasswordFromButton(this)">重設</button>
                 </div>` : `<span class="text-slate-400">owner 可重設</span>`;
+            const actionCell = (u) => isOwner ? `
+                <div class="flex flex-wrap gap-1 items-center justify-center">
+                    <button class="v1-small-btn v1-primary-btn" onclick="v5OwnerUpdateUserProfileFromButton(this)">更新資料</button>
+                    ${u.role === 'owner' ? '<span class="text-slate-400 text-xs">不可刪除</span>' : `<button class="v1-small-btn v1-danger-btn" onclick="v5DeleteUser('${v1EscapeAttr(u.username)}')">刪除</button>`}
+                </div>` : '—';
             const rows = users.map(u => `
                 <tr data-username="${v1EscapeAttr(u.username)}">
-                    <td>${v2RecordText(u.username)}</td>
-                    <td>${v2RecordText(u.displayName)}</td>
-                    <td>${v5RoleLabel(u.role)}</td>
+                    <td>${usernameCell(u)}</td>
+                    <td>${displayCell(u)}</td>
+                    <td>${roleCell(u)}</td>
                     <td>${passwordCell(u)}</td>
-                    <td>${u.role === 'owner' ? '<span class="text-slate-400">受保護</span>' : (isOwner ? `<button class="v1-small-btn v1-danger-btn" onclick="v5DeleteUser('${v1EscapeAttr(u.username)}')">刪除</button>` : '—')}</td>
+                    <td>${actionCell(u)}</td>
                 </tr>`).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-3">尚未建立用戶。第一個用戶會自動成為 owner。</td></tr>`;
             const roleOptions = `<option value="operator">使用者</option><option value="admin">管理員</option>${isOwner || users.length===0 ? '<option value="owner">Owner</option>' : ''}`;
             return `
@@ -5276,8 +5312,9 @@
                         </select>
                     </div>
                     <div class="v1-action-row"><button class="v1-small-btn v1-primary-btn" onclick="v5AddOrUpdateUserFromForm()"><i class="fas fa-user-plus mr-1"></i>${users.length ? '新增 / 更新用戶' : '建立第一個 owner'}</button></div>
-                    <div class="overflow-auto border border-slate-200 rounded-lg"><table style="table-layout:auto;"><thead><tr><th>用戶名</th><th>顯示名稱</th><th>權限</th><th>密碼 / 重設</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
-                    <div class="text-xs text-slate-500 mt-2">密碼安全：系統只保存 SHA-256 hash，不保存也不顯示舊明文密碼。owner 可在此直接為任何用戶輸入新密碼並重設；重設後請按「保存修改」上傳雲端。</div>
+                    <div class="overflow-auto border border-slate-200 rounded-lg"><table style="table-layout:auto; min-width: 980px;"><thead><tr><th>用戶名</th><th>顯示名稱</th><th>用戶類型</th><th>密碼 / 重設</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
+                    <div class="text-xs text-slate-500 mt-2">owner 可在表格中直接修改用戶名、顯示名稱與用戶類型，點「更新資料」保存到本機；修改後請按「保存修改」上傳雲端。目前系統保持單一 owner 規則，避免權限失控。</div>
+                    <div class="text-xs text-slate-500 mt-1">密碼安全：系統只保存 SHA-256 hash，不保存也不顯示舊明文密碼。owner 可在此直接為任何用戶輸入新密碼並重設。</div>
                     <div class="text-xs text-slate-500 mt-1">權限規則：owner 可管理 owner / 管理員 / 使用者；管理員只可新增或更新非 owner 用戶，不能新增、修改或升級 owner；所有已登入用戶可同步最新與保存修改。</div>
                 </section>`;
         }
