@@ -5003,6 +5003,7 @@
             const type = String(el.type || '').toLowerCase();
             if (['file','hidden','button','submit','reset','color'].includes(type)) return '';
             if (el.id.startsWith('v5-login-')) return '';
+            if (el.id === 'v5-user-password' || el.dataset.v5ResetPassword === '1') return '';
             if (el.id.startsWith('site-access-')) return '';
             if (el.disabled || el.readOnly) return '';
             return `${location.pathname}::${el.id}`;
@@ -5166,6 +5167,26 @@
             v4QueueAutoSave('用戶權限');
             renderV4CloudPane();
         }
+        async function v5OwnerResetUserPasswordFromButton(btn) {
+            if (!v5IsOwner()) return alert('只有 owner 可以查看與修改所有用戶密碼。');
+            const row = btn?.closest?.('tr');
+            const username = row?.dataset?.username || '';
+            const input = row?.querySelector?.('[data-v5-reset-password="1"]');
+            const password = input?.value || '';
+            if (!username) return alert('找不到要修改的用戶。');
+            if (!password) return alert('請輸入新的用戶密碼。');
+            const users = v5GetUsers();
+            const idx = users.findIndex(u => u.username === username);
+            if (idx < 0) return alert('找不到此用戶。');
+            const passwordHash = await v5HashPassword(password);
+            users[idx] = v5SafeUser(Object.assign({}, users[idx], { passwordHash }));
+            v5SetUsers(users);
+            if (v5CurrentUser()?.username === username) v5SetSession(users[idx]);
+            if (input) input.value = '';
+            showToast(`已重設 ${username} 的密碼，請手動按「保存修改」上傳雲端`);
+            v4QueueAutoSave('用戶密碼');
+            renderV4CloudPane();
+        }
         function v5DeleteUser(username) {
             if (!v5IsOwner()) return alert('只有 owner 可以刪除用戶。');
             const users = v5GetUsers();
@@ -5227,8 +5248,22 @@
             const users = v5GetUsers();
             const canManage = v5CanManageData();
             if (!canManage && users.length) return `<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>`;
-            const rows = users.map(u => `<tr><td>${v2RecordText(u.username)}</td><td>${v2RecordText(u.displayName)}</td><td>${v5RoleLabel(u.role)}</td><td>${u.role === 'owner' ? '<span class="text-slate-400">受保護</span>' : (v5IsOwner() ? `<button class="v1-small-btn v1-danger-btn" onclick="v5DeleteUser('${v1EscapeAttr(u.username)}')">刪除</button>` : '—')}</td></tr>`).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-3">尚未建立用戶。第一個用戶會自動成為 owner。</td></tr>`;
-            const roleOptions = `<option value="operator">使用者</option><option value="admin">管理員</option>${v5IsOwner() || users.length===0 ? '<option value="owner">Owner</option>' : ''}`;
+            const isOwner = v5IsOwner();
+            const passwordCell = (u) => isOwner ? `
+                <div class="flex flex-col sm:flex-row gap-1 items-stretch sm:items-center min-w-[220px]">
+                    <span class="text-[11px] text-slate-500 whitespace-nowrap">已設定｜不可查看明文</span>
+                    <input data-v5-reset-password="1" type="password" class="border border-indigo-100 rounded px-2 py-1 text-xs flex-1" placeholder="輸入新密碼">
+                    <button class="v1-small-btn v1-primary-btn" onclick="v5OwnerResetUserPasswordFromButton(this)">重設</button>
+                </div>` : `<span class="text-slate-400">owner 可重設</span>`;
+            const rows = users.map(u => `
+                <tr data-username="${v1EscapeAttr(u.username)}">
+                    <td>${v2RecordText(u.username)}</td>
+                    <td>${v2RecordText(u.displayName)}</td>
+                    <td>${v5RoleLabel(u.role)}</td>
+                    <td>${passwordCell(u)}</td>
+                    <td>${u.role === 'owner' ? '<span class="text-slate-400">受保護</span>' : (isOwner ? `<button class="v1-small-btn v1-danger-btn" onclick="v5DeleteUser('${v1EscapeAttr(u.username)}')">刪除</button>` : '—')}</td>
+                </tr>`).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-3">尚未建立用戶。第一個用戶會自動成為 owner。</td></tr>`;
+            const roleOptions = `<option value="operator">使用者</option><option value="admin">管理員</option>${isOwner || users.length===0 ? '<option value="owner">Owner</option>' : ''}`;
             return `
                 <section class="v1-category-card">
                     <div class="v1-category-title mb-2">用戶與權限管理</div>
@@ -5241,8 +5276,9 @@
                         </select>
                     </div>
                     <div class="v1-action-row"><button class="v1-small-btn v1-primary-btn" onclick="v5AddOrUpdateUserFromForm()"><i class="fas fa-user-plus mr-1"></i>${users.length ? '新增 / 更新用戶' : '建立第一個 owner'}</button></div>
-                    <div class="overflow-auto border border-slate-200 rounded-lg"><table style="table-layout:auto;"><thead><tr><th>用戶名</th><th>顯示名稱</th><th>權限</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
-                    <div class="text-xs text-slate-500 mt-2">權限規則：owner 可管理 owner / 管理員 / 使用者；管理員只可新增或更新非 owner 用戶，不能新增、修改或升級 owner；所有已登入用戶可同步最新與保存修改。</div>
+                    <div class="overflow-auto border border-slate-200 rounded-lg"><table style="table-layout:auto;"><thead><tr><th>用戶名</th><th>顯示名稱</th><th>權限</th><th>密碼 / 重設</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
+                    <div class="text-xs text-slate-500 mt-2">密碼安全：系統只保存 SHA-256 hash，不保存也不顯示舊明文密碼。owner 可在此直接為任何用戶輸入新密碼並重設；重設後請按「保存修改」上傳雲端。</div>
+                    <div class="text-xs text-slate-500 mt-1">權限規則：owner 可管理 owner / 管理員 / 使用者；管理員只可新增或更新非 owner 用戶，不能新增、修改或升級 owner；所有已登入用戶可同步最新與保存修改。</div>
                 </section>`;
         }
 
