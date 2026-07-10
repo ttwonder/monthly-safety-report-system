@@ -3539,7 +3539,7 @@
                                 </div>
                                 ${group.modules.length ? group.modules.map(({item, index}) => `
                                     <div class="v1-module-row">
-                                        <input type="checkbox" ${item.selectedForPdf !== false ? 'checked' : ''} onchange="toggleV1Module(${index}, this.checked)" title="加入 PDF">
+                                        <input type="checkbox" data-v1-module-index="${index}" ${item.selectedForPdf !== false ? 'checked' : ''} onchange="toggleV1Module(${index}, this.checked)" title="加入 PDF">
                                         <div>
                                             <div class="v1-module-title"><i class="${item.icon || 'fas fa-angle-right'} mr-1" style="color:${item.iconColor || '#4f46e5'}"></i>${item.title || '未命名模塊'}</div>
                                             <div class="v1-module-meta">PDF 順序：${item.pdfOrder || index + 1}　｜　${item.selectedForPdf !== false ? '已加入 PDF' : '不輸出'}</div>
@@ -3596,8 +3596,8 @@
             setTimeout(() => { if (window.renderAllCharts) window.renderAllCharts(); }, 100);
         }
 
-        function buildV1PdfHtml() {
-            return buildV1SelectedEditorPrintHtml();
+        function buildV1PdfHtml(options = {}) {
+            return buildV1SelectedEditorPrintHtml(options);
         }
 
         function syncV1PdfSelectionFromDom() {
@@ -3630,8 +3630,10 @@
             return row;
         }
 
-        function buildV1SelectedEditorPrintHtml() {
-            syncV1PdfSelectionFromDom();
+        function buildV1SelectedEditorPrintHtml(options = {}) {
+            // 不在一般預覽建構時讀取舊 PDF DOM checkbox，避免模塊庫勾選被上一版預覽狀態覆蓋。
+            // 只有 PDF 頁面的「刷新預覽」和「輸出勾選 PDF」會先明確呼叫 syncV1PdfSelectionFromDom()。
+            if (options.syncFromDom === true) syncV1PdfSelectionFromDom();
             const selected = v1GetSelectedModules();
             if (!selected.length) {
                 return `<div class="v1-empty-state">尚未勾選任何模塊，請先在左側或「模塊庫」選擇要輸出的內容。</div>`;
@@ -3678,7 +3680,7 @@
         }
 
         function buildV1EditorPrintCloneHtml() {
-            return buildV1SelectedEditorPrintHtml();
+            return buildV1SelectedEditorPrintHtml({ syncFromDom: false });
         }
 
         function buildV1PdfModuleHtml(item, displayIndex) {
@@ -3707,7 +3709,7 @@
         async function prepareV1PdfPrintArea() {
             const printArea = document.getElementById('pdfPrintArea');
             if (!printArea) return false;
-            printArea.innerHTML = buildV1PdfHtml();
+            printArea.innerHTML = buildV1PdfHtml({ syncFromDom: false });
             document.body.classList.add('pdf-render-prep');
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             if (window.renderAllCharts) window.renderAllCharts();
