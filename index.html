@@ -946,15 +946,36 @@
         .custom-data-table .col-resize-handle:hover { opacity: 1; }
         body.table-col-resizing { cursor: col-resize !important; user-select: none !important; }
         body.table-col-resizing * { cursor: col-resize !important; }
-        :root { --editor-toolbar-offset: 64px; --editor-scroll-margin: 190px; }
-        #v1TabsBar { top: 0 !important; z-index: 70 !important; }
+        :root { --editor-toolbar-offset: 64px; --editor-scroll-margin: 190px; --editor-sticky-shield-height: 230px; }
+        #v1TabsBar {
+            top: 0 !important;
+            z-index: 90 !important;
+            background: linear-gradient(135deg, #e0eaf5 0%, #f3e8ff 50%, #fce7f3 100%) !important;
+            border-bottom: 1px solid rgba(129,140,248,.35);
+        }
+        #v1StickyShield {
+            display: block;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: var(--editor-sticky-shield-height);
+            z-index: 80;
+            pointer-events: none;
+            background: linear-gradient(135deg, #e0eaf5 0%, #f3e8ff 50%, #fce7f3 100%);
+            box-shadow: 0 10px 28px rgba(79,70,229,.14);
+        }
         #richEditorToolbar {
             position: sticky !important;
             top: var(--editor-toolbar-offset) !important;
-            z-index: 65 !important;
+            z-index: 85 !important;
             max-height: 34vh;
             overflow-x: auto;
             overflow-y: auto;
+            background: linear-gradient(135deg, #e0eaf5 0%, #f3e8ff 50%, #fce7f3 100%) !important;
+            border-color: rgba(199,210,254,.95) !important;
+            box-shadow: 0 10px 28px rgba(79,70,229,.18) !important;
+            backdrop-filter: none !important;
         }
         #tableBody tr, .editable-div, .custom-data-table, .content-inline-img, .content-block {
             scroll-margin-top: var(--editor-scroll-margin);
@@ -2331,11 +2352,13 @@
             const toolbar = document.getElementById('richEditorToolbar');
             if (!toolbar) return;
             const tabsHeight = tabs ? Math.ceil(tabs.getBoundingClientRect().height) : 0;
-            const toolbarTop = tabsHeight + 8;
+            const toolbarTop = tabsHeight;
             document.documentElement.style.setProperty('--editor-toolbar-offset', toolbarTop + 'px');
             requestAnimationFrame(() => {
                 const toolbarHeight = toolbar ? Math.ceil(toolbar.getBoundingClientRect().height) : 120;
-                document.documentElement.style.setProperty('--editor-scroll-margin', (toolbarTop + toolbarHeight + 24) + 'px');
+                const shieldHeight = toolbarTop + toolbarHeight + 8;
+                document.documentElement.style.setProperty('--editor-sticky-shield-height', shieldHeight + 'px');
+                document.documentElement.style.setProperty('--editor-scroll-margin', (shieldHeight + 24) + 'px');
             });
         }
         window.addEventListener('resize', () => setTimeout(refreshEditorStickyOffsets, 50));
@@ -3439,8 +3462,13 @@
 
             const editor = document.createElement('div');
             editor.id = 'v1-editor-workspace';
+            const stickyShield = document.createElement('div');
+            stickyShield.id = 'v1StickyShield';
+            stickyShield.className = 'no-print';
+            stickyShield.setAttribute('aria-hidden', 'true');
             toolbar.parentNode.insertBefore(tabs, toolbar);
             toolbar.parentNode.insertBefore(editor, toolbar);
+            editor.appendChild(stickyShield);
             editor.appendChild(toolbar);
             editor.appendChild(reportContainer);
 
