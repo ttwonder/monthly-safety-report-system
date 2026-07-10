@@ -1099,6 +1099,7 @@
         .v1-preview-shell .v1-selected-editor-print-clone .print-only { display:block !important; text-align:center; font-size:14px; margin-bottom:6px; }
         .v1-preview-shell .v1-selected-editor-print-clone .print-icon-show { display:block !important; }
         #pdfPrintArea .v1-selected-editor-print-clone { width: 100%; }
+        .pdf-page-footer { display:none; }
         .v1-empty-state { color:#94a3b8; text-align:center; padding:24px; border:1px dashed #cbd5e1; border-radius:12px; background:#fff; }
         .v1-history-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
         .v1-note-box { border-left:4px solid #8b5cf6; background:#faf5ff; color:#5b21b6; padding:10px 12px; border-radius:8px; font-size:13px; }
@@ -1138,16 +1139,74 @@
         }
         body.pdf-render-prep #pdfPrintArea .trend-canvas { display:block !important; max-width:100% !important; }
         @media (max-width: 900px) { .v1-pdf-layout { grid-template-columns:1fr; } .v1-pdf-side { position:static; } .v1-pdf-toc ol { columns:1; } }
+        @page {
+            size: A4 landscape;
+            margin: 8mm 8mm 13mm 8mm;
+            @bottom-right {
+                content: "第 " counter(page) " / " counter(pages) " 頁";
+                font-size: 9px;
+                color: #475569;
+            }
+        }
         @media print {
             body.pdf-print-mode { background:#fff !important; padding:0 !important; }
             body.pdf-print-mode > *:not(#pdfPrintArea) { display:none !important; }
-            body.pdf-print-mode #pdfPrintArea { display:block !important; position:static !important; width:100% !important; margin:0 !important; padding:0 !important; }
+            body.pdf-print-mode #pdfPrintArea { display:block !important; position:static !important; width:100% !important; margin:0 !important; padding:0 0 8mm 0 !important; }
+            body.pdf-print-mode #pdfPrintArea .v1-print-document { display:block !important; position:relative !important; }
+            body.pdf-print-mode #pdfPrintArea .v1-selected-editor-print-clone {
+                width: 100% !important;
+                max-width: none !important;
+                box-shadow: none !important;
+                border-radius: 0 !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                page-break-before: auto !important;
+                break-before: auto !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .report-header-section {
+                min-height: auto !important;
+                margin: 0 0 4mm 0 !important;
+                padding: 0 0 3mm 0 !important;
+                page-break-after: auto !important;
+                break-after: auto !important;
+            }
+            body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] {
+                page-break-before: auto !important;
+                break-before: auto !important;
+                page-break-inside: auto !important;
+                break-inside: auto !important;
+            }
+            body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] tr,
+            body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] td,
+            body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] th,
+            body.pdf-print-mode #pdfPrintArea .content-block,
+            body.pdf-print-mode #pdfPrintArea .custom-data-table,
+            body.pdf-print-mode #pdfPrintArea .data-card-table,
+            body.pdf-print-mode #pdfPrintArea .kpi-card-container,
+            body.pdf-print-mode #pdfPrintArea .progress-card-container,
+            body.pdf-print-mode #pdfPrintArea .zone-card-container,
+            body.pdf-print-mode #pdfPrintArea .trend-chart-container {
+                page-break-inside: auto !important;
+                break-inside: auto !important;
+            }
+            body.pdf-print-mode #pdfPrintArea thead { display: table-header-group; }
             body.pdf-print-mode .v1-pdf-paper { max-width:none !important; width:100% !important; box-shadow:none !important; border-radius:0 !important; padding:0 !important; }
             body.pdf-print-mode .v1-pdf-cover { margin-top:0 !important; }
             body.pdf-print-mode .no-print { display:none !important; }
             body.pdf-print-mode #pdfPrintArea .chart-table-area { display:block !important; }
-            body.pdf-print-mode .v1-pdf-module { page-break-inside: avoid !important; break-inside: avoid !important; }
+            body.pdf-print-mode .v1-pdf-module { page-break-inside: auto !important; break-inside: auto !important; }
             body.pdf-print-mode .v1-pdf-toc ol { columns:2; }
+            body.pdf-print-mode .pdf-page-footer {
+                display:block !important;
+                position: fixed !important;
+                right: 8mm !important;
+                bottom: 4mm !important;
+                color: #475569 !important;
+                font-size: 9px !important;
+                font-weight: 700 !important;
+                z-index: 9999 !important;
+            }
+            body.pdf-print-mode .pdf-page-footer::after { content: "第 " counter(page) " / " counter(pages) " 頁"; }
         }
 
 
@@ -3676,7 +3735,7 @@
             });
             table.appendChild(tbody);
             container.appendChild(table);
-            return container.outerHTML;
+            return `<div class="v1-print-document">${container.outerHTML}<div class="pdf-page-footer" aria-hidden="true"></div></div>`;
         }
 
         function buildV1EditorPrintCloneHtml() {
