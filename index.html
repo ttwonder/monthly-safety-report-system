@@ -927,8 +927,38 @@
 
         /* === 內容內嵌樣式 (圖片與表格) === */
         .content-inline-img { transition: outline 0.1s; break-inside: avoid; page-break-inside: avoid; }
-        .custom-data-table { transition: outline 0.1s; break-inside: avoid; page-break-inside: avoid; }
-        .custom-data-table th, .custom-data-table td { min-width: 50px; transition: outline 0.1s; }
+        .custom-data-table { transition: outline 0.1s; break-inside: avoid; page-break-inside: avoid; table-layout: fixed; }
+        .custom-data-table th, .custom-data-table td { min-width: 50px; transition: outline 0.1s; position: relative; overflow-wrap: anywhere; }
+        .custom-data-table col { min-width: 42px; }
+        .custom-data-table .col-resize-handle {
+            position: absolute;
+            top: 0;
+            right: -4px;
+            width: 8px;
+            height: 100%;
+            cursor: col-resize;
+            user-select: none;
+            z-index: 6;
+            background: linear-gradient(to right, transparent 0, transparent 3px, rgba(16,185,129,.65) 3px, rgba(16,185,129,.65) 5px, transparent 5px);
+            opacity: .2;
+        }
+        .custom-data-table th:hover .col-resize-handle,
+        .custom-data-table .col-resize-handle:hover { opacity: 1; }
+        body.table-col-resizing { cursor: col-resize !important; user-select: none !important; }
+        body.table-col-resizing * { cursor: col-resize !important; }
+        :root { --editor-toolbar-offset: 64px; --editor-scroll-margin: 190px; }
+        #v1TabsBar { top: 0 !important; z-index: 70 !important; }
+        #richEditorToolbar {
+            position: sticky !important;
+            top: var(--editor-toolbar-offset) !important;
+            z-index: 65 !important;
+            max-height: 34vh;
+            overflow-x: auto;
+            overflow-y: auto;
+        }
+        #tableBody tr, .editable-div, .custom-data-table, .content-inline-img, .content-block {
+            scroll-margin-top: var(--editor-scroll-margin);
+        }
 
         /* === 終極版 T型指標卡 === */
         .data-card-table { 
@@ -1189,7 +1219,7 @@
     </div>
 
     <!-- 頂部控制與富文本工具列 -->
-    <div class="no-print sticky top-0 z-40 dreamy-bg rounded-lg shadow-sm border border-white p-2 mb-3 overflow-x-auto no-scrollbar backdrop-blur-sm bg-opacity-90">
+    <div id="richEditorToolbar" class="no-print sticky top-0 z-40 dreamy-bg rounded-lg shadow-sm border border-white p-2 mb-3 overflow-x-auto no-scrollbar backdrop-blur-sm bg-opacity-90">
         <div class="flex flex-col gap-2 min-w-[1050px]">
             
             <!-- === 第一排 === -->
@@ -1712,13 +1742,16 @@
         }
 
         async function manualSave(showMsg = true) {
-            if (document.activeElement && typeof document.activeElement.blur === 'function' && document.activeElement.classList.contains('editable-div')) {
+            if (showMsg && document.activeElement && typeof document.activeElement.blur === 'function' && document.activeElement.classList.contains('editable-div')) {
                 document.activeElement.blur();
             }
-            setTimeout(async () => {
-                await saveToDB(reportData, Date.now());
-                if (showMsg) showToast('保存成功！');
-            }, 50);
+            return new Promise((resolve) => {
+                setTimeout(async () => {
+                    await saveToDB(reportData, Date.now());
+                    if (showMsg) showToast('保存成功！');
+                    resolve();
+                }, 50);
+            });
         }
 
         function initPeriodSelects() {
@@ -2135,7 +2168,9 @@
 
             setTimeout(() => {
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div));
+                initAllCustomTableResizers(tbody);
                 redrawChartsWhenVisible();
+                refreshEditorStickyOffsets();
             }, 50);
         }
 
@@ -2197,6 +2232,138 @@
             sel.removeAllRanges();
             sel.addRange(range);
             lastSavedRange = range.cloneRange();
+        }
+
+        function captureEditorViewportState(element) {
+            const active = document.activeElement && document.body.contains(document.activeElement) ? document.activeElement : null;
+            const target = (element && element.getBoundingClientRect) ? element : (active && active.getBoundingClientRect ? active : null);
+            const rect = target ? target.getBoundingClientRect() : null;
+            return {
+                x: window.scrollX,
+                y: window.scrollY,
+                active,
+                target,
+                targetTop: rect ? rect.top : null
+            };
+        }
+
+        function restoreEditorViewportState(state) {
+            if (!state) return;
+            const restore = () => {
+                try {
+                    if (state.active && document.body.contains(state.active) && typeof state.active.focus === 'function') {
+                        state.active.focus({ preventScroll: true });
+                    }
+                } catch {}
+                if (state.target && document.body.contains(state.target) && Number.isFinite(state.targetTop)) {
+                    const nowTop = state.target.getBoundingClientRect().top;
+                    const delta = nowTop - state.targetTop;
+                    if (Math.abs(delta) > 2) window.scrollBy(0, delta);
+                    else if (Math.abs(window.scrollY - state.y) > 4) window.scrollTo(state.x, state.y);
+                } else if (Math.abs(window.scrollY - state.y) > 4) {
+                    window.scrollTo(state.x, state.y);
+                }
+            };
+            requestAnimationFrame(() => setTimeout(restore, 0));
+        }
+
+        function refreshEditorStickyOffsets() {
+            const tabs = document.getElementById('v1TabsBar');
+            const toolbar = document.getElementById('richEditorToolbar');
+            if (!toolbar) return;
+            const tabsHeight = tabs ? Math.ceil(tabs.getBoundingClientRect().height) : 0;
+            const toolbarTop = tabsHeight + 8;
+            document.documentElement.style.setProperty('--editor-toolbar-offset', toolbarTop + 'px');
+            requestAnimationFrame(() => {
+                const toolbarHeight = toolbar ? Math.ceil(toolbar.getBoundingClientRect().height) : 120;
+                document.documentElement.style.setProperty('--editor-scroll-margin', (toolbarTop + toolbarHeight + 24) + 'px');
+            });
+        }
+        window.addEventListener('resize', () => setTimeout(refreshEditorStickyOffsets, 50));
+
+        function ensureCustomTableColgroup(table) {
+            if (!table || !table.classList || !table.classList.contains('custom-data-table')) return null;
+            const firstRow = table.querySelector('tr');
+            const count = firstRow ? firstRow.children.length : 0;
+            if (!count) return null;
+            let colgroup = table.querySelector(':scope > colgroup');
+            if (!colgroup) {
+                colgroup = document.createElement('colgroup');
+                table.insertBefore(colgroup, table.firstChild);
+            }
+            const defaultPresets = count === 3 ? [42, 23, 35] : Array.from({ length: count }, (_, i) => i === 0 ? 36 : Math.max(16, Math.floor(64 / Math.max(1, count - 1))));
+            while (colgroup.children.length < count) {
+                const col = document.createElement('col');
+                const idx = colgroup.children.length;
+                col.style.width = (defaultPresets[idx] || Math.floor(100 / count)) + '%';
+                colgroup.appendChild(col);
+            }
+            while (colgroup.children.length > count) colgroup.lastElementChild.remove();
+            return colgroup;
+        }
+
+        function getTableColumnWidthsPx(table, colgroup) {
+            const total = Math.max(1, table.getBoundingClientRect().width);
+            return Array.from(colgroup.children).map((col, idx) => {
+                const raw = String(col.style.width || '').trim();
+                if (raw.endsWith('%')) return Math.max(40, total * parseFloat(raw) / 100);
+                if (raw.endsWith('px')) return Math.max(40, parseFloat(raw));
+                const cell = table.rows[0] && table.rows[0].cells[idx];
+                return Math.max(40, cell ? cell.getBoundingClientRect().width : total / colgroup.children.length);
+            });
+        }
+
+        function applyTableColumnWidths(table, widths) {
+            const colgroup = ensureCustomTableColgroup(table);
+            if (!colgroup) return;
+            const total = widths.reduce((a, b) => a + Math.max(40, b), 0) || 1;
+            Array.from(colgroup.children).forEach((col, idx) => {
+                col.style.width = (Math.max(40, widths[idx] || 40) / total * 100).toFixed(2) + '%';
+            });
+        }
+
+        function initCustomTableResizer(table) {
+            if (!table || !table.classList || !table.classList.contains('custom-data-table')) return;
+            const colgroup = ensureCustomTableColgroup(table);
+            if (!colgroup) return;
+            table.querySelectorAll('.col-resize-handle').forEach(h => h.remove());
+            const headerCells = Array.from(table.rows[0] ? table.rows[0].cells : []);
+            headerCells.forEach((cell, idx) => {
+                cell.style.position = 'relative';
+                if (idx >= headerCells.length - 1) return;
+                const handle = document.createElement('span');
+                handle.className = 'col-resize-handle no-print';
+                handle.contentEditable = 'false';
+                handle.title = '拖拉調整欄寬';
+                handle.addEventListener('mousedown', (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    const startX = ev.clientX;
+                    const startWidths = getTableColumnWidthsPx(table, colgroup);
+                    const minWidth = 42;
+                    document.body.classList.add('table-col-resizing');
+                    const onMove = (moveEv) => {
+                        const delta = moveEv.clientX - startX;
+                        const widths = startWidths.slice();
+                        widths[idx] = Math.max(minWidth, startWidths[idx] + delta);
+                        widths[idx + 1] = Math.max(minWidth, startWidths[idx + 1] - delta);
+                        applyTableColumnWidths(table, widths);
+                    };
+                    const onUp = () => {
+                        document.removeEventListener('mousemove', onMove);
+                        document.removeEventListener('mouseup', onUp);
+                        document.body.classList.remove('table-col-resizing');
+                        triggerAutoSave(table);
+                    };
+                    document.addEventListener('mousemove', onMove);
+                    document.addEventListener('mouseup', onUp);
+                });
+                cell.appendChild(handle);
+            });
+        }
+
+        function initAllCustomTableResizers(root = document) {
+            root.querySelectorAll('.custom-data-table').forEach(initCustomTableResizer);
         }
 
         function insertHtmlAtSelection(html, options = {}) {
@@ -2438,7 +2605,7 @@
         
         function insertHighlight() {
             restoreSelection();
-            const html = `&nbsp;<span class="highlight-val">數值</span>&nbsp;`;
+            const html = `&nbsp;&nbsp;<span class="highlight-val">數值</span>&nbsp;&nbsp;`;
             insertHtmlAtSelection(html);
             setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
         }
@@ -2463,22 +2630,30 @@
             restoreSelection();
             const layout = layoutStyle({ inlineWidth: '48%', display: 'inline-table', blockDisplay: 'table' });
             const html = `
-            <table class="custom-data-table ${layout.extraClass}" data-layout="${layout.dataLayout}" style="${layout.style}; border-collapse: collapse;">
+            <table class="custom-data-table ${layout.extraClass}" data-layout="${layout.dataLayout}" data-resizable-table="1" style="${layout.style}; border-collapse: collapse; table-layout: fixed;">
+                <colgroup>
+                    <col style="width: 42%;">
+                    <col style="width: 23%;">
+                    <col style="width: 35%;">
+                </colgroup>
                 <tbody>
                     <tr>
-                        <th style="border: 1px solid #94a3b8; padding: 4px; background: #f1f5f9; text-align: center; font-weight: bold; min-width: 50px;">標題 1</th>
-                        <th style="border: 1px solid #94a3b8; padding: 4px; background: #f1f5f9; text-align: center; font-weight: bold; min-width: 50px;">標題 2</th>
-                        <th style="border: 1px solid #94a3b8; padding: 4px; background: #f1f5f9; text-align: center; font-weight: bold; min-width: 50px;">標題 3</th>
+                        <th contenteditable="true" style="border: 1px solid #94a3b8; padding: 4px; background: #f1f5f9; text-align: center; font-weight: bold; min-width: 50px;">項目 / 說明</th>
+                        <th contenteditable="true" style="border: 1px solid #94a3b8; padding: 4px; background: #f1f5f9; text-align: center; font-weight: bold; min-width: 50px;">數值</th>
+                        <th contenteditable="true" style="border: 1px solid #94a3b8; padding: 4px; background: #f1f5f9; text-align: center; font-weight: bold; min-width: 50px;">備註 / 對策</th>
                     </tr>
                     <tr>
-                        <td style="border: 1px solid #94a3b8; padding: 4px;">數據</td>
-                        <td style="border: 1px solid #94a3b8; padding: 4px;">數據</td>
-                        <td style="border: 1px solid #94a3b8; padding: 4px;">數據</td>
+                        <td contenteditable="true" style="border: 1px solid #94a3b8; padding: 4px;">請輸入項目</td>
+                        <td contenteditable="true" style="border: 1px solid #94a3b8; padding: 4px; text-align:center;">0</td>
+                        <td contenteditable="true" style="border: 1px solid #94a3b8; padding: 4px;">請輸入備註</td>
                     </tr>
                 </tbody>
             </table>`;
-            insertHtmlAtSelection(wrapInsertedHtmlForLayout(html));
-            setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
+            const inserted = insertHtmlAtSelection(wrapInsertedHtmlForLayout(html));
+            setTimeout(() => {
+                document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div));
+                initAllCustomTableResizers(inserted && inserted.editable ? inserted.editable : document);
+            }, 10);
         }
 
         let activeImg = null;
@@ -2700,16 +2875,27 @@
                 return;
             }
             const index = Array.from(activeTableCell.parentNode.children).indexOf(activeTableCell);
+            const insertIndex = direction === 'after' ? index + 1 : index;
+            const colgroup = ensureCustomTableColgroup(activeTable);
+            if (colgroup) {
+                const newCol = document.createElement('col');
+                newCol.style.width = '18%';
+                const refCol = colgroup.children[insertIndex] || null;
+                colgroup.insertBefore(newCol, refCol);
+            }
             const trs = activeTable.querySelectorAll('tr');
             trs.forEach(tr => {
                 const targetCell = tr.children[index];
                 if (targetCell) {
                     const newCell = targetCell.cloneNode(true);
+                    newCell.querySelectorAll('.col-resize-handle').forEach(h => h.remove());
                     newCell.innerHTML = '&nbsp;';
                     if (direction === 'after') tr.insertBefore(newCell, targetCell.nextSibling);
                     else tr.insertBefore(newCell, targetCell);
                 }
             });
+            ensureCustomTableColgroup(activeTable);
+            initCustomTableResizer(activeTable);
             triggerAutoSave(activeTable);
         }
         function deleteTableCol() {
@@ -2722,6 +2908,10 @@
             const trs = activeTable.querySelectorAll('tr');
             if (trs[0].children.length > 1) {
                 trs.forEach(tr => { if (tr.children[index]) tr.children[index].remove(); });
+                const colgroup = ensureCustomTableColgroup(activeTable);
+                if (colgroup && colgroup.children[index]) colgroup.children[index].remove();
+                ensureCustomTableColgroup(activeTable);
+                initCustomTableResizer(activeTable);
                 hideTableToolbar(); triggerAutoSave(activeTable);
             } else alert('最後一欄無法刪除，請直接刪除整個表格。');
         }
@@ -2741,24 +2931,30 @@
             }
         }
 
-        // 【修正 2】：更新自動儲存邏輯，處理非表格內容的保存
-        function triggerAutoSave(element) {
+        // 【穩定保存】：保存時保留目前捲動位置與焦點，避免輸入中跳到頁面頂端
+        async function triggerAutoSave(element) {
             if (!element) return;
-            const editableDiv = element.classList.contains('editable-div') ? element : element.closest('.editable-div');
-            if (editableDiv) {
-                const tr = editableDiv.closest('tr');
-                if (tr) {
-                    const index = tr.dataset.index;
-                    const td = editableDiv.closest('td');
-                    if (td && td.cellIndex === 1) updateData(index, 'title', editableDiv.innerHTML);
-                    else if (td && td.cellIndex === 2) updateColumnData(index, editableDiv.dataset.colIndex || 0, editableDiv.innerHTML);
+            const anchor = (element.closest && (element.closest('.editable-div') || element.closest('tr') || element.closest('.custom-data-table'))) || element;
+            const viewportState = captureEditorViewportState(anchor);
+            try {
+                const editableDiv = element.classList && element.classList.contains('editable-div') ? element : (element.closest ? element.closest('.editable-div') : null);
+                if (editableDiv) {
+                    const tr = editableDiv.closest('tr');
+                    if (tr) {
+                        const index = tr.dataset.index;
+                        const td = editableDiv.closest('td');
+                        if (td && td.cellIndex === 1) await updateData(index, 'title', editableDiv.innerHTML);
+                        else if (td && td.cellIndex === 2) await updateColumnData(index, editableDiv.dataset.colIndex || 0, editableDiv.innerHTML);
+                    } else {
+                        // 例如主標題：保存但不 blur，不打斷正在輸入的 caret / scroll
+                        await manualSave(false);
+                    }
                 } else {
-                    // 如果不是表格內的 .editable-div（例如主標題），直接觸發整頁保存
-                    manualSave(false);
+                    // 日期、區間、工具欄等：保存但不讓頁面重回頂端
+                    await manualSave(false);
                 }
-            } else {
-                // 對於沒有被 .editable-div 包覆的輸入框 (如日期、選擇區間等)，直接觸發保存
-                manualSave(false);
+            } finally {
+                restoreEditorViewportState(viewportState);
             }
         }
 
@@ -3230,6 +3426,7 @@
             renderV1RecordsPane();
             renderV3TrendPane();
             renderV4CloudPane();
+            setTimeout(refreshEditorStickyOffsets, 50);
         }
 
         function switchV1Tab(tab) {
@@ -3254,7 +3451,7 @@
             if (tab === 'cloud') renderV4CloudPane();
             renderV5SessionBar();
             if (tab === 'editor' || tab === 'pdf') redrawChartsWhenVisible();
-            setTimeout(() => v6ClaimCurrentSectionLock({ silent: true }), 0);
+            setTimeout(() => { refreshEditorStickyOffsets(); v6ClaimCurrentSectionLock({ silent: true }); }, 0);
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }
 
