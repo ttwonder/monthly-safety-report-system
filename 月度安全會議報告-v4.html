@@ -3668,6 +3668,46 @@
             });
         }
 
+        function v1PadDatePart(value) {
+            const n = parseInt(value, 10);
+            return Number.isFinite(n) && n > 0 ? String(n).padStart(2, '0') : '--';
+        }
+
+        function v1FormatReportDate(value) {
+            const raw = String(value || '').trim();
+            const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+            if (m) return `${m[1]}/${m[2]}/${m[3]}`;
+            return raw || '未設定';
+        }
+
+        function normalizeSelectedPdfHeader(header) {
+            if (!header) return;
+            const startM = document.getElementById('startMonth')?.value || '';
+            const startD = document.getElementById('startDay')?.value || '';
+            const endM = document.getElementById('endMonth')?.value || '';
+            const endD = document.getElementById('endDay')?.value || '';
+            const reportDate = document.getElementById('reportDate')?.value || '';
+
+            const periodText = `${v1PadDatePart(startM)}/${v1PadDatePart(startD)} - ${v1PadDatePart(endM)}/${v1PadDatePart(endD)}`;
+            const periodSection = header.querySelector('.period-section');
+            if (periodSection) {
+                const periodControls = periodSection.querySelector('div');
+                const periodStatic = document.createElement('span');
+                periodStatic.className = 'v1-pdf-static-date inline-flex items-center ml-1 bg-white/90 border border-indigo-200 rounded px-2 py-0.5 text-indigo-900 font-black';
+                periodStatic.textContent = periodText;
+                if (periodControls) periodControls.replaceWith(periodStatic);
+                else periodSection.appendChild(periodStatic);
+            }
+
+            const dateInput = header.querySelector('input[type="date"]');
+            if (dateInput) {
+                const dateStatic = document.createElement('span');
+                dateStatic.className = 'v1-pdf-static-date border border-indigo-200 rounded px-2 py-1 bg-white/90 text-indigo-900 font-black';
+                dateStatic.textContent = v1FormatReportDate(reportDate);
+                dateInput.replaceWith(dateStatic);
+            }
+        }
+
         function stripCloneIds(root) {
             root.querySelectorAll('[id]').forEach(el => {
                 el.setAttribute('data-cloned-id', el.id);
@@ -3711,6 +3751,7 @@
             if (header) {
                 header.querySelectorAll('[contenteditable="true"]').forEach(el => el.removeAttribute('contenteditable'));
                 header.querySelectorAll('.no-print').forEach(el => el.remove());
+                normalizeSelectedPdfHeader(header);
                 stripCloneIds(header);
                 container.appendChild(header);
             }
