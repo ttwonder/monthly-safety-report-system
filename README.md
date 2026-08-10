@@ -1,54 +1,79 @@
 # 月度安全會議報告系統
 
-## 主要使用文件
+GitHub Pages 首頁：`index.html`
+保留既有下載連結的同版文件：`月度安全會議報告-v4.html`
 
-線上部署使用：
+兩份 HTML 必須保持完全一致。文件名保留 `v4` 是為了不破壞既有連結，實際功能版本為 **V7**。
 
-`index.html`
+## V7 主要能力
 
-本地直接打開也可使用：
+- 保留原有月報編輯、模塊庫、PDF、歷史、資料記錄、KPI/趨勢及數據管理 UI。
+- report metadata、每個 module、五類 records 均為獨立 Supabase authority row。
+- 同一 entity 同時只授予一個 editor session lease；不同 entity 可由不同使用者並行保存。
+- server-side claim / renew / release / takeover、TTL、client session、lease ID、fencing token。
+- 每個 entity 獨立 revision/CAS；workspace watermark 不作全域內容 CAS。
+- `operation_id` ledger 處理 lost acknowledgement，重送不重複增版或寫 audit。
+- Realtime event 只帶 entity ID/revision/sequence；client 收到後逐項重讀並以 watermark 補抓。
+- 有本機草稿或 lease 的項目不會被遠端內容自動覆蓋。
+- record/module 刪除先在雲端 transaction 成功，再從畫面隱藏。
+- KPI 多 module 更新採單一 transaction，全成或全不成。
+- 正式 PDF 先建立資料庫一致、不可變 snapshot。
+- 進站密碼與內部帳號 hash 只留在 private server tables；瀏覽器只收到安全 user projection。
+- legacy SHA-256 在首次成功登入後自動升級 bcrypt。
 
-`月度安全會議報告-v4.html`
+## 主要檔案
 
-目前實際功能版本為 V6，包含：
+- `index.html`、`月度安全會議報告-v4.html`：正式 UI。
+- `monthly-collaboration-core.js`：穩定 entity key、lease/watermark/snapshot projection 純函式。
+- `monthly-collaboration-client.js`：session、lease、CAS、operation retry、draft、catch-up client。
+- `monthly-collaboration-v7.js`：Supabase transport、Realtime、DOM guard、逐項 diff adapter。
+- `vendor/supabase-2.112.2.js`：固定版本 Supabase browser SDK，不依賴未鎖定 CDN。
+- `docs/supabase-schema-v7.sql`：additive schema、migration、RPC、RLS、Realtime policy。
+- `docs/supabase-schema-v7-activate.sql`：正式 authority activation transaction。
+- `docs/v7-deployment-and-cutover.md`：必讀的兩階段部署、驗收與異常處理手冊。
+- `docs/supabase-schema-v6.sql`：legacy V6 schema，僅供升級來源與歷史參考。
 
-- V1：模塊化月報、勾選式 PDF、歷史 / 備份
-- V2：資料記錄庫、檢查 / 缺失 / PSC 滯留 / 行動項 / Safety Walk 記錄
-- V3：KPI 自動化、近 3 / 6 / 12 月趨勢、月報模塊更新
-- V4：Supabase 雲端同步、完整 JSON 雲端包、GitHub Pages 部署
-- V5：多人協作登入、owner/admin/operator 權限、數據管理、穩定趨勢圖插入定位
-- V6：revision 樂觀鎖防覆蓋、區塊軟鎖、保存歷史、多人同時編輯衝突提示
+## 部署順序
 
-## 文件夾說明
+1. 備份現有完整 JSON，盤點其他裝置的 IndexedDB 歷史／草稿。
+2. 確認 legacy 使用者恰好一位 Owner。
+3. 在 Supabase Dashboard 啟用 Anonymous Sign-Ins。
+4. 執行 `docs/supabase-schema-v7.sql`；確認 authority 仍為 `LEGACY_ACTIVE` 且 migration hashes/counts 正確。
+5. Push 本 repository commit，等待既有 GitHub Pages workflow 完成。
+6. 短暫停止現場修改，執行 `docs/supabase-schema-v7-activate.sql`。
+7. 所有人重新整理並重新登入，完成雙瀏覽器 smoke tests。
 
-- `index.html`：GitHub Pages 預設首頁，內容等同最新主文件
-- `月度安全會議報告-v4.html`：最新主文件；文件名保留 v4 以免破壞既有連結，實際標題為 V6
-- `docs/整體計劃-roadmap.md`：整體計劃與版本進度
-- `docs/supabase-schema-v4.sql`：舊版 Supabase 資料表與 RPC
-- `docs/supabase-schema-v6.sql`：V6 多人協作安全 schema；正式使用 V6 前必須在 Supabase SQL Editor 執行
-- `docs/github-pages-deploy-v4.md`：GitHub Pages + Supabase 部署說明
-- `docs/requirements-status-v4.md`：需求達成檢查表
-- `archive/`：原始 demo、V1、V2 備份，不作日常使用
+詳情見 [`docs/v7-deployment-and-cutover.md`](docs/v7-deployment-and-cutover.md)。
 
-## 使用方式
+> V7 接受第一筆 normalized 寫入後，不可重新啟用 V6 整包 writer；異常須 forward-fix，否則會遺失切換後逐項資料。
 
-1. 打開 GitHub Pages 網址或本地 `index.html`。
-2. 第一次使用：進入「數據管理」建立第一個 owner。
-3. 日常填寫資料：進入「資料記錄」或「月報編輯」。
-4. 查看自動統計：進入「KPI / 趨勢 V3」。
-5. 需要寫入月報：點擊「用 KPI / 趨勢更新月報」。
-6. 需要輸出 PDF：進入「PDF 輸出中心」，勾選模塊後輸出。
-7. 多人協作：打開系統會自動同步 Supabase 一次；使用中只檢查雲端版本並提示，不自動刷新；修改後只保存本機，需手動按「保存修改」上傳雲端。V6 保存時會先檢查雲端 revision，若其他人已保存，會阻止覆蓋並要求先「同步最新」。
-8. 區塊鎖：登入後進入月報、資料記錄、KPI、數據管理等區塊會取得軟鎖；其他人看到鎖定提示時只能查看，避免同時改同一區塊。
-9. 管理帳號 / Supabase 設定 / JSON 備份：進入「數據管理」。
-10. 正式部署共用設定：`supabase-config.js` 內放 Supabase URL、anon public key、Workspace Key，所有使用者打開同一網址會讀寫同一份雲端資料。
+## 日常使用
 
-## 權限規則
+1. 輸入網站進入密碼。
+2. 使用內部 Owner / 管理員 / 使用者帳號登入。
+3. 點擊 module 或 record 取得該項目編輯權。
+4. 不同項目可由多人同時編輯；同項目被占用時保持唯讀。
+5. 一般修改會逐項提交；「保存修改」可 flush 未完成草稿。
+6. 「同步最新」透過 change sequence 補抓並逐項重讀，不覆蓋有草稿的項目。
+7. PDF 輸出前會建立正式 immutable snapshot。
+8. IndexedDB 歷史仍是裝置本機資料；它不會被宣稱為已完整遷移到 Supabase。
 
-- owner：可進入數據管理、查看/修改 Supabase 設定、管理 owner/admin/operator、刪除「月報編輯」中的項次項目、同步/保存雲端資料。
-- admin：可進入數據管理、建立或更新非 owner 用戶、同步/保存雲端資料；不能新增 owner、不能修改 owner、看不到也不能修改 Supabase 設定，不能刪除月報項次。
-- operator：可編輯資料、同步最新、保存修改；不能進入數據管理，看不到也不能修改 Supabase 設定，不能刪除月報項次。
+## 權限
 
-## 注意
+- **Owner**：管理所有帳號與 Owner 轉移、Supabase 設定、非 Owner 刪除、月報 module 刪除、進站密碼、同步與保存。
+- **管理員**：管理非 Owner 帳號、進站密碼、同步與保存；不能建立／修改／刪除 Owner、看不到 Supabase 設定、不能刪除月報 module。
+- **使用者（operator）**：編輯 module/record、同步與保存；不能進入數據管理或刪除月報 module。
 
-V5 使用應用內帳號密碼，不使用 Supabase email confirmation。密碼以 SHA-256 hash 存在雲端資料包內；Workspace Key 仍類似密碼，請勿公開。
+最終權限由 server RPC transaction 驗證，前端按鈕隱藏不是安全邊界。
+
+## 本機驗證
+
+```bash
+npm install
+npm test
+npm run test:browser
+```
+
+- `npm test`：core/client/HTML 契約與 PGlite PostgreSQL runtime tests。
+- `npm run test:browser`：隔離 fake Supabase，驗證雙瀏覽器同項排他／不同項並行、full-snapshot 草稿保護及 immutable PDF 列印來源。
+- 正式 Supabase 尚須依切換手冊執行 readback 與 smoke tests；本機通過不能冒充正式環境已部署。

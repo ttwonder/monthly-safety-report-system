@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>月度安全會議報告 V6</title>
+    <title>月度安全會議報告 V7</title>
     <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- SheetJS for Excel Import/Export -->
@@ -1429,7 +1429,7 @@
 
                 <!-- 右下：雲端/權限狀態 -->
                 <div id="v5TopStatus" class="text-[11px] text-indigo-700 font-bold no-print bg-white/80 px-3 py-1.5 rounded shadow-sm border border-indigo-200 text-right leading-tight shrink-0 flex-1 min-w-[500px]">
-                    <i class="fas fa-cloud text-sky-500 mr-1"></i>雲端協作版：請登入後使用「同步最新 / 保存修改」。本機備份請到「歷史 / 備份」。
+                    <i class="fas fa-cloud text-sky-500 mr-1"></i>V7 逐項雲端協作：不同項目可同時編輯；同項目需先取得編輯權。本機草稿與備份仍保留。
                 </div>
             </div>
         </div>
@@ -1573,6 +1573,10 @@
         <div class="text-indigo-600 text-lg font-bold"><i class="fas fa-spinner fa-spin mr-2"></i>處理中...</div>
     </div>
 
+    <script src="./vendor/supabase-2.112.2.js"></script>
+    <script src="./monthly-collaboration-core.js"></script>
+    <script src="./monthly-collaboration-client.js"></script>
+    <script src="./monthly-collaboration-v7.js"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont() {
@@ -1801,9 +1805,16 @@
                     globalFontZh: fontZhVal,
                     timestamp: explicitTimestamp || Date.now() 
                 });
-                transaction.oncomplete = () => {
+                transaction.oncomplete = async () => {
                     if (typeof v4QueueAutoSave === 'function') v4QueueAutoSave('月報編輯');
-                    resolve();
+                    if (window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING) {
+                        try {
+                            const cloud = await window.MonthlyV7App.persistReportData(reportData);
+                            resolve({ localSaved: true, cloudSaved: cloud?.saved === true, cloud });
+                        } catch (error) {
+                            resolve({ localSaved: true, cloudSaved: false, error });
+                        }
+                    } else resolve({ localSaved: true, cloudSaved: false });
                 };
                 transaction.onerror = (e) => reject(e);
             });
@@ -1826,9 +1837,13 @@
             }
             return new Promise((resolve) => {
                 setTimeout(async () => {
-                    await saveToDB(reportData, Date.now());
-                    if (showMsg) showToast('保存成功！');
-                    resolve();
+                    const saved = await saveToDB(reportData, Date.now());
+                    if (window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING && v5CurrentUser()) {
+                        try { await window.MonthlyV7App.persistReportMeta(v7CurrentReportMeta()); }
+                        catch (error) { saved.error = saved.error || error; }
+                    }
+                    if (showMsg) showToast(saved?.error ? '本機草稿已保存；雲端尚未完成，請查看狀態提示。' : (window.MonthlyV7App?.isActive?.() ? '逐項雲端保存成功！' : '保存成功！'));
+                    resolve(saved);
                 }, 50);
             });
         }
@@ -2152,6 +2167,7 @@
             reportData.forEach((item, index) => {
                 const tr = document.createElement('tr');
                 tr.dataset.index = index;
+                if (item._v7Id) tr.dataset.v7EntityId = item._v7Id;
                 
                 let attachmentsHtml = '<div class="mt-1 flex flex-wrap gap-1">';
                 if (item.attachments) {
@@ -2250,6 +2266,7 @@
                 initAllCustomTableResizers(tbody);
                 redrawChartsWhenVisible();
                 refreshEditorStickyOffsets();
+                window.MonthlyV7App?.decorateEditorRows?.();
             }, 50);
         }
 
@@ -3048,45 +3065,84 @@
             await saveToDB(reportData);
             renderTable();
         }
+        async function v7ApplyModuleOrder(nextData) {
+            if (window.MonthlyV7App?.isActive?.()) {
+                if (!v5RequireLogin('請先登入後再調整項目順序。')) return false;
+                await window.MonthlyV7App.reorderModules(nextData);
+                reportData = nextData;
+                V4_CLOUD_APPLYING = true;
+                try { await saveToDB(reportData); } finally { V4_CLOUD_APPLYING = false; }
+                return true;
+            }
+            reportData = nextData;
+            await saveToDB(reportData);
+            return true;
+        }
         async function reorderRow(oldIndex, newDisplayValue) {
             let newIndex = parseInt(newDisplayValue) - 1;
             if (isNaN(newIndex) || newIndex < 0) newIndex = 0;
             if (newIndex >= reportData.length) newIndex = reportData.length - 1;
             if (oldIndex !== newIndex) {
-                const item = reportData.splice(oldIndex, 1)[0];
-                reportData.splice(newIndex, 0, item);
-                await saveToDB(reportData);
+                const nextData = reportData.slice();
+                const item = nextData.splice(oldIndex, 1)[0];
+                nextData.splice(newIndex, 0, item);
+                try { await v7ApplyModuleOrder(nextData); } catch (error) { alert('排序失敗：' + error.message); }
             }
             renderTable();
         }
         async function moveRowUp(index) {
             if (index > 0) {
-                const item = reportData.splice(index, 1)[0];
-                reportData.splice(index - 1, 0, item);
-                await saveToDB(reportData);
+                const nextData = reportData.slice();
+                const item = nextData.splice(index, 1)[0];
+                nextData.splice(index - 1, 0, item);
+                try { await v7ApplyModuleOrder(nextData); } catch (error) { alert('排序失敗：' + error.message); }
                 renderTable();
             }
         }
         async function moveRowDown(index) {
             if (index < reportData.length - 1) {
-                const item = reportData.splice(index, 1)[0];
-                reportData.splice(index + 1, 0, item);
-                await saveToDB(reportData);
+                const nextData = reportData.slice();
+                const item = nextData.splice(index, 1)[0];
+                nextData.splice(index + 1, 0, item);
+                try { await v7ApplyModuleOrder(nextData); } catch (error) { alert('排序失敗：' + error.message); }
                 renderTable();
             }
         }
         async function addRow() {
-            reportData.push({ 
+            let item = {
                 id: Date.now(), icon: "fas fa-edit", iconColor: "#64748b", title: "新增會議項目", colLayout: "1", colCount: 1,
-                columns: [BlockTemplates.blue("自訂標題", "請點擊上方工具列插入更多區塊或輸入內容...") + '<div class="block-spacer"><br></div>'], attachments: [] 
-            });
-            await saveToDB(reportData);
+                columns: [BlockTemplates.blue("自訂標題", "請點擊上方工具列插入更多區塊或輸入內容...") + '<div class="block-spacer"><br></div>'], attachments: []
+            };
+            try {
+                if (window.MonthlyV7App?.isActive?.()) {
+                    if (!v5RequireLogin('請先登入後再新增月報項目。')) return;
+                    item = await window.MonthlyV7App.createModule(item);
+                    V4_CLOUD_APPLYING = true;
+                }
+                reportData.push(item);
+                await saveToDB(reportData);
+            } catch (error) {
+                alert('新增項目失敗：' + error.message);
+                return;
+            } finally { V4_CLOUD_APPLYING = false; }
             renderTable();
             window.scrollTo(0, document.body.scrollHeight);
         }
         async function deleteRow(index) {
             if (!v5RequireOwner('只有 owner 可以刪除「月報編輯」中的項次項目。')) return;
-            if(confirm('確定要刪除這個項目嗎？')) { reportData.splice(index, 1); await saveToDB(reportData); renderTable(); }
+            if (!confirm('確定要刪除這個項目嗎？')) return;
+            const item = reportData[index];
+            try {
+                if (window.MonthlyV7App?.isActive?.()) {
+                    await window.MonthlyV7App.deleteModule(item);
+                    V4_CLOUD_APPLYING = true;
+                }
+                reportData.splice(index, 1);
+                await saveToDB(reportData);
+                renderTable();
+            } catch (error) {
+                alert('刪除失敗，項目仍保留：' + error.message);
+            } finally { V4_CLOUD_APPLYING = false; }
         }
         async function updateData(index, field, value) { reportData[index][field] = value; await saveToDB(reportData); }
 
@@ -3456,7 +3512,7 @@
                 <button class="v1-tab-btn" data-v1-tab="history" onclick="switchV1Tab('history')"><i class="fas fa-clock-rotate-left mr-1"></i>歷史 / 備份</button>
                 <button class="v1-tab-btn" data-v1-tab="records" onclick="switchV1Tab('records')"><i class="fas fa-database mr-1"></i>資料記錄</button>
                 <button class="v1-tab-btn" data-v1-tab="cloud" onclick="switchV1Tab('cloud')"><i class="fas fa-shield-halved mr-1"></i>數據管理</button>
-                <span class="ml-auto text-xs text-indigo-700 font-bold px-2">V6：多人協作安全 / 區塊鎖 / 防覆蓋</span>
+                <span class="ml-auto text-xs text-indigo-700 font-bold px-2">${window.MonthlyV7App?.isActive?.() ? 'V7：逐項 lease / CAS / Realtime' : 'V6：切換前相容模式'}</span>
             `;
 
             const editor = document.createElement('div');
@@ -3846,13 +3902,74 @@
             return true;
         }
 
+        async function prepareV7FormalSnapshotPrintArea(formal, { selectAll = false } = {}) {
+            const snapshot = formal?.snapshot;
+            if (!snapshot?.report || !Array.isArray(snapshot.modules)) throw new Error('正式快照內容不完整');
+            const app = window.MonthlyV7App;
+            const liveData = reportData;
+            const liveMeta = {
+                title: document.getElementById('mainTitle')?.innerHTML || '',
+                date: document.getElementById('reportDate')?.value || '',
+                period: {
+                    startM: document.getElementById('startMonth')?.value || '',
+                    startD: document.getElementById('startDay')?.value || '',
+                    endM: document.getElementById('endMonth')?.value || '',
+                    endD: document.getElementById('endDay')?.value || ''
+                }
+            };
+            app?.client?.stopRealtime?.();
+            try {
+                const bundle = window.MonthlyCollaborationCore.legacyBundleFromSnapshot(Object.assign({ watermark: 0, records: [], users: [] }, snapshot));
+                reportData = normalizeData(bundle.report.modules || []);
+                if (selectAll) reportData.forEach(item => { item.selectedForPdf = true; });
+                const report = snapshot.report;
+                const period = report.period || {};
+                document.getElementById('mainTitle').textContent = report.title || '月度安全會議報告';
+                document.getElementById('reportDate').value = report.date || '';
+                document.getElementById('startMonth').value = period.startM || '';
+                document.getElementById('startDay').value = period.startD || '';
+                document.getElementById('endMonth').value = period.endM || '';
+                document.getElementById('endDay').value = period.endD || '';
+                renderTable();
+                v1EnsureModuleFields();
+                const ok = await prepareV1PdfPrintArea();
+                if (ok) {
+                    const printArea = document.getElementById('pdfPrintArea');
+                    if (printArea) printArea.dataset.v7SnapshotId = formal.snapshotId || '';
+                    document.body.dataset.v7SnapshotId = formal.snapshotId || '';
+                    document.body.dataset.printSource = 'snapshot';
+                }
+                return ok;
+            } finally {
+                reportData = liveData;
+                document.getElementById('mainTitle').innerHTML = liveMeta.title;
+                document.getElementById('reportDate').value = liveMeta.date;
+                document.getElementById('startMonth').value = liveMeta.period.startM;
+                document.getElementById('startDay').value = liveMeta.period.startD;
+                document.getElementById('endMonth').value = liveMeta.period.endM;
+                document.getElementById('endDay').value = liveMeta.period.endD;
+                renderTable();
+                renderV1PdfCenter();
+                app?.decorateEditorRows?.();
+                app?.client?.startRealtime?.();
+            }
+        }
+
         function printV1SelectedPdf() {
             syncV1PdfSelectionFromDom();
             if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
             setTimeout(async () => {
                 syncV1PdfSelectionFromDom();
                 await saveToDB(reportData, Date.now());
-                const ok = await prepareV1PdfPrintArea();
+                let ok = false;
+                if (window.MonthlyV7App?.isActive?.() && v5CurrentUser()) {
+                    try {
+                        const formal = await window.MonthlyV7App.createReportSnapshot('pdf');
+                        ok = await prepareV7FormalSnapshotPrintArea(formal, { selectAll: false });
+                    } catch (error) { alert('建立正式 PDF 快照失敗：' + error.message); return; }
+                } else {
+                    ok = await prepareV1PdfPrintArea();
+                }
                 if (!ok) return;
                 document.body.classList.add('pdf-print-mode');
                 setTimeout(() => window.print(), 80);
@@ -3891,8 +4008,20 @@
             renderV1HistoryPane();
         }
 
-        function printCurrentEditorReport() {
-            // 頂部「列印(PDF)」應列印目前月報編輯畫面；清掉 PDF 輸出中心專用列印狀態，避免圖一畫面打印成圖二版式。
+        async function printCurrentEditorReport() {
+            // V7 必須從資料庫不可變 snapshot 列印；legacy mode 保留原 editor 列印。
+            if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
+            if (window.MonthlyV7App?.isActive?.() && v5CurrentUser()) {
+                try {
+                    await saveToDB(reportData, Date.now());
+                    const formal = await window.MonthlyV7App.createReportSnapshot('pdf');
+                    const ok = await prepareV7FormalSnapshotPrintArea(formal, { selectAll: true });
+                    if (!ok) return;
+                    document.body.classList.add('pdf-print-mode');
+                    setTimeout(() => window.print(), 80);
+                    return;
+                } catch (error) { alert('建立正式 PDF 快照失敗：' + error.message); return; }
+            }
             document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
             document.body.dataset.printSource = 'editor';
             const printArea = document.getElementById('pdfPrintArea');
@@ -4089,9 +4218,16 @@
                 const tx = db.transaction([STORE_NAME], 'readwrite');
                 const store = tx.objectStore(STORE_NAME);
                 store.put({ id: V2_RECORD_STORE_ID, data: v2RecordsCache, title: 'V2資料記錄庫', timestamp: Date.now() });
-                tx.oncomplete = () => {
+                tx.oncomplete = async () => {
                     if (typeof v4QueueAutoSave === 'function') v4QueueAutoSave('資料記錄');
-                    resolve();
+                    if (window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING) {
+                        try {
+                            const cloud = await window.MonthlyV7App.persistRecords(v2RecordsCache);
+                            resolve({ localSaved: true, cloudSaved: cloud?.saved === true, cloud });
+                        } catch (error) {
+                            resolve({ localSaved: true, cloudSaved: false, error });
+                        }
+                    } else resolve({ localSaved: true, cloudSaved: false });
                 };
                 tx.onerror = (e) => reject(e);
             });
@@ -4235,6 +4371,11 @@
             const records = await loadV2Records();
             const item = (records[kind] || []).find(x => String(x.id) === String(id));
             if (!item) return;
+            if (window.MonthlyV7App?.isActive?.()) {
+                if (!v5RequireLogin('請先登入後再編輯資料記錄。')) return;
+                try { await window.MonthlyV7App.beginRecordEdit(kind, item); }
+                catch (error) { showToast('此筆記錄目前無法編輯：' + error.message); return; }
+            }
             const idEl = document.getElementById(`v2-${kind}-editing-id`);
             if (idEl) idEl.value = item.id;
             V2_RECORD_SCHEMAS[kind].fields.forEach(([key]) => {
@@ -4249,11 +4390,22 @@
         async function deleteV2Record(kind, id) {
             if (!confirm('確定刪除此記錄嗎？')) return;
             const records = await loadV2Records();
-            records[kind] = records[kind].filter(x => String(x.id) !== String(id));
-            await saveV2Records(records);
-            showToast('記錄已刪除');
-            renderV2RecordWorkbench(kind);
-            renderV2StatsPanel();
+            const item = (records[kind] || []).find(x => String(x.id) === String(id));
+            if (!item) return;
+            try {
+                if (window.MonthlyV7App?.isActive?.()) {
+                    if (!v5RequireLogin('請先登入後再刪除資料記錄。')) return;
+                    await window.MonthlyV7App.deleteRecord(kind, item);
+                    V4_CLOUD_APPLYING = true;
+                }
+                records[kind] = records[kind].filter(x => String(x.id) !== String(id));
+                await saveV2Records(records);
+                showToast('記錄已刪除');
+                renderV2RecordWorkbench(kind);
+                renderV2StatsPanel();
+            } catch (error) {
+                alert('刪除失敗，記錄仍保留：' + error.message);
+            } finally { V4_CLOUD_APPLYING = false; }
         }
 
         function v2Download(filename, content, type='text/plain;charset=utf-8') {
@@ -4311,7 +4463,7 @@
             reportData[idx].colLayout = '1';
             reportData[idx].colCount = 1;
             reportData[idx].selectedForPdf = true;
-            await saveToDB(reportData, Date.now());
+            if (!window.MonthlyV7App?.isActive?.()) await saveToDB(reportData, Date.now());
             return true;
         }
 
@@ -4353,6 +4505,7 @@
             results.push(await v2UpdateModuleByTitle('PSC檢查', pscHtml));
             results.push(await v2UpdateModuleByTitle('重大異常', detentionHtml));
             results.push(await v2UpdateModuleByTitle('船舶需回覆', actionHtml));
+            if (window.MonthlyV7App?.isActive?.() && results.some(Boolean)) await saveToDB(reportData, Date.now());
             renderTable();
             renderV1ModuleLibrary();
             renderV1PdfCenter();
@@ -4389,7 +4542,7 @@
                             </tbody>
                         </table>
                     </div>
-                    <div class="text-xs text-slate-500 mt-2">資料目前保存於本機 IndexedDB。後續雲端版可將這些表遷移到 Supabase。</div>
+                    <div class="text-xs text-slate-500 mt-2">V7 模式每筆記錄各自使用 UUID、lease 與 revision 保存到 Supabase；IndexedDB 只保留本機草稿與裝置歷史。</div>
                 </div>
             `;
             setTimeout(() => v5RestoreFormDrafts(root), 0);
@@ -4594,6 +4747,7 @@
             results.push(await v2UpdateModuleByTitle('KPI', kpiHtml));
             results.push(await v2UpdateModuleByTitle('與上月趨勢比較', trendHtml));
             results.push(await v2UpdateModuleByTitle('Safety Walk', safetyHtml));
+            if (window.MonthlyV7App?.isActive?.() && results.some(Boolean)) await saveToDB(reportData, Date.now());
             renderTable();
             renderV1ModuleLibrary();
             renderV1PdfCenter();
@@ -4616,6 +4770,8 @@
         let V6_LOCK_OWNER_TEXT = '';
         let V4_CLOUD_STATUS_TEXT = '正在初始化雲端同步...';
         let V4_CLOUD_STATUS_KIND = 'muted';
+        let V7_INITIALIZATION_ERROR = null;
+        window.MonthlyV7App = window.MonthlyV7Browser ? new window.MonthlyV7Browser.MonthlyV7BrowserApp() : null;
 
         function v4GetDefaultCloudConfig() {
             const cfg = window.MONTHLY_REPORT_SUPABASE_CONFIG || {};
@@ -4772,7 +4928,7 @@
                 },
                 records,
                 users: v5GetUsers(),
-                siteAccess: {
+                siteAccess: window.MonthlyV7App?.isActive?.() ? { managedByServer: true } : {
                     passwordHash: siteAccessGetPasswordHash(),
                     updatedAt: siteAccessGetUpdatedAt()
                 }
@@ -4813,6 +4969,24 @@
 
         async function v4UploadToCloud(options = {}) {
             const silent = options.silent === true;
+            if (window.MonthlyV7App?.isActive?.()) {
+                if (!v5RequireLogin('請先登入後再保存修改。')) return false;
+                if (V4_CLOUD_SAVING) return false;
+                V4_CLOUD_SAVING = true;
+                try {
+                    v4SetCloudRuntimeStatus('正在逐項保存到雲端...', 'muted');
+                    await window.MonthlyV7App.persistReportData(reportData);
+                    await window.MonthlyV7App.flush(v7CurrentReportMeta());
+                    v4SetCloudRuntimeStatus(`逐項雲端保存完成｜watermark ${window.MonthlyV7App.client?.watermark || 0}`, 'ok');
+                    if (!silent) showToast('逐項雲端保存完成');
+                    renderV4CloudPane();
+                    return true;
+                } catch (error) {
+                    v4SetCloudRuntimeStatus('逐項保存失敗：' + error.message + '（本機草稿已保留）', 'error');
+                    if (!silent) alert('保存失敗，本機草稿已保留：' + error.message);
+                    return false;
+                } finally { V4_CLOUD_SAVING = false; }
+            }
             if (V4_CLOUD_SAVING) return false;
             try {
                 const config = v4GetCloudConfig();
@@ -4847,6 +5021,12 @@
         }
 
         async function v4DownloadFromCloud() {
+            if (window.MonthlyV7App?.isActive?.()) {
+                if (!confirm('確定同步最新逐項雲端資料嗎？有本機草稿的項目不會被自動覆蓋。')) return;
+                try { await window.MonthlyV7App.loadSnapshot(); showToast('已同步最新逐項資料'); }
+                catch (error) { alert('同步失敗：' + error.message); }
+                return;
+            }
             try {
                 const config = v4GetCloudConfig();
                 const data = await v4CloudRequest('rpc/get_monthly_report_cloud_data', 'POST', { p_workspace_key: config.workspaceKey });
@@ -4863,6 +5043,11 @@
 
         async function v4TestCloudConnection() {
             if (!v5RequireSupabaseOwner()) return;
+            if (window.MonthlyV7App?.isActive?.()) {
+                showToast('Supabase V7 連線與 Anonymous Auth 已就緒');
+                renderV4CloudPane('connected');
+                return;
+            }
             try {
                 const config = v4GetCloudConfig();
                 if (!v4ConfigReady(config)) throw new Error('請先填寫 Supabase URL、anon key、Workspace Key');
@@ -4878,6 +5063,10 @@
 
         function v4QueueAutoSave(reason = '修改') {
             if (V4_CLOUD_APPLYING || V4_CLOUD_SAVING) return;
+            if (window.MonthlyV7App?.isActive?.()) {
+                v4SetCloudRuntimeStatus(v5CurrentUser() ? `${reason}正在按項目提交；失敗時會保留本機草稿。` : `${reason}已保存為本機草稿；請登入後提交。`, v5CurrentUser() ? 'muted' : 'warn');
+                return;
+            }
             clearTimeout(V4_AUTO_SAVE_TIMER);
             V4_AUTO_SAVE_TIMER = null;
             const config = v4GetCloudConfig();
@@ -4904,6 +5093,24 @@
 
         async function v4AutoSyncLatestFromCloud(options = {}) {
             const silent = options.silent !== false;
+            if (window.MonthlyV7App?.isActive?.()) {
+                if (!window.MonthlyV7App.isSiteUnlocked()) return false;
+                if (!options.force && v4IsUserEditingDraft()) {
+                    v4SetCloudRuntimeStatus('正在輸入本機草稿，已延後逐項同步。', 'warn');
+                    return false;
+                }
+                try {
+                    if (v5CurrentUser()) await window.MonthlyV7App.syncLatest();
+                    else await window.MonthlyV7App.loadSnapshot();
+                    v4SetCloudRuntimeStatus(`逐項資料已同步｜watermark ${window.MonthlyV7App.client?.watermark || 0}`, 'ok');
+                    if (!silent) showToast('已同步最新逐項資料');
+                    return true;
+                } catch (error) {
+                    v4SetCloudRuntimeStatus('逐項同步失敗：' + error.message, 'error');
+                    if (!silent) alert('同步失敗：' + error.message);
+                    return false;
+                }
+            }
             const deferMessage = '正在輸入未提交內容，已延後雲端同步，避免刷新頁面和跳走光標。';
             if (!options.force && v4IsUserEditingDraft()) {
                 v4SetCloudRuntimeStatus(deferMessage, 'warn');
@@ -4944,6 +5151,11 @@
 
         async function v4CheckCloudRevision(options = {}) {
             const silent = options.silent !== false;
+            if (window.MonthlyV7App?.isActive?.()) {
+                if (!v5CurrentUser() || v4IsUserEditingDraft()) return false;
+                try { await window.MonthlyV7App.syncLatest(); if (!silent) v4SetCloudRuntimeStatus('逐項變更檢查完成。', 'ok'); return true; }
+                catch (error) { if (!silent) v4SetCloudRuntimeStatus('逐項檢查失敗：' + error.message, 'error'); return false; }
+            }
             if (V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return false;
             const config = v4GetCloudConfig();
             if (!v4ConfigReady(config)) return false;
@@ -4972,11 +5184,11 @@
         }
 
         async function v4AutoSyncOnStartup() {
-            if (V4_STARTUP_SYNC_DONE) return;
+            if (V4_STARTUP_SYNC_DONE) return true;
             V4_STARTUP_SYNC_DONE = true;
             const config = v4GetCloudConfig();
-            if (config.autoSyncOnOpen === false) return;
-            await v4AutoSyncLatestFromCloud({ silent: true, source: '打開系統，自動同步雲端資料...' });
+            if (config.autoSyncOnOpen === false) return true;
+            return await v4AutoSyncLatestFromCloud({ silent: true, source: '打開系統，自動同步雲端資料...' });
         }
 
         function v6SectionLabel(sectionKey) {
@@ -5057,6 +5269,7 @@
         }
 
         async function v6ClaimCurrentSectionLock(options = {}) {
+            if (window.MonthlyV7App?.isActive?.()) { V6_LOCK_BLOCKED = false; return true; }
             const user = v5CurrentUser();
             const config = v4GetCloudConfig();
             const section = v6CurrentSectionKey();
@@ -5091,6 +5304,7 @@
         }
 
         function v6SetupEditLockGuards() {
+            if (window.MonthlyV7App?.isActive?.()) return;
             if (window.__v6EditLockGuardsReady) return;
             window.__v6EditLockGuardsReady = true;
             const block = (event) => {
@@ -5140,8 +5354,9 @@
             const reader = new FileReader();
             reader.onload = async () => {
                 try {
-                    const bundle = JSON.parse(reader.result);
+                    let bundle = JSON.parse(reader.result);
                     if (!confirm('確定用此 JSON 覆蓋目前本機月報與記錄資料嗎？')) return;
+                    if (window.MonthlyV7App?.isActive?.()) bundle = window.MonthlyV7App.prepareImportedBundle(bundle);
                     await v4ApplyCloudBundle(bundle, 'JSON');
                 } catch (err) {
                     alert('匯入失敗：' + err.message);
@@ -5187,7 +5402,7 @@
                         </section>
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
-                            <div class="text-xs text-slate-500 mb-2">手動模式：打開系統時自動同步一次；使用中只檢查雲端版本，不自動刷新；修改後只保存本機，請手動按「保存修改 / 上傳雲端」。</div>
+                            <div class="text-xs text-slate-500 mb-2">V7 會在每個項目修改後逐項提交；「保存修改」可重新 flush 未完成草稿。同步只重讀變動項目，有草稿的項目不會被遠端覆蓋。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn v1-primary-btn" onclick="v4UploadToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>上傳本機到雲端</button>
                                 <button class="v1-small-btn" onclick="v4DownloadFromCloud()"><i class="fas fa-cloud-arrow-down mr-1"></i>下載雲端覆蓋本機</button>
@@ -5238,6 +5453,7 @@
             return localStorage.getItem(SITE_ACCESS_PASSWORD_UPDATED_KEY) || '';
         }
         function siteAccessIsUnlocked() {
+            if (window.MonthlyV7App?.isActive?.()) return window.MonthlyV7App.isSiteUnlocked();
             // 進門密碼必須每次新瀏覽器 session 重新輸入；舊版曾存在的本機免輸入記錄在這裡清掉。
             try { localStorage.removeItem(SITE_ACCESS_REMEMBER_KEY); } catch {}
             return sessionStorage.getItem(SITE_ACCESS_UNLOCK_KEY) === siteAccessGetPasswordHash();
@@ -5265,6 +5481,20 @@
             const input = document.getElementById('site-access-password');
             const error = document.getElementById('site-access-error');
             const password = input ? input.value : '';
+            if (window.MonthlyV7App?.isActive?.()) {
+                try {
+                    await window.MonthlyV7App.openSite(password);
+                    if (error) error.textContent = '';
+                    if (input) input.value = '';
+                    siteAccessRenderGate();
+                    await monthlyReportBoot();
+                    return true;
+                } catch (err) {
+                    if (error) error.textContent = '密碼不正確或雲端驗證暫時不可用。';
+                    if (input) { input.value = ''; input.focus(); }
+                    return false;
+                }
+            }
             const hash = await siteAccessHashPassword(password);
             if (hash !== siteAccessGetPasswordHash()) {
                 if (error) error.textContent = '密碼不正確，請重新輸入。';
@@ -5283,6 +5513,19 @@
             const p2 = document.getElementById('site-access-confirm-password')?.value || '';
             if (!p1 || p1.length < 6) return alert('請輸入至少 6 個字元的新網站密碼。');
             if (p1 !== p2) return alert('兩次輸入的新網站密碼不一致。');
+            if (window.MonthlyV7App?.isActive?.()) {
+                try {
+                    await window.MonthlyV7App.updateSitePassword(p1);
+                    v5ClearFormDraftIds(['site-access-new-password', 'site-access-confirm-password']);
+                    const a = document.getElementById('site-access-new-password');
+                    const b = document.getElementById('site-access-confirm-password');
+                    if (a) a.value = '';
+                    if (b) b.value = '';
+                    alert('網站進入密碼已更新。所有舊 session 已撤銷，請用新密碼重新進入。');
+                    siteAccessRenderGate();
+                } catch (error) { alert('更新網站密碼失敗：' + error.message); }
+                return;
+            }
             const hash = await siteAccessHashPassword(p1);
             siteAccessSetPasswordHash(hash);
             siteAccessRememberUnlock(hash);
@@ -5300,7 +5543,7 @@
             return `
                 <section class="v1-category-card">
                     <div class="v1-category-title mb-2"><i class="fas fa-door-closed mr-1"></i>網站進入密碼</div>
-                    <div class="text-xs text-slate-500 mb-2">進入網站前需輸入此密碼。進門密碼只記住本次瀏覽器 session；關閉瀏覽器或新 session 需重新輸入。內部用戶登入狀態則可在本機保留。密碼只保存 SHA-256 hash，不保存明文。</div>
+                    <div class="text-xs text-slate-500 mb-2">進入網站前需輸入此密碼。V7 模式由 Supabase 伺服器驗證 bcrypt hash；瀏覽器不下載密碼 hash。更新後所有舊 session 立即失效。</div>
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
                         <input id="site-access-new-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="新網站密碼">
                         <input id="site-access-confirm-password" type="password" class="border border-indigo-100 rounded px-2 py-1 text-sm" placeholder="再次輸入新密碼" onkeydown="if(event.key==='Enter') siteAccessUpdatePasswordFromForm()">
@@ -5423,6 +5666,7 @@
             return { username: user.username, displayName: user.displayName || user.username, role: user.role || 'operator' };
         }
         function v5CurrentUser() {
+            if (window.MonthlyV7App?.isActive?.()) return window.MonthlyV7App.currentUser();
             try {
                 const raw = sessionStorage.getItem(V5_SESSION_KEY) || localStorage.getItem(V5_REMEMBERED_SESSION_KEY) || 'null';
                 const user = JSON.parse(raw);
@@ -5474,6 +5718,18 @@
             const password = document.getElementById('v5-user-password')?.value || '';
             let role = document.getElementById('v5-user-role')?.value || 'operator';
             if (!username || !password) return alert('請填寫用戶名和密碼。');
+            if (window.MonthlyV7App?.isActive?.()) {
+                const existing = users.find(u => u.username === username);
+                try {
+                    if (existing) await window.MonthlyV7App.updateUser(existing.id, { username, displayName, role, password });
+                    else await window.MonthlyV7App.createUser({ username, displayName, role, password });
+                    await window.MonthlyV7App.loadSnapshot();
+                    v5ClearUserAdminDraft();
+                    showToast(existing ? '用戶資料已更新' : '用戶已建立');
+                    renderV4CloudPane();
+                } catch (error) { alert('保存用戶失敗：' + error.message); }
+                return;
+            }
             const idx = users.findIndex(u => u.username === username);
             const existing = idx >= 0 ? users[idx] : null;
             const wasFirstUser = users.length === 0;
@@ -5496,7 +5752,7 @@
         function v5OwnerRoleOptions(selectedRole) {
             return ['owner','admin','operator'].map(role => `<option value="${role}" ${role === selectedRole ? 'selected' : ''}>${v5RoleLabel(role)}</option>`).join('');
         }
-        function v5OwnerUpdateUserProfileFromButton(btn) {
+        async function v5OwnerUpdateUserProfileFromButton(btn) {
             if (!v5IsOwner()) return alert('只有 owner 可以修改用戶名與用戶類型。');
             const row = btn?.closest?.('tr');
             const oldUsername = row?.dataset?.username || '';
@@ -5507,6 +5763,17 @@
             if (!username) return alert('用戶名不能為空。');
             if (!['owner','admin','operator'].includes(role)) return alert('用戶類型不正確。');
             const users = v5GetUsers();
+            if (window.MonthlyV7App?.isActive?.()) {
+                const target = users.find(u => u.username === oldUsername);
+                if (!target?.id) return alert('找不到此雲端用戶。');
+                try {
+                    await window.MonthlyV7App.updateUser(target.id, { username, displayName, role });
+                    await window.MonthlyV7App.loadSnapshot();
+                    showToast(`已更新 ${oldUsername} 的用戶資料`);
+                    renderV4CloudPane();
+                } catch (error) { alert('更新用戶失敗：' + error.message); }
+                return;
+            }
             const idx = users.findIndex(u => u.username === oldUsername);
             if (idx < 0) return alert('找不到此用戶。');
             if (users.some((u, i) => i !== idx && u.username === username)) return alert('此用戶名已存在，請換一個。');
@@ -5530,6 +5797,18 @@
             if (!username) return alert('找不到要修改的用戶。');
             if (!password) return alert('請輸入新的用戶密碼。');
             const users = v5GetUsers();
+            if (window.MonthlyV7App?.isActive?.()) {
+                const target = users.find(u => u.username === username);
+                if (!target?.id) return alert('找不到此雲端用戶。');
+                try {
+                    await window.MonthlyV7App.updateUser(target.id, { username: target.username, displayName: target.displayName, role: target.role, password });
+                    if (input) input.value = '';
+                    await window.MonthlyV7App.loadSnapshot();
+                    showToast(`已重設 ${username} 的密碼`);
+                    renderV4CloudPane();
+                } catch (error) { alert('重設密碼失敗：' + error.message); }
+                return;
+            }
             const idx = users.findIndex(u => u.username === username);
             if (idx < 0) return alert('找不到此用戶。');
             const passwordHash = await v5HashPassword(password);
@@ -5541,13 +5820,22 @@
             v4QueueAutoSave('用戶密碼');
             renderV4CloudPane();
         }
-        function v5DeleteUser(username) {
-            if (!v5IsOwner()) return alert('只有 owner 可以刪除用戶。');
+        async function v5DeleteUser(username) {
+            if (!v5IsAdmin()) return alert('只有 owner 或管理員可以刪除非 Owner 用戶。');
             const users = v5GetUsers();
             const target = users.find(u => u.username === username);
             if (!target) return;
             if (target.role === 'owner') return alert('不能刪除 owner。');
             if (!confirm(`確定刪除用戶 ${username}？`)) return;
+            if (window.MonthlyV7App?.isActive?.()) {
+                try {
+                    await window.MonthlyV7App.deleteUser(target.id);
+                    await window.MonthlyV7App.loadSnapshot();
+                    showToast(`已刪除用戶 ${username}`);
+                    renderV4CloudPane();
+                } catch (error) { alert('刪除用戶失敗：' + error.message); }
+                return;
+            }
             v5SetUsers(users.filter(u => u.username !== username));
             v4QueueAutoSave('用戶權限');
             renderV4CloudPane();
@@ -5555,6 +5843,16 @@
         async function v5Login() {
             const username = (document.getElementById('v5-login-username')?.value || '').trim();
             const password = document.getElementById('v5-login-password')?.value || '';
+            if (window.MonthlyV7App?.isActive?.()) {
+                try {
+                    const user = await window.MonthlyV7App.login(username, password);
+                    renderV5SessionBar();
+                    renderV4CloudPane();
+                    renderTable();
+                    showToast(`已登入：${user.displayName || user.username}`);
+                } catch (error) { alert('用戶名或密碼不正確。'); }
+                return;
+            }
             const users = v5GetUsers();
             const hash = await v5HashPassword(password);
             const user = users.find(u => u.username === username && u.passwordHash === hash);
@@ -5562,7 +5860,13 @@
             v5SetSession(user);
             showToast(`已登入：${user.displayName || user.username}`);
         }
-        function v5Logout() { v5SetSession(null); siteAccessForgetUnlock(); showToast('已登出，已清除本機用戶登入；進門密碼需重新輸入'); siteAccessRenderGate(); }
+        async function v5Logout() {
+            if (window.MonthlyV7App?.isActive?.()) await window.MonthlyV7App.logout();
+            else v5SetSession(null);
+            siteAccessForgetUnlock();
+            showToast('已登出；進門密碼需重新輸入');
+            siteAccessRenderGate();
+        }
         async function v5SyncLatest() {
             await v4AutoSyncLatestFromCloud({ silent: false, source: '正在同步最新雲端資料...' });
         }
@@ -5586,7 +5890,7 @@
                     <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
                     <button class="v5-sync-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改</button>
                     <button class="v5-sync-btn" onclick="v5Logout()">登出</button>
-                    <span class="text-[11px] text-slate-500">本機已記住登入</span>
+                    <span class="text-[11px] text-slate-500">server session｜分頁獨立</span>
                     ${v4CloudStatusHtml()}
                 </div>` : `
                 <div class="v5-session-bar">
@@ -5616,7 +5920,7 @@
                 <div class="flex flex-wrap gap-1 items-center justify-center">
                     <button class="v1-small-btn v1-primary-btn" onclick="v5OwnerUpdateUserProfileFromButton(this)">更新資料</button>
                     ${u.role === 'owner' ? '<span class="text-slate-400 text-xs">不可刪除</span>' : `<button class="v1-small-btn v1-danger-btn" onclick="v5DeleteUser('${v1EscapeAttr(u.username)}')">刪除</button>`}
-                </div>` : '—';
+                </div>` : (u.role === 'owner' ? '—' : `<button class="v1-small-btn v1-danger-btn" onclick="v5DeleteUser('${v1EscapeAttr(u.username)}')">刪除</button>`);
             const rows = users.map(u => `
                 <tr data-username="${v1EscapeAttr(u.username)}">
                     <td>${usernameCell(u)}</td>
@@ -5624,7 +5928,7 @@
                     <td>${roleCell(u)}</td>
                     <td>${passwordCell(u)}</td>
                     <td>${actionCell(u)}</td>
-                </tr>`).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-3">尚未建立用戶。第一個用戶會自動成為 owner。</td></tr>`;
+                </tr>`).join('') || `<tr><td colspan="5" class="text-center text-rose-500 py-3">V7 遷移未找到 Owner；請停止 activation 並先修正 legacy 使用者資料。</td></tr>`;
             const roleOptions = `<option value="operator">使用者</option><option value="admin">管理員</option>${isOwner || users.length===0 ? '<option value="owner">Owner</option>' : ''}`;
             return `
                 <section class="v1-category-card">
@@ -5639,8 +5943,8 @@
                     </div>
                     <div class="v1-action-row"><button class="v1-small-btn v1-primary-btn" onclick="v5AddOrUpdateUserFromForm()"><i class="fas fa-user-plus mr-1"></i>${users.length ? '新增 / 更新用戶' : '建立第一個 owner'}</button></div>
                     <div class="overflow-auto border border-slate-200 rounded-lg"><table style="table-layout:auto; min-width: 980px;"><thead><tr><th>用戶名</th><th>顯示名稱</th><th>用戶類型</th><th>密碼 / 重設</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
-                    <div class="text-xs text-slate-500 mt-2">owner 可在表格中直接修改用戶名、顯示名稱與用戶類型，點「更新資料」保存到本機；修改後請按「保存修改」上傳雲端。目前系統保持單一 owner 規則，避免權限失控。</div>
-                    <div class="text-xs text-slate-500 mt-1">密碼安全：系統只保存 SHA-256 hash，不保存也不顯示舊明文密碼。owner 可在此直接為任何用戶輸入新密碼並重設。</div>
+                    <div class="text-xs text-slate-500 mt-2">V7 權限變更立即由伺服器交易保存；Owner 轉移保持唯一 Owner，Admin 只可管理非 Owner。</div>
+                    <div class="text-xs text-slate-500 mt-1">密碼安全：伺服器保存 bcrypt hash；legacy SHA-256 只在首次成功登入時驗證並立即升級，瀏覽器不下載 hash。</div>
                     <div class="text-xs text-slate-500 mt-1">權限規則：owner 可管理 owner / 管理員 / 使用者；管理員只可新增或更新非 owner 用戶，不能新增、修改或升級 owner；所有已登入用戶可同步最新與保存修改。</div>
                 </section>`;
         }
@@ -5676,18 +5980,18 @@
             root.innerHTML = `
                 <div class="v1-page-card">
                     <h2 class="v1-page-title"><i class="fas fa-shield-halved mr-2"></i>數據管理</h2>
-                    <div class="v1-page-subtitle">V6：雲端資料為準；保存前檢查雲端版本，區塊編輯會上鎖，避免多人同時覆蓋。</div>
+                    <div class="v1-page-subtitle">${window.MonthlyV7App?.isActive?.() ? 'V7：逐 module / 逐 record authority；lease + fencing + CAS；Realtime 只作失效通知。' : 'V6：切換前相容模式，仍使用整包保存。'}</div>
                     ${!canManage && v5GetUsers().length ? '<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>' : `
                     <div class="v1-category-grid">
                         ${supabaseConfigHtml}
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
-                            <div class="text-xs text-slate-500 mb-2">手動模式：打開系統時自動同步一次；使用中只檢查雲端版本，不自動刷新；修改後只保存本機，請手動按「保存修改 / 上傳雲端」。</div>
+                            <div class="text-xs text-slate-500 mb-2">V7 會在每個項目修改後逐項提交；「保存修改」可重新 flush 未完成草稿。同步只重讀變動項目，有草稿的項目不會被遠端覆蓋。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn" onclick="v5SyncLatest()"><i class="fas fa-cloud-arrow-down mr-1"></i>同步最新 / 下載雲端</button>
                                 <button class="v1-small-btn v1-primary-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改 / 上傳雲端</button>
                             </div>
-                            <div class="text-sm text-slate-600 leading-6"><div><b>最近同步：</b>${v4FmtTime(c.lastSyncAt)}</div><div><b>雲端更新：</b>${v4FmtTime(c.lastCloudUpdatedAt)}</div><div><b>雲端版本：</b>${c.cloudRevision || '尚未同步 V6'}</div><div><b>最後保存者：</b>${v2RecordText(c.lastUpdatedBy || '尚無')}</div></div>
+                            <div class="text-sm text-slate-600 leading-6"><div><b>最近同步：</b>${v4FmtTime(c.lastSyncAt)}</div><div><b>authority：</b>${window.MonthlyV7App?.status?.authorityState || 'LEGACY_ACTIVE'}</div><div><b>change watermark：</b>${window.MonthlyV7App?.client?.watermark || c.cloudRevision || '尚未同步'}</div><div><b>目前身份：</b>${v2RecordText(v5CurrentUser()?.displayName || '未登入')}</div></div>
                             <div class="v1-action-row mt-2"><button class="v1-small-btn" onclick="v4ExportLocalBundleJson()"><i class="fas fa-file-export mr-1"></i>匯出完整 JSON 備份</button><button class="v1-small-btn" onclick="document.getElementById('v4-bundle-import').click()"><i class="fas fa-file-import mr-1"></i>匯入完整 JSON 備份</button><input id="v4-bundle-import" type="file" accept=".json" class="hidden" onchange="v4ImportLocalBundleJson(event)"></div>
                         </section>
                     </div>
@@ -5702,18 +6006,166 @@
         };
 
 
+        function v7CurrentReportMeta() {
+            return {
+                title: document.getElementById('mainTitle')?.innerText || '月度安全會議報告',
+                date: document.getElementById('reportDate')?.value || '',
+                period: {
+                    startM: document.getElementById('startMonth')?.value || '',
+                    startD: document.getElementById('startDay')?.value || '',
+                    endM: document.getElementById('endMonth')?.value || '',
+                    endD: document.getElementById('endDay')?.value || ''
+                },
+                settings: {
+                    globalFontEn: document.getElementById('globalFontEnSelector')?.value || '',
+                    globalFontZh: document.getElementById('globalFontZhSelector')?.value || ''
+                }
+            };
+        }
+
+        async function v7ApplyRemoteEntity(entity) {
+            if (!entity?.ok) return;
+            const type = entity.entityType || entity.entity_type;
+            const id = entity.entityId || entity.entity_id;
+            V4_CLOUD_APPLYING = true;
+            try {
+                if (type === 'module') {
+                    const index = reportData.findIndex(item => item._v7Id === id);
+                    if (entity.deleted) {
+                        if (index >= 0) reportData.splice(index, 1);
+                    } else {
+                        const next = normalizeData([Object.assign({}, entity.payload || {}, { _v7Id: id, _v7Revision: Number(entity.revision) })])[0];
+                        if (index >= 0) reportData[index] = next; else reportData.push(next);
+                    }
+                    await saveToDB(reportData, Date.now());
+                    renderTable();
+                    renderV1ModuleLibrary();
+                    renderV1PdfCenter();
+                } else if (type?.startsWith('record:')) {
+                    const kind = type.slice(7);
+                    const records = await loadV2Records();
+                    const index = (records[kind] || []).findIndex(item => item._v7Id === id);
+                    if (entity.deleted) {
+                        if (index >= 0) records[kind].splice(index, 1);
+                    } else {
+                        const next = Object.assign({}, entity.payload || {}, { _v7Id: id, _v7Revision: Number(entity.revision) });
+                        if (index >= 0) records[kind][index] = next; else records[kind].unshift(next);
+                    }
+                    await saveV2Records(records);
+                    renderV1RecordsPane();
+                    renderV3TrendPane();
+                } else if (type === 'report_meta' && entity.payload) {
+                    document.getElementById('mainTitle').innerText = entity.payload.title || '月度安全會議報告';
+                    document.getElementById('reportDate').value = entity.payload.date || '';
+                    const period = entity.payload.period || {};
+                    ['startM','startD','endM','endD'].forEach(key => {
+                        const ids = { startM:'startMonth', startD:'startDay', endM:'endMonth', endD:'endDay' };
+                        if (period[key] && document.getElementById(ids[key])) document.getElementById(ids[key]).value = period[key];
+                    });
+                    await saveToDB(reportData, Date.now());
+                }
+            } finally { V4_CLOUD_APPLYING = false; }
+        }
+
+        async function v7GetLocalEntity(entityType, entityId) {
+            const id = String(entityId || '');
+            if (entityType === 'module') {
+                const item = reportData.find(row => String(row?._v7Id || '') === id);
+                if (!item) return null;
+                const local = JSON.parse(JSON.stringify(item));
+                const row = Array.from(document.querySelectorAll('#tableBody tr[data-v7-entity-id]')).find(node => String(node.dataset.v7EntityId || '') === id);
+                if (row) {
+                    const title = row.querySelector('td:nth-child(2) .editable-div');
+                    if (title) local.title = title.innerHTML;
+                    const columns = Array.from(row.querySelectorAll('[data-col-index]'));
+                    if (columns.length) {
+                        local.columns = Array.isArray(local.columns) ? local.columns.slice() : [];
+                        columns.forEach(node => { local.columns[Number(node.dataset.colIndex)] = node.innerHTML; });
+                    }
+                }
+                return local;
+            }
+            if (String(entityType || '').startsWith('record:')) {
+                const kind = String(entityType).slice('record:'.length);
+                const records = await loadV2Records();
+                const item = (records[kind] || []).find(row => String(row?._v7Id || '') === id);
+                if (!item) return null;
+                const local = JSON.parse(JSON.stringify(item));
+                const editingId = document.getElementById(`v2-${kind}-editing-id`)?.value || '';
+                if (String(editingId) === String(item.id)) {
+                    (V2_RECORD_SCHEMAS[kind]?.fields || []).forEach(([key]) => {
+                        const field = document.getElementById(`v2-${kind}-${key}`);
+                        if (field) local[key] = field.value;
+                    });
+                }
+                return local;
+            }
+            if (entityType === 'report_meta') {
+                return Object.assign(v7CurrentReportMeta(), {
+                    _v7Revision: Number(window.MonthlyV7App?.client?.currentReport?.()?.revision || 0)
+                });
+            }
+            return null;
+        }
+
+        window.MonthlyV7Host = {
+            getLocalEntity: v7GetLocalEntity,
+            applyBundle: async (bundle, snapshot) => {
+                await v4ApplyCloudBundle(bundle, 'V7 逐項雲端', { silent: true });
+                // 現有 UI 會補 moduleCategory/pdfOrder 等穩定預設；立即校準 baseline，避免把正規化誤判成多人變更。
+                reportData.forEach(item => window.MonthlyV7App?.syncModuleBaseline?.(item));
+                const config = v4GetCloudConfig();
+                config.cloudRevision = Number(snapshot?.watermark || 0);
+                config.lastSyncAt = new Date().toISOString();
+                localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
+                v4SetCloudRuntimeStatus(`V7 逐項資料已載入｜watermark ${config.cloudRevision}`, 'ok');
+            },
+            applyEntity: v7ApplyRemoteEntity,
+            setStatus: v4SetCloudRuntimeStatus,
+            toast: showToast,
+            onConflict: (info) => {
+                v4SetCloudRuntimeStatus(`項目保存衝突：${info?.result?.error || '雲端版本已改變'}。本機草稿已保留。`, 'error');
+                showToast('此項目未覆蓋雲端；本機草稿已保留，請同步後處理。');
+            },
+            onRemoteChangeWhileEditing: () => v4SetCloudRuntimeStatus('正在編輯的項目有遠端新版本；目前草稿未被覆蓋。', 'warn'),
+            onLeaseLost: () => v4SetCloudRuntimeStatus('編輯權已失效；內容保留為本機草稿，禁止直接覆蓋。', 'error'),
+            onTransportError: (error) => console.warn('V7 collaboration error', error),
+            onItemSaved: () => renderV5SessionBar(),
+            onUsersChanged: () => setTimeout(() => window.MonthlyV7App?.loadSnapshot?.().catch(console.warn), 0)
+        };
+
         async function monthlyReportBoot() {
             if (SITE_ACCESS_BOOTED) return;
             SITE_ACCESS_BOOTED = true;
             await initApp();
             setupV1Shell();
             v5SetupFormDraftPersistence();
-            v6SetupEditLockGuards();
-            await v4AutoSyncOnStartup();
+            if (!window.MonthlyV7App?.isActive?.()) v6SetupEditLockGuards();
+            const synced = await v4AutoSyncOnStartup();
+            if (window.MonthlyV7App?.isActive?.() && !synced) {
+                SITE_ACCESS_BOOTED = false;
+                await window.MonthlyV7App.logout();
+                siteAccessRenderGate();
+                return;
+            }
             v4SetupAutoRefresh();
+            window.MonthlyV7App?.decorateEditorRows?.();
         }
 
         window.onload = async function() {
+            const config = v4GetCloudConfig();
+            if (v4ConfigReady(config)) {
+                try {
+                    if (!window.MonthlyV7App) throw new Error('V7 scripts 未載入');
+                    await window.MonthlyV7App.initialize(config, window.MonthlyV7Host);
+                } catch (error) {
+                    V7_INITIALIZATION_ERROR = error;
+                    document.body.classList.add('site-access-locked');
+                    const gateError = document.getElementById('site-access-error');
+                    if (gateError) gateError.textContent = '雲端安全驗證無法初始化，已停止載入資料：' + error.message;
+                    return;
+                }
+            }
             siteAccessRenderGate();
             if (siteAccessIsUnlocked()) await monthlyReportBoot();
         };

@@ -1,0 +1,18 @@
+{
+  "name": "monthly-safety-report-system",
+  "version": "7.0.0",
+  "private": true,
+  "description": "月度安全會議報告逐項多人協作",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "test:core": "node --test tests/collaboration-core.test.js tests/collaboration-client.test.js tests/html-contract.test.js",
+    "test:sql": "node --test tests/sql-runtime.test.js",
+    "test:browser": "playwright test",
+    "test:all": "npm test && npm run test:browser"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4",
+    "@playwright/test": "^1.62.1",
+    "@supabase/supabase-js": "^2.112.2"
+  }
+}
