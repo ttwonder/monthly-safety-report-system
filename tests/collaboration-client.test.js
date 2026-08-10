@@ -81,6 +81,39 @@ test('site/user session 綁定分頁 ID，登入後套用不含 hash 的 normali
   assert.equal(loginCall.params.p_client_session_id, 'tab-session-1');
 });
 
+test('claimLease 被占用時帶出持鎖者顯示名稱，不暴露 LEASE_HELD 技術碼', async () => {
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u2', username: 'operator', role: 'operator' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 0,
+      report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 },
+      modules: [], records: [], users: []
+    },
+    monthly_v7_claim_lease: {
+      ok: false,
+      error: 'LEASE_HELD',
+      holder_display_name: '王主管',
+      expires_at: '2026-08-11T01:02:03Z'
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: memoryStorage(), idFactory: () => 'tab-b'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('operator', 'pass');
+
+  await assert.rejects(() => client.claimLease('module', 'm1'), (error) => {
+    assert.equal(error.code, 'LEASE_HELD');
+    assert.equal(error.holderDisplayName, '王主管');
+    assert.equal(error.message, '此項目目前由「王主管」編輯，請稍後再試。');
+    assert.equal(error.message.includes('LEASE_HELD'), false);
+    return true;
+  });
+});
+
 test('saveModule 以 lease/fence/CAS 保存，失鎖保留草稿且成功後才清除', async () => {
   const drafts = memoryStorage();
   let saveAttempt = 0;

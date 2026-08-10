@@ -40,7 +40,8 @@ test('兩個瀏覽器同項排他、不同 module 並行保存且不互相覆蓋
   const titleB1 = rowB1.locator('td').nth(1).locator('.editable-div');
   await titleB1.click();
   await expect(titleB1).toHaveAttribute('contenteditable', 'false');
-  await expect(pageB.locator('#v4-cloud-runtime-status')).toContainText(/失敗|編輯|LEASE|項目/);
+  await expect(pageB.locator('#v4-cloud-runtime-status')).toContainText('此項目目前由「Owner A」編輯，請稍後再試。');
+  await expect(pageB.locator('#v4-cloud-runtime-status')).not.toContainText('LEASE_HELD');
 
   const rowB2 = pageB.locator('#tableBody tr').nth(1);
   const titleB2 = rowB2.locator('td').nth(1).locator('.editable-div');

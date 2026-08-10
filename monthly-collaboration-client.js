@@ -230,8 +230,16 @@
         p_ttl_seconds: ttlSeconds
       });
       if (!raw || raw.ok !== true) {
-        const error = new Error(raw && raw.error || 'LEASE_HELD');
-        error.code = raw && raw.error || 'LEASE_HELD';
+        const code = raw && raw.error || 'LEASE_HELD';
+        const holderDisplayName = String(raw && (raw.holder_display_name || raw.holderDisplayName) || '').trim();
+        const message = code === 'LEASE_HELD'
+          ? (holderDisplayName
+            ? `此項目目前由「${holderDisplayName}」編輯，請稍後再試。`
+            : '此項目目前由其他使用者編輯，請稍後再試。')
+          : code;
+        const error = new Error(message);
+        error.code = code;
+        error.holderDisplayName = holderDisplayName || null;
         error.result = raw;
         throw error;
       }

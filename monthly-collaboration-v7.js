@@ -451,8 +451,13 @@
           if (focusTarget && focusTarget.dataset.v7Editable === '1') focusTarget.focus({ preventScroll: true });
           this.toast('已取得此項目編輯權，可開始修改。');
         }).catch((error) => {
-          this.reportError(error);
-          this.toast(error.code === 'LEASE_HELD' ? '此項目目前由其他使用者編輯。' : `無法取得編輯權：${error.message}`);
+          if (error.code === 'LEASE_HELD') {
+            this.setStatus(error.message, 'warn');
+            this.toast(error.message);
+          } else {
+            this.reportError(error);
+            this.toast(`無法取得編輯權：${error.message}`);
+          }
         });
       };
       root.document.addEventListener('pointerdown', (event) => {
