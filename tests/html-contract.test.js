@@ -27,9 +27,11 @@ test('正式 HTML 載入固定 Supabase bundle 與 V7 三層 client，並保留 
   const html = await readFile(join(root, 'index.html'), 'utf8');
   for (const src of [
     './vendor/supabase-2.112.2.js',
-    './monthly-collaboration-core.js',
-    './monthly-collaboration-client.js',
-    './monthly-collaboration-v7.js'
+    './monthly-collaboration-core.js'
+  ]) assert.match(html, new RegExp(`<script src="${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
+  for (const src of [
+    './monthly-collaboration-client.js?v=7.0.1',
+    './monthly-collaboration-v7.js?v=7.0.1'
   ]) assert.match(html, new RegExp(`<script src="${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
   const uploadStart = html.indexOf('async function v4UploadToCloud');
   const activeBranch = html.indexOf('window.MonthlyV7App?.isActive?.()', uploadStart);

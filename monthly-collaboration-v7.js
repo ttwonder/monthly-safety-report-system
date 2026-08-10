@@ -101,6 +101,7 @@
       this.status = { mode: 'unknown' };
       this.persistChain = Promise.resolve();
       this.claimPromises = new Map();
+      this.moduleReleaseTimers = new Map();
       this.initialized = false;
       this.guardsInstalled = false;
     }
@@ -180,6 +181,8 @@
 
     async logout() {
       if (!this.client) return;
+      for (const timer of this.moduleReleaseTimers.values()) root.clearTimeout(timer);
+      this.moduleReleaseTimers.clear();
       const leases = Array.from(this.client.leases.values());
       await Promise.allSettled(leases.map((lease) => this.client.releaseLease(lease.entityType, lease.entityId)));
       await this.client.logout();
@@ -399,6 +402,43 @@
       });
     }
 
+    cancelModuleRelease(entityId) {
+      const id = String(entityId || '');
+      const timer = this.moduleReleaseTimers.get(id);
+      if (timer) root.clearTimeout(timer);
+      this.moduleReleaseTimers.delete(id);
+    }
+
+    scheduleUnchangedModuleRelease(row, delayMs = 350) {
+      if (!row || !this.client) return;
+      const entityId = String(row.dataset.v7EntityId || '');
+      if (!entityId || !this.client.getLease('module', entityId)) return;
+      this.cancelModuleRelease(entityId);
+      const timer = root.setTimeout(async () => {
+        this.moduleReleaseTimers.delete(entityId);
+        if (!this.client || !this.client.getLease('module', entityId)) return;
+        const currentRow = Array.from(root.document.querySelectorAll('#tableBody tr[data-v7-entity-id]'))
+          .find((candidate) => String(candidate.dataset.v7EntityId || '') === entityId);
+        if (currentRow && currentRow.contains(root.document.activeElement)) return;
+        const baseline = this.baselineModuleMap().get(entityId);
+        if (!baseline || typeof this.host.getLocalEntity !== 'function') return;
+        let local;
+        try { local = await this.host.getLocalEntity('module', entityId); }
+        catch (error) { this.reportError(error); return; }
+        if (!local || (currentRow && currentRow.contains(root.document.activeElement))) return;
+        const changed = canonical(this.client.modulePayload(local)) !== canonical(baseline.payload);
+        if (changed) return;
+        try { await this.client.releaseLease('module', entityId); }
+        catch {
+          // releaseLease drops the local heartbeat in finally; the server lease
+          // will therefore expire at its existing TTL even if the ack is lost.
+          this.setStatus('項目釋放確認失敗；編輯權將在逾時後自動釋放。', 'warn');
+        }
+        this.decorateEditorRows();
+      }, delayMs);
+      this.moduleReleaseTimers.set(entityId, timer);
+    }
+
     installEditGuards() {
       if (this.guardsInstalled || !root.document) return;
       this.guardsInstalled = true;
@@ -417,7 +457,17 @@
       };
       root.document.addEventListener('pointerdown', (event) => {
         const row = rowFor(event.target);
+        root.document.querySelectorAll('#tableBody tr[data-v7-entity-id]').forEach((candidate) => {
+          const id = candidate.dataset.v7EntityId;
+          if (candidate === row) this.cancelModuleRelease(id);
+          else if (this.client.getLease('module', id)) this.scheduleUnchangedModuleRelease(candidate);
+        });
         if (row && !this.client.getLease('module', row.dataset.v7EntityId)) request(row, event.target);
+      }, true);
+      root.document.addEventListener('focusout', (event) => {
+        const row = rowFor(event.target);
+        if (!row || (event.relatedTarget && row.contains(event.relatedTarget))) return;
+        this.scheduleUnchangedModuleRelease(row);
       }, true);
       ['beforeinput', 'paste', 'drop'].forEach((type) => root.document.addEventListener(type, (event) => {
         const row = rowFor(event.target);

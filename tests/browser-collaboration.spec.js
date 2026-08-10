@@ -67,6 +67,56 @@ test('兩個瀏覽器同項排他、不同 module 並行保存且不互相覆蓋
   await contextB.close();
 });
 
+test('未修改 module 離開後立即釋放，另一瀏覽器不必等待 TTL', async ({ browser }) => {
+  const contextA = await browser.newContext();
+  const contextB = await browser.newContext();
+  const pageA = await contextA.newPage();
+  const pageB = await contextB.newPage();
+  const errors = [];
+  pageA.on('pageerror', (error) => errors.push(`A:${error.message}`));
+  pageB.on('pageerror', (error) => errors.push(`B:${error.message}`));
+
+  await enterAndLogin(pageA, 'owner', 'owner-pass');
+  await enterAndLogin(pageB, 'operator', 'operator-pass');
+
+  const rowA = pageA.locator('#tableBody tr').first();
+  const titleA = rowA.locator('td').nth(1).locator('.editable-div');
+  await titleA.click();
+  await expect(rowA.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+
+  await pageA.locator('#v5TopStatus').click();
+  await expect(rowA.locator('.v7-item-lock-badge')).toHaveText('點一下取得編輯權');
+
+  const rowB = pageB.locator('#tableBody tr').first();
+  const titleB = rowB.locator('td').nth(1).locator('.editable-div');
+  await titleB.click();
+  await expect(rowB.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(titleB).toHaveAttribute('contenteditable', 'true');
+  expect(errors).toEqual([]);
+
+  await contextA.close();
+  await contextB.close();
+});
+
+test('未提交的 module 變更離開後仍保留 lease，不提前放鎖', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await enterAndLogin(page, 'owner', 'owner-pass');
+
+  const row = page.locator('#tableBody tr').first();
+  const title = row.locator('td').nth(1).locator('.editable-div');
+  await title.click();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await title.evaluate((element) => element.removeAttribute('onblur'));
+  await title.fill('尚未提交的本機內容');
+  await page.locator('#v5TopStatus').click();
+  await page.waitForTimeout(700);
+
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveText('尚未提交的本機內容');
+  expect(errors).toEqual([]);
+});
+
 test('full snapshot catch-up 不覆蓋尚未 blur 的本機 module', async ({ page, request }) => {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));

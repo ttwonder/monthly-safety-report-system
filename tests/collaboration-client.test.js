@@ -167,6 +167,57 @@ test('catchUp 逐項重讀變更，正在編輯或有草稿的 entity 不被遠�
   assert.equal(client.watermark, 12);
 });
 
+test('saveModuleBatch 成功後逐筆釋放原先持有的 module lease', async () => {
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 0,
+      report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 },
+      modules: [
+        { id: 'm1', revision: 1, payload: { title: 'A' } },
+        { id: 'm2', revision: 1, payload: { title: 'B' } }
+      ], records: [], users: []
+    },
+    monthly_v7_claim_lease: (params) => ({
+      ok: true,
+      entity_type: params.p_entity_type,
+      entity_id: params.p_entity_id,
+      lease_id: `lease-${params.p_entity_type}-${params.p_entity_id}`,
+      fencing_token: 1,
+      holder_user_id: 'u1',
+      client_session_id: 'tab'
+    }),
+    monthly_v7_save_module_batch: {
+      ok: true,
+      updated: [{ entityId: 'm1', revision: 2 }, { entityId: 'm2', revision: 2 }],
+      watermark: 2
+    },
+    monthly_v7_release_lease: { ok: true }
+  });
+  let op = 0;
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: memoryStorage(), idFactory: () => 'tab',
+    operationIdFactory: () => `00000000-0000-4000-8000-${String(++op).padStart(12, '0')}`
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  await client.claimLease('module', 'm1');
+  await client.claimLease('module', 'm2');
+
+  await client.saveModuleBatch([
+    { _v7Id: 'm1', _v7Revision: 1, title: 'A2' },
+    { _v7Id: 'm2', _v7Revision: 1, title: 'B2' }
+  ]);
+
+  const releases = transport.calls.filter((call) => call.name === 'monthly_v7_release_lease');
+  assert.deepEqual(releases.map((call) => `${call.params.p_entity_type}:${call.params.p_entity_id}`).sort(), ['module:m1', 'module:m2']);
+  assert.equal(client.getLease('module', 'm1'), null);
+  assert.equal(client.getLease('module', 'm2'), null);
+});
+
 test('lost acknowledgement 以同一 operation_id 自動重送', async () => {
   let attempts = 0;
   const transport = fakeTransport({

@@ -489,6 +489,10 @@
         this.clearDraft('module', item._v7Id);
       });
       this.leases.delete(this.leaseKey('kpi_batch', report.id));
+      // The batch RPC atomically expires its kpi_batch lease, but each editor may
+      // still hold an independently claimed module lease. Release those server
+      // leases after the committed batch so another editor need not wait for TTL.
+      await Promise.allSettled(changes.map((row) => this.releaseLease('module', row.moduleId)));
       return result;
     }
 
