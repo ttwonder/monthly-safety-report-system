@@ -110,7 +110,8 @@ docs/supabase-schema-v7-activate.sql
 6. 原子切到 `NORMALIZED_ACTIVE`、增加 authority epoch、最低 client version 設為 7。
 7. 撤銷 V6 get/upsert 對 anon/authenticated 的 execute 權限。
 
-成功後所有人重新整理，重新輸入進站密碼與內部帳號密碼。
+- `NORMALIZED_ACTIVE` 後從 `PUBLIC`、`anon`、`authenticated` 全部撤銷 V6 get/upsert 的 execute；只撤銷具名角色不足，因 PostgreSQL 函式預設仍可能透過 `PUBLIC` 繼承 execute。
+- 成功後所有人重新整理，重新輸入進站密碼與內部帳號密碼。
 
 ## 最低正式驗收
 

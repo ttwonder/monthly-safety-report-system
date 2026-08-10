@@ -357,6 +357,19 @@ test('V7 activate 先最終遷移再切 authority，切換後伺服器阻斷所�
     const status = rpcResult(await db.query(`select public.monthly_v7_get_status('workspace-test') as result`));
     assert.equal(status.authority_state, 'NORMALIZED_ACTIVE');
     assert.equal(status.minimum_client_version, 7);
+    const legacyAcl = (await db.query(`
+      select
+        has_function_privilege('anon', 'public.get_monthly_report_cloud_data(text)', 'EXECUTE') as anon_read,
+        has_function_privilege('anon', 'public.upsert_monthly_report_cloud_data(text,jsonb,bigint,text)', 'EXECUTE') as anon_write,
+        has_function_privilege('authenticated', 'public.get_monthly_report_cloud_data(text)', 'EXECUTE') as authenticated_read,
+        has_function_privilege('authenticated', 'public.upsert_monthly_report_cloud_data(text,jsonb,bigint,text)', 'EXECUTE') as authenticated_write
+    `)).rows[0];
+    assert.deepEqual(legacyAcl, {
+      anon_read: false,
+      anon_write: false,
+      authenticated_read: false,
+      authenticated_write: false
+    });
     const report = (await db.query(`select title from public.monthly_v7_reports`)).rows[0];
     assert.equal(report.title, '切換前最後版本');
 

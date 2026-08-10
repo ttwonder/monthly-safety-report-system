@@ -58,7 +58,7 @@ end
 $$;
 
 -- 權限撤銷是第二道防線；函式內 authority gate 仍保留，供舊 grant/超級使用者路徑 fail closed。
-revoke execute on function public.upsert_monthly_report_cloud_data(text,jsonb,bigint,text) from anon,authenticated;
-revoke execute on function public.get_monthly_report_cloud_data(text) from anon,authenticated;
+revoke execute on function public.upsert_monthly_report_cloud_data(text,jsonb,bigint,text) from public,anon,authenticated;
+revoke execute on function public.get_monthly_report_cloud_data(text) from public,anon,authenticated;
 
 commit;
