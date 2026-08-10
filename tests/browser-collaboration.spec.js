@@ -20,6 +20,12 @@ async function enterAndLogin(page, username, password) {
   await expect(page.locator('#tableBody tr')).toHaveCount(2);
 }
 
+async function settleLayout(page) {
+  await page.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  }));
+}
+
 test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
 });
@@ -168,6 +174,202 @@ test('100% 縮放時工具列換行、文字可讀且無水平破版', async ({ 
     expect(geometry.stackMinWidth).toBe(0);
     expect(geometry.toolbar.height).toBeLessThan(520);
   }
+});
+
+test('長月報捲動時頁首與工具列保持可見，不會只剩固定漸層遮罩', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.evaluate(() => {
+    const content = document.querySelector('.module-content-cell');
+    content.style.minHeight = '5000px';
+    refreshEditorStickyOffsets();
+    window.scrollTo(0, 2200);
+  });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(2000);
+
+  const geometry = await page.evaluate(() => {
+    const box = (selector) => {
+      const element = document.querySelector(selector);
+      const rect = element.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, height: rect.height };
+    };
+    return {
+      tabs: box('#v1TabsBar'),
+      toolbar: box('#richEditorToolbar'),
+      shield: box('#v1StickyShield')
+    };
+  });
+
+  expect(geometry.tabs.top).toBeGreaterThanOrEqual(-1);
+  expect(geometry.toolbar.top).toBeGreaterThanOrEqual(geometry.tabs.bottom - 1);
+  expect(geometry.toolbar.top).toBeLessThanOrEqual(geometry.tabs.bottom + 1);
+  expect(geometry.toolbar.bottom).toBeGreaterThanOrEqual(geometry.shield.bottom - 12);
+});
+
+test('進站與登入後最左上角使用同一份 FPMC Logo 且不造成水平破版', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+
+  const gateLogo = page.locator('#siteAccessBrandLogo');
+  await expect(gateLogo).toBeVisible();
+  await expect(gateLogo).toHaveAttribute('alt', '台塑海運 FPMC Logo');
+  await expect(gateLogo).toHaveAttribute('src', './assets/fpmc-logo.png');
+  const gateLogoGeometry = await gateLogo.evaluate((image) => {
+    const rect = image.getBoundingClientRect();
+    return {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+      naturalWidth: image.naturalWidth,
+      naturalHeight: image.naturalHeight
+    };
+  });
+  expect(gateLogoGeometry.left).toBeLessThanOrEqual(32);
+  expect(gateLogoGeometry.top).toBeLessThanOrEqual(32);
+  expect(gateLogoGeometry.naturalWidth).toBe(241);
+  expect(gateLogoGeometry.naturalHeight).toBe(197);
+  expect(gateLogoGeometry.width / gateLogoGeometry.height).toBeCloseTo(241 / 197, 2);
+
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const mainLogo = page.locator('#v1BrandLogo');
+  await expect(mainLogo).toBeVisible();
+  await expect(mainLogo).toHaveAttribute('alt', '台塑海運 FPMC Logo');
+  await expect(mainLogo).toHaveAttribute('src', './assets/fpmc-logo.png');
+
+  for (const width of [1440, 1024]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await settleLayout(page);
+    const geometry = await page.evaluate(() => {
+      const image = document.querySelector('#v1BrandLogo');
+      const tabs = document.querySelector('#v1TabsBar');
+      const firstTab = tabs.querySelector('.v1-tab-btn');
+      const imageBox = image.getBoundingClientRect();
+      const tabsBox = tabs.getBoundingClientRect();
+      const firstTabBox = firstTab.getBoundingClientRect();
+      return {
+        viewportWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        image: { left: imageBox.left, right: imageBox.right, width: imageBox.width, height: imageBox.height },
+        tabs: { left: tabsBox.left, right: tabsBox.right },
+        firstTab: { left: firstTabBox.left }
+      };
+    });
+    expect(geometry.documentScrollWidth).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+    expect(geometry.image.left).toBeLessThanOrEqual(geometry.tabs.left + 12);
+    expect(geometry.image.right).toBeLessThanOrEqual(geometry.firstTab.left + 1);
+    expect(geometry.image.width / geometry.image.height).toBeCloseTo(241 / 197, 2);
+    expect(geometry.tabs.right).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+  }
+});
+
+test('編輯工具列可獨立收合與固定，四種組合皆可逆且 sticky shield 跟隨重算', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+
+  const toolbar = page.locator('#richEditorToolbar');
+  const controls = page.locator('#toolbarPreferenceControls');
+  const pin = page.locator('#toolbarPinToggle');
+  const collapse = page.locator('#toolbarCollapseToggle');
+  const content = page.locator('#editorToolbarContent');
+
+  await expect(controls).toBeVisible();
+  await expect(content).toBeVisible();
+  await expect(pin).toHaveAttribute('aria-pressed', 'true');
+  await expect(pin).toHaveAttribute('aria-label', '固定顯示工具列');
+  await expect(pin).toContainText('固定顯示');
+  await expect(pin).toContainText('已固定');
+  await expect(collapse).toHaveAttribute('aria-expanded', 'true');
+  await expect(collapse).toContainText('收合');
+  const expandedHeight = await toolbar.evaluate((element) => element.getBoundingClientRect().height);
+  expect(await toolbar.evaluate((element) => getComputedStyle(element).position)).toBe('sticky');
+
+  // 收合＋固定：完整內容隱藏，但最小控制列仍可操作並跟隨捲動。
+  await collapse.click();
+  await settleLayout(page);
+  await expect(content).toBeHidden();
+  await expect(controls).toBeVisible();
+  await expect(collapse).toHaveAttribute('aria-expanded', 'false');
+  await expect(collapse).toContainText('展開');
+  await expect(toolbar).toHaveAttribute('data-toolbar-collapsed', 'true');
+  const collapsedHeight = await toolbar.evaluate((element) => element.getBoundingClientRect().height);
+  expect(collapsedHeight).toBeLessThan(expandedHeight - 60);
+
+  await page.evaluate(() => {
+    document.querySelector('.module-content-cell').style.minHeight = '5000px';
+    refreshEditorStickyOffsets();
+    window.scrollTo(0, 2200);
+  });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(2000);
+  await settleLayout(page);
+  let geometry = await page.evaluate(() => {
+    const box = (selector) => {
+      const rect = document.querySelector(selector).getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, height: rect.height };
+    };
+    return { tabs: box('#v1TabsBar'), toolbar: box('#richEditorToolbar'), shield: box('#v1StickyShield') };
+  });
+  expect(geometry.toolbar.top).toBeGreaterThanOrEqual(geometry.tabs.bottom - 1);
+  expect(geometry.toolbar.top).toBeLessThanOrEqual(geometry.tabs.bottom + 1);
+  expect(geometry.shield.bottom).toBeGreaterThanOrEqual(geometry.toolbar.bottom + 7);
+
+  // 展開＋取消固定：工具列恢復內容後，隨文件正常捲走；tabs 仍保持可見。
+  await collapse.click();
+  await settleLayout(page);
+  await expect(content).toBeVisible();
+  await pin.click();
+  await settleLayout(page);
+  await expect(pin).toHaveAttribute('aria-pressed', 'false');
+  await expect(pin).toContainText('固定顯示');
+  await expect(pin).toHaveAttribute('aria-label', '固定顯示工具列');
+  await expect(pin).toContainText('未固定');
+  await expect(toolbar).toHaveAttribute('data-toolbar-pinned', 'false');
+  expect(await toolbar.evaluate((element) => getComputedStyle(element).position)).not.toBe('sticky');
+  geometry = await page.evaluate(() => {
+    const box = (selector) => {
+      const rect = document.querySelector(selector).getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, height: rect.height };
+    };
+    return { tabs: box('#v1TabsBar'), toolbar: box('#richEditorToolbar'), shield: box('#v1StickyShield') };
+  });
+  expect(geometry.toolbar.bottom).toBeLessThan(0);
+  expect(geometry.tabs.top).toBeGreaterThanOrEqual(-1);
+  expect(geometry.shield.bottom).toBeLessThanOrEqual(geometry.tabs.bottom + 9);
+
+  // 收合＋取消固定，再重新固定；兩個狀態互不覆蓋。
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await settleLayout(page);
+  await collapse.click();
+  await settleLayout(page);
+  await expect(content).toBeHidden();
+  await expect(pin).toHaveAttribute('aria-pressed', 'false');
+  await expect(toolbar).toHaveAttribute('data-toolbar-collapsed', 'true');
+  await pin.click();
+  await settleLayout(page);
+  await expect(pin).toHaveAttribute('aria-pressed', 'true');
+  await expect(pin).toHaveAttribute('aria-label', '固定顯示工具列');
+  await expect(pin).toContainText('已固定');
+  await expect(content).toBeHidden();
+  await page.evaluate(() => window.scrollTo(0, 2200));
+  await settleLayout(page);
+  await expect(controls).toBeVisible();
+
+  await page.emulateMedia({ media: 'print' });
+  await expect(controls).toBeHidden();
+  await page.emulateMedia({ media: 'screen' });
+  await page.setViewportSize({ width: 1024, height: 1000 });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await settleLayout(page);
+  const responsive = await page.evaluate(() => {
+    const controlsBox = document.querySelector('#toolbarPreferenceControls').getBoundingClientRect();
+    return {
+      viewportWidth: document.documentElement.clientWidth,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      controlsRight: controlsBox.right
+    };
+  });
+  expect(responsive.documentScrollWidth).toBeLessThanOrEqual(responsive.viewportWidth + 1);
+  expect(responsive.controlsRight).toBeLessThanOrEqual(responsive.viewportWidth + 1);
 });
 
 test('兩個瀏覽器同項排他、不同 module 並行保存且不互相覆蓋', async ({ browser, request }) => {

@@ -162,6 +162,9 @@ function rpc(name, p) {
     return { ok: true, revision: state.report.revision, watermark: state.sequence };
   }
   if (name === 'monthly_v7_create_report_snapshot') {
+    if (!Object.prototype.hasOwnProperty.call(p, 'p_snapshot_kind') || Object.prototype.hasOwnProperty.call(p, 'p_kind')) {
+      return { ok: false, error: 'POSTGREST_SIGNATURE_MISMATCH' };
+    }
     const snapshot = { report: clone(state.report), modules: clone(state.modules), records: clone(state.records) };
     snapshot.report.title = '正式快照標題';
     if (snapshot.modules[0]) snapshot.modules[0].payload.title = '正式快照模塊';

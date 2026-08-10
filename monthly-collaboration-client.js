@@ -689,7 +689,7 @@
         p_site_session_id: this.siteSession.id,
         p_user_session_id: this.userSession.id,
         p_report_id: report.id,
-        p_kind: kind
+        p_snapshot_kind: kind
       }, `create_snapshot:${report.id}:${kind}`), 'CREATE_SNAPSHOT_FAILED');
     }
 

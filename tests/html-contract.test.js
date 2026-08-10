@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { readFile } = require('node:fs/promises');
 const { join } = require('node:path');
 const { Script } = require('node:vm');
@@ -30,8 +31,8 @@ test('正式 HTML 載入固定 Supabase bundle 與 V7 三層 client，並保留 
     './monthly-collaboration-core.js'
   ]) assert.match(html, new RegExp(`<script src="${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
   for (const src of [
-    './monthly-collaboration-client.js?v=7.0.3',
-    './monthly-collaboration-v7.js?v=7.0.3'
+    './monthly-collaboration-client.js?v=7.0.4',
+    './monthly-collaboration-v7.js?v=7.0.4'
   ]) assert.match(html, new RegExp(`<script src="${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
   const uploadStart = html.indexOf('async function v4UploadToCloud');
   const activeBranch = html.indexOf('window.MonthlyV7App?.isActive?.()', uploadStart);
@@ -40,4 +41,22 @@ test('正式 HTML 載入固定 Supabase bundle 與 V7 三層 client，並保留 
   assert.match(html, /persistReportData\(reportData\)/);
   assert.match(html, /persistRecords\(v2RecordsCache\)/);
   assert.match(html, /dataset\.v7EntityId/);
+});
+
+test('進站與登入後共用使用者指定的本機 FPMC Logo，工具列控制具無障礙狀態', async () => {
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  assert.match(html, /id="siteAccessBrandLogo"[^>]+src="\.\/assets\/fpmc-logo\.png"[^>]+alt="台塑海運 FPMC Logo"/);
+  assert.match(html, /id="v1BrandLogo"[^>]+src="\.\/assets\/fpmc-logo\.png"[^>]+alt="台塑海運 FPMC Logo"/);
+  assert.equal(Array.from(html.matchAll(/src="\.\/assets\/fpmc-logo\.png"/g)).length, 2);
+  assert.match(html, /id="toolbarPreferenceControls"/);
+  assert.match(html, /id="toolbarPinToggle"[^>]+aria-pressed="true"/);
+  assert.match(html, /id="toolbarPinToggle"[^>]+aria-label="固定顯示工具列"/);
+  assert.match(html, /id="toolbarCollapseToggle"[^>]+aria-expanded="true"[^>]+aria-controls="editorToolbarContent"/);
+  assert.match(html, /id="editorToolbarContent"[^>]+class="editor-toolbar-stack/);
+
+  const logo = await readFile(join(root, 'assets', 'fpmc-logo.png'));
+  assert.equal(
+    createHash('sha256').update(logo).digest('hex'),
+    'bc79ff64d006cdc036117c3051dd70223db4dc10a8e1a58dca0b20e9d0dd9bc0'
+  );
 });

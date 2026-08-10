@@ -1054,6 +1054,23 @@
             box-shadow: 0 8px 24px rgba(79,70,229,.08);
             backdrop-filter: blur(10px);
         }
+        .v1-brand-mark {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+            padding: 2px 6px 2px 2px;
+            margin-right: 2px;
+            border-right: 1px solid rgba(129,140,248,.28);
+        }
+        .v1-brand-logo {
+            display: block;
+            width: 40px;
+            height: auto;
+            object-fit: contain;
+            border-radius: 6px;
+            box-shadow: 0 2px 7px rgba(15,23,42,.12);
+        }
         .v1-tab-btn {
             border: 1px solid #c7d2fe;
             background: rgba(255,255,255,.72);
@@ -1239,6 +1256,28 @@
         }
         body.site-access-locked #siteAccessGate {
             display: flex !important;
+        }
+        .site-access-brand {
+            position: absolute;
+            top: 18px;
+            left: 18px;
+            z-index: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 5px;
+            border: 1px solid rgba(255,255,255,.9);
+            border-radius: 12px;
+            background: rgba(255,255,255,.92);
+            box-shadow: 0 10px 28px rgba(30,64,175,.16);
+        }
+        .site-access-brand img {
+            display: block;
+            width: 62px;
+            height: auto;
+            max-width: 18vw;
+            object-fit: contain;
+            border-radius: 7px;
         }
         .site-access-card {
             width: min(420px, calc(100vw - 32px));
@@ -1443,7 +1482,7 @@
         }
 
         /* === V7.0.3 100% 可讀性與工具列換行 === */
-        html, body { max-width:100%; overflow-x:hidden; }
+        html, body { max-width:100%; overflow-x:clip; }
         body { font-size:15px; }
         #v1-editor-workspace,
         #reportContainer,
@@ -1457,6 +1496,59 @@
             overflow-y:auto !important;
             scrollbar-gutter:stable;
         }
+        #richEditorToolbar[data-toolbar-pinned="false"] {
+            position:relative !important;
+            top:auto !important;
+        }
+        #richEditorToolbar[data-toolbar-collapsed="true"] {
+            max-height:none !important;
+            overflow:hidden !important;
+        }
+        .toolbar-preference-controls {
+            display:flex;
+            flex-wrap:wrap;
+            align-items:center;
+            justify-content:flex-end;
+            gap:6px;
+            width:100%;
+            min-width:0;
+            padding:0 0 7px;
+            margin:0 0 7px;
+            border-bottom:1px solid rgba(129,140,248,.24);
+            box-sizing:border-box;
+        }
+        .toolbar-preference-label {
+            display:inline-flex;
+            align-items:center;
+            gap:6px;
+            min-width:0;
+            margin-right:auto;
+            color:#4338ca;
+            font-size:13px;
+            font-weight:800;
+            line-height:1.3;
+        }
+        .toolbar-preference-btn {
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+            gap:6px;
+            min-height:32px;
+            padding:5px 10px;
+            border:1px solid #c7d2fe;
+            border-radius:9px;
+            background:rgba(255,255,255,.82);
+            color:#4338ca;
+            font-size:13px;
+            font-weight:800;
+            line-height:1.2;
+            cursor:pointer;
+            white-space:nowrap;
+        }
+        .toolbar-preference-btn:hover { background:#fff; border-color:#818cf8; }
+        .toolbar-preference-btn:focus-visible { outline:3px solid rgba(99,102,241,.28); outline-offset:1px; }
+        .toolbar-preference-btn[aria-pressed="true"] { background:#eef2ff; border-color:#818cf8; }
+        #editorToolbarContent[hidden] { display:none !important; }
         .editor-toolbar-stack { width:100%; min-width:0 !important; }
         .editor-toolbar-row {
             display:flex;
@@ -1519,9 +1611,14 @@
         @media screen and (max-width:700px) {
             body { font-size:15px; }
             .v1-tabs-bar { padding:7px; }
+            .v1-brand-logo { width:34px; }
             .v1-tab-btn { flex:1 1 auto; text-align:center; }
             #richEditorToolbar { max-height:58vh; }
             #richEditorToolbar .toolbar-btn { max-width:100%; }
+            .site-access-brand { top:10px; left:10px; padding:4px; }
+            .site-access-brand img { width:50px; }
+            .toolbar-preference-label { flex:1 1 100%; margin-right:0; }
+            .toolbar-preference-btn { flex:1 1 auto; }
         }
 
         /* === V7.0.3 緊湊 module meta row === */
@@ -1588,6 +1685,9 @@
 
     <!-- 網站進入密碼門 -->
     <div id="siteAccessGate" class="fixed inset-0 z-[10000] items-center justify-center bg-gradient-to-br from-sky-50 via-white to-indigo-100 p-4 no-print">
+        <div class="site-access-brand" aria-label="台塑海運識別標誌">
+            <img id="siteAccessBrandLogo" src="./assets/fpmc-logo.png" alt="台塑海運 FPMC Logo" width="241" height="197">
+        </div>
         <div class="site-access-card">
             <div class="text-center mb-5">
                 <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-600 text-white text-2xl mb-3 shadow-lg"><i class="fas fa-lock"></i></div>
@@ -1609,8 +1709,13 @@
     </div>
 
     <!-- 頂部控制與富文本工具列 -->
-    <div id="richEditorToolbar" class="no-print sticky top-0 z-40 dreamy-bg rounded-lg shadow-sm border border-white p-2 mb-3 overflow-x-auto no-scrollbar backdrop-blur-sm bg-opacity-90">
-        <div class="editor-toolbar-stack flex flex-col gap-2 min-w-0 w-full">
+    <div id="richEditorToolbar" data-toolbar-pinned="true" data-toolbar-collapsed="false" class="no-print sticky top-0 z-40 dreamy-bg rounded-lg shadow-sm border border-white p-2 mb-3 overflow-x-auto no-scrollbar backdrop-blur-sm bg-opacity-90">
+        <div id="toolbarPreferenceControls" class="toolbar-preference-controls">
+            <span class="toolbar-preference-label"><i class="fas fa-sliders" aria-hidden="true"></i><span>編輯工具列</span></span>
+            <button id="toolbarPinToggle" type="button" class="toolbar-preference-btn" aria-pressed="true" aria-label="固定顯示工具列" title="取消固定工具列（目前會隨畫面保持可見）" onclick="toggleEditorToolbarPinned()"><i class="fas fa-thumbtack" aria-hidden="true"></i><span>固定顯示 · 已固定</span></button>
+            <button id="toolbarCollapseToggle" type="button" class="toolbar-preference-btn" aria-expanded="true" aria-controls="editorToolbarContent" title="收合編輯工具列" onclick="toggleEditorToolbarCollapsed()"><i class="fas fa-chevron-up" aria-hidden="true"></i><span>收合</span></button>
+        </div>
+        <div id="editorToolbarContent" class="editor-toolbar-stack flex flex-col gap-2 min-w-0 w-full">
             
             <!-- === 第一排 === -->
             <div class="editor-toolbar-row editor-toolbar-primary flex items-center w-full gap-2">
@@ -1889,8 +1994,8 @@
 
     <script src="./vendor/supabase-2.112.2.js"></script>
     <script src="./monthly-collaboration-core.js"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.3"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.3"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.4"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.4"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont() {
@@ -2665,15 +2770,70 @@
             requestAnimationFrame(() => setTimeout(restore, 0));
         }
 
+        function updateEditorToolbarControls() {
+            const toolbar = document.getElementById('richEditorToolbar');
+            const content = document.getElementById('editorToolbarContent');
+            const pinButton = document.getElementById('toolbarPinToggle');
+            const collapseButton = document.getElementById('toolbarCollapseToggle');
+            if (!toolbar || !content || !pinButton || !collapseButton) return;
+            const pinned = toolbar.dataset.toolbarPinned !== 'false';
+            const collapsed = toolbar.dataset.toolbarCollapsed === 'true';
+            content.hidden = collapsed;
+            pinButton.setAttribute('aria-pressed', String(pinned));
+            pinButton.setAttribute('aria-label', '固定顯示工具列');
+            pinButton.title = pinned ? '取消固定工具列（目前會隨畫面保持可見）' : '固定顯示工具列（捲動時保持可見）';
+            pinButton.innerHTML = `<i class="fas fa-thumbtack" aria-hidden="true"></i><span>固定顯示 · ${pinned ? '已固定' : '未固定'}</span>`;
+            collapseButton.setAttribute('aria-expanded', String(!collapsed));
+            collapseButton.setAttribute('aria-label', collapsed ? '展開編輯工具列' : '收合編輯工具列');
+            collapseButton.title = collapsed ? '展開編輯工具列' : '收合編輯工具列';
+            collapseButton.innerHTML = `<i class="fas ${collapsed ? 'fa-chevron-down' : 'fa-chevron-up'}" aria-hidden="true"></i><span>${collapsed ? '展開' : '收合'}</span>`;
+        }
+
+        function scheduleEditorStickyRefresh() {
+            requestAnimationFrame(() => {
+                refreshEditorStickyOffsets();
+                setTimeout(refreshEditorStickyOffsets, 0);
+            });
+        }
+
+        function setEditorToolbarPinned(pinned) {
+            const toolbar = document.getElementById('richEditorToolbar');
+            if (!toolbar) return;
+            toolbar.dataset.toolbarPinned = String(!!pinned);
+            updateEditorToolbarControls();
+            scheduleEditorStickyRefresh();
+        }
+
+        function toggleEditorToolbarPinned() {
+            const toolbar = document.getElementById('richEditorToolbar');
+            if (!toolbar) return;
+            setEditorToolbarPinned(toolbar.dataset.toolbarPinned === 'false');
+        }
+
+        function setEditorToolbarCollapsed(collapsed) {
+            const toolbar = document.getElementById('richEditorToolbar');
+            if (!toolbar) return;
+            toolbar.dataset.toolbarCollapsed = String(!!collapsed);
+            updateEditorToolbarControls();
+            scheduleEditorStickyRefresh();
+        }
+
+        function toggleEditorToolbarCollapsed() {
+            const toolbar = document.getElementById('richEditorToolbar');
+            if (!toolbar) return;
+            setEditorToolbarCollapsed(toolbar.dataset.toolbarCollapsed !== 'true');
+        }
+
         function refreshEditorStickyOffsets() {
             const tabs = document.getElementById('v1TabsBar');
             const toolbar = document.getElementById('richEditorToolbar');
             if (!toolbar) return;
             const tabsHeight = tabs ? Math.ceil(tabs.getBoundingClientRect().height) : 0;
+            const toolbarPinned = toolbar.dataset.toolbarPinned !== 'false';
             const toolbarTop = tabsHeight;
             document.documentElement.style.setProperty('--editor-toolbar-offset', toolbarTop + 'px');
             requestAnimationFrame(() => {
-                const toolbarHeight = toolbar ? Math.ceil(toolbar.getBoundingClientRect().height) : 120;
+                const toolbarHeight = toolbarPinned ? Math.ceil(toolbar.getBoundingClientRect().height) : 0;
                 const shieldHeight = toolbarTop + toolbarHeight + 8;
                 document.documentElement.style.setProperty('--editor-sticky-shield-height', shieldHeight + 'px');
                 document.documentElement.style.setProperty('--editor-scroll-margin', (shieldHeight + 24) + 'px');
@@ -3807,6 +3967,7 @@
             tabs.id = 'v1TabsBar';
             tabs.className = 'v1-tabs-bar no-print';
             tabs.innerHTML = `
+                <span class="v1-brand-mark" aria-label="台塑海運識別標誌"><img id="v1BrandLogo" class="v1-brand-logo" src="./assets/fpmc-logo.png" alt="台塑海運 FPMC Logo" width="241" height="197"></span>
                 <button class="v1-tab-btn" data-v1-tab="trends" onclick="switchV1Tab('trends')"><i class="fas fa-chart-line mr-1"></i>KPI和趨勢</button>
                 <button class="v1-tab-btn active" data-v1-tab="editor" onclick="switchV1Tab('editor')"><i class="fas fa-edit mr-1"></i>月報編輯</button>
                 <button class="v1-tab-btn" data-v1-tab="modules" onclick="switchV1Tab('modules')"><i class="fas fa-th-large mr-1"></i>模塊庫 / 勾選</button>
@@ -3828,6 +3989,7 @@
             editor.appendChild(stickyShield);
             editor.appendChild(toolbar);
             editor.appendChild(reportContainer);
+            updateEditorToolbarControls();
 
             const modules = document.createElement('div');
             modules.id = 'v1-pane-modules';
@@ -3870,6 +4032,14 @@
             renderV1RecordsPane();
             renderV3TrendPane();
             renderV4CloudPane();
+            const brandLogo = document.getElementById('v1BrandLogo');
+            if (brandLogo && !brandLogo.complete) brandLogo.addEventListener('load', refreshEditorStickyOffsets, { once: true });
+            if (typeof ResizeObserver === 'function') {
+                const observer = new ResizeObserver(() => refreshEditorStickyOffsets());
+                observer.observe(tabs);
+                observer.observe(toolbar);
+                window.__monthlyToolbarResizeObserver = observer;
+            }
             setTimeout(refreshEditorStickyOffsets, 50);
         }
 

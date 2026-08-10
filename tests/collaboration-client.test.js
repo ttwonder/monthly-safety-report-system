@@ -387,6 +387,9 @@ test('user 管理、正式 snapshot 與 site password rotation 走 server RPC �
   await client.deleteUser(created.id);
   const formal = await client.createReportSnapshot('pdf');
   assert.equal(formal.snapshotId, 's1');
+  const snapshotCall = transport.calls.find((call) => call.name === 'monthly_v7_create_report_snapshot');
+  assert.equal(snapshotCall.params.p_snapshot_kind, 'pdf');
+  assert.equal('p_kind' in snapshotCall.params, false);
   await client.updateSitePassword('new-gate-pass');
   assert.equal(client.isSiteUnlocked(), false);
   assert.equal(client.currentUser(), null);
