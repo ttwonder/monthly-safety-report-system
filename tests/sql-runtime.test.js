@@ -98,6 +98,26 @@ test('V7 additive migration 將 V6 cloud bundle 拆成逐項 authority 並保留
   }
 });
 
+test('V7 delete-module repair 可重跑且只保留雙 lease signature/ACL', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    const repair = await readFile(join(ROOT, 'docs', 'supabase-schema-v7-delete-module-repair.sql'), 'utf8');
+    await db.exec(repair);
+    await db.exec(repair);
+    const contracts = (await db.query(`
+      select
+        to_regprocedure('public.monthly_v7_delete_module(text,uuid,text,uuid,uuid,bigint,bigint,uuid,bigint)') is null as old_removed,
+        to_regprocedure('public.monthly_v7_delete_module(text,uuid,text,uuid,uuid,bigint,bigint,uuid,bigint,uuid,bigint)') is not null as dual_installed,
+        not has_function_privilege('anon', 'public.monthly_v7_delete_module(text,uuid,text,uuid,uuid,bigint,bigint,uuid,bigint,uuid,bigint)', 'EXECUTE') as anon_blocked,
+        has_function_privilege('authenticated', 'public.monthly_v7_delete_module(text,uuid,text,uuid,uuid,bigint,bigint,uuid,bigint,uuid,bigint)', 'EXECUTE') as authenticated_allowed
+    `)).rows[0];
+    assert.deepEqual(contracts, { old_removed: true, dual_installed: true, anon_blocked: true, authenticated_allowed: true });
+  } finally {
+    await db.close();
+  }
+});
+
 test('V7 site/user session 驗證後只回傳安全 snapshot，並升級 legacy SHA-256', async () => {
   const db = await createLegacyDatabase();
   try {
@@ -605,11 +625,28 @@ test('V7 lease renew/release、module reorder/delete 都由伺服器 transaction
       'select public.monthly_v7_claim_lease($1,$2,$3,$4,$5,$6) as result',
       ['workspace-test', b.login.user_session_id, b.clientSessionId, 'module', deleteTarget.id, 90]
     ));
+    const missingStructure = rpcResult(await db.query(
+      'select public.monthly_v7_delete_module($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) as result',
+      ['workspace-test', b.login.user_session_id, b.clientSessionId, randomUUID(), deleteTarget.id, deleteTarget.revision, reordered.reportRevision, randomUUID(), 999, deleteLease.lease_id, deleteLease.fencing_token]
+    ));
+    assert.equal(missingStructure.ok, false);
+    assert.equal(missingStructure.error, 'LEASE_LOST');
+    const deleteStructureLease = rpcResult(await db.query(
+      'select public.monthly_v7_claim_lease($1,$2,$3,$4,$5,$6) as result',
+      ['workspace-test', b.login.user_session_id, b.clientSessionId, 'report_structure', report.id, 90]
+    ));
+    const deleteOperationId = randomUUID();
+    const deleteArgs = ['workspace-test', b.login.user_session_id, b.clientSessionId, deleteOperationId, deleteTarget.id, deleteTarget.revision, reordered.reportRevision, deleteStructureLease.lease_id, deleteStructureLease.fencing_token, deleteLease.lease_id, deleteLease.fencing_token];
     const deleted = rpcResult(await db.query(
-      'select public.monthly_v7_delete_module($1,$2,$3,$4,$5,$6,$7,$8,$9) as result',
-      ['workspace-test', b.login.user_session_id, b.clientSessionId, randomUUID(), deleteTarget.id, deleteTarget.revision, reordered.reportRevision, deleteLease.lease_id, deleteLease.fencing_token]
+      'select public.monthly_v7_delete_module($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) as result',
+      deleteArgs
     ));
     assert.equal(deleted.ok, true);
+    const replayed = rpcResult(await db.query(
+      'select public.monthly_v7_delete_module($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) as result',
+      deleteArgs
+    ));
+    assert.deepEqual(replayed, deleted);
     const persisted = await db.query(`select deleted_at is not null as deleted from public.monthly_v7_report_items where id=$1`, [deleteTarget.id]);
     assert.equal(persisted.rows[0].deleted, true);
   } finally {

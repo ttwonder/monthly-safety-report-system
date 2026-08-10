@@ -511,22 +511,37 @@
       const expectedRevision = Number(item && item._v7Revision);
       if (!report || !report.id || !entityId || !Number.isFinite(expectedRevision)) throw new TypeError('module/report V7 context is required');
       this.saveDraft('module', entityId, { deleteRequested: true, previous: this.modulePayload(item) }, expectedRevision);
-      const lease = this.getLease('module', entityId) || await this.claimLease('module', entityId);
-      const result = this.commandResult(await this.executeOperation('monthly_v7_delete_module', {
-        p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
-        p_module_id: entityId,
-        p_expected_module_revision: expectedRevision,
-        p_expected_report_revision: Number(report.revision),
-        p_lease_id: lease.leaseId,
-        p_fencing_token: lease.fencingToken
-      }, `delete_module:${entityId}`), 'DELETE_MODULE_FAILED');
-      report.revision = Number(result.reportRevision ?? result.report_revision);
-      this.leases.delete(this.leaseKey('module', entityId));
-      this.clearDraft('module', entityId);
-      if (typeof this.host.onModuleDeleted === 'function') this.host.onModuleDeleted(entityId);
-      return result;
+      let structureLease;
+      let moduleLease;
+      try {
+        // Structure first gives all structure-changing commands one deterministic lock order.
+        structureLease = this.getLease('report_structure', report.id) || await this.claimLease('report_structure', report.id);
+        moduleLease = this.getLease('module', entityId) || await this.claimLease('module', entityId);
+        const result = this.commandResult(await this.executeOperation('monthly_v7_delete_module', {
+          p_workspace_key: this.config.workspaceKey,
+          p_user_session_id: this.userSession.id,
+          p_client_session_id: this.clientSessionId,
+          p_module_id: entityId,
+          p_expected_module_revision: expectedRevision,
+          p_expected_report_revision: Number(report.revision),
+          p_structure_lease_id: structureLease.leaseId,
+          p_structure_fencing_token: structureLease.fencingToken,
+          p_module_lease_id: moduleLease.leaseId,
+          p_module_fencing_token: moduleLease.fencingToken
+        }, `delete_module:${entityId}`), 'DELETE_MODULE_FAILED');
+        report.revision = Number(result.reportRevision ?? result.report_revision);
+        this.leases.delete(this.leaseKey('report_structure', report.id));
+        this.leases.delete(this.leaseKey('module', entityId));
+        this.clearDraft('module', entityId);
+        if (typeof this.host.onModuleDeleted === 'function') this.host.onModuleDeleted(entityId);
+        return result;
+      } catch (error) {
+        await Promise.allSettled([
+          this.releaseLease('module', entityId),
+          this.releaseLease('report_structure', report.id)
+        ]);
+        throw error;
+      }
     }
 
     commandResult(result, fallbackCode) {

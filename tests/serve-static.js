@@ -23,7 +23,7 @@ function freshState() {
     ],
     passwords: { owner: 'owner-pass', operator: 'operator-pass' },
     sitePassword: 'gate-pass',
-    siteSessions: new Map(), userSessions: new Map(), leases: new Map(), operations: new Map(),
+    siteSessions: new Map(), userSessions: new Map(), leases: new Map(), operations: new Map(), deletedModules: [],
     sequence: 0, events: []
   };
 }
@@ -48,6 +48,7 @@ function resultState() {
     report: state.report,
     modules: state.modules,
     records: state.records,
+    deletedModules: state.deletedModules,
     sequence: state.sequence,
     leases: Array.from(state.leases.entries()).map(([key, value]) => ({ key, ...value }))
   };
@@ -110,6 +111,35 @@ function rpc(name, p) {
     lease.expiresAt = now() - 1;
     event('module', module.id, module.revision, p.p_operation_id);
     const result = { ok: true, entityId: module.id, revision: module.revision, watermark: state.sequence };
+    state.operations.set(p.p_operation_id, result);
+    return clone(result);
+  }
+  if (name === 'monthly_v7_delete_module') {
+    if (state.operations.has(p.p_operation_id)) return clone(state.operations.get(p.p_operation_id));
+    const user = userForSession(p.p_user_session_id);
+    if (!user) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const moduleIndex = state.modules.findIndex((entry) => entry.id === p.p_module_id);
+    const module = state.modules[moduleIndex];
+    const moduleLease = state.leases.get(`module:${p.p_module_id}`);
+    const structureLease = state.leases.get(`report_structure:${state.report.id}`);
+    const ownsLease = (lease) => lease && lease.expiresAt > now()
+      && lease.clientSessionId === p.p_client_session_id
+      && lease.holderUserId === user.id;
+    if (!ownsLease(moduleLease) || moduleLease.leaseId !== p.p_module_lease_id || moduleLease.fencingToken !== Number(p.p_module_fencing_token)
+      || !ownsLease(structureLease) || structureLease.leaseId !== p.p_structure_lease_id || structureLease.fencingToken !== Number(p.p_structure_fencing_token)) {
+      return { ok: false, error: 'LEASE_LOST' };
+    }
+    if (!module || module.revision !== Number(p.p_expected_module_revision)) return { ok: false, error: 'REVISION_CONFLICT', currentRevision: module && module.revision };
+    if (state.report.revision !== Number(p.p_expected_report_revision)) return { ok: false, error: 'REPORT_REVISION_CONFLICT', currentRevision: state.report.revision };
+    if (state.modules.length <= 1) return { ok: false, error: 'LAST_MODULE_REQUIRED' };
+    state.modules.splice(moduleIndex, 1);
+    state.deletedModules.push(module.id);
+    state.report.revision += 1;
+    moduleLease.expiresAt = now() - 1;
+    structureLease.expiresAt = now() - 1;
+    event('module', module.id, module.revision + 1, p.p_operation_id);
+    event('report_structure', state.report.id, state.report.revision, p.p_operation_id);
+    const result = { ok: true, entityId: module.id, revision: module.revision + 1, reportRevision: state.report.revision, deleted: true, watermark: state.sequence };
     state.operations.set(p.p_operation_id, result);
     return clone(result);
   }

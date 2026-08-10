@@ -375,7 +375,7 @@
       if (!badge) {
         badge = root.document.createElement('span');
         badge.className = 'v7-item-lock-badge no-print';
-        row.querySelector('td')?.appendChild(badge);
+        (row.querySelector('.module-actions-cell') || row.lastElementChild || row.querySelector('td'))?.appendChild(badge);
       }
       badge.textContent = '你正在編輯';
       badge.className = 'v7-item-lock-badge no-print text-[10px] text-emerald-700 font-bold';
@@ -395,7 +395,7 @@
         if (!badge) {
           badge = root.document.createElement('span');
           badge.className = 'v7-item-lock-badge no-print text-[10px] font-bold';
-          row.querySelector('td')?.appendChild(badge);
+          (row.querySelector('.module-actions-cell') || row.lastElementChild || row.querySelector('td'))?.appendChild(badge);
         }
         badge.textContent = owned ? '你正在編輯' : '點一下取得編輯權';
         badge.className = `v7-item-lock-badge no-print text-[10px] font-bold ${owned ? 'text-emerald-700' : 'text-slate-400'}`;
@@ -462,11 +462,15 @@
       };
       root.document.addEventListener('pointerdown', (event) => {
         const row = rowFor(event.target);
+        const independentAction = event.target && event.target.closest
+          ? event.target.closest('[data-v7-independent-action="1"]')
+          : null;
         root.document.querySelectorAll('#tableBody tr[data-v7-entity-id]').forEach((candidate) => {
           const id = candidate.dataset.v7EntityId;
           if (candidate === row) this.cancelModuleRelease(id);
           else if (this.client.getLease('module', id)) this.scheduleUnchangedModuleRelease(candidate);
         });
+        if (independentAction) return;
         if (row && !this.client.getLease('module', row.dataset.v7EntityId)) request(row, event.target);
       }, true);
       root.document.addEventListener('focusout', (event) => {
@@ -486,6 +490,7 @@
       root.document.addEventListener('click', (event) => {
         const row = rowFor(event.target);
         if (!row || !this.currentUser() || this.client.getLease('module', row.dataset.v7EntityId)) return;
+        if (event.target.closest('[data-v7-independent-action="1"]')) return;
         if (event.target.closest('button,select,input,label,[contenteditable]')) {
           event.preventDefault();
           event.stopPropagation();

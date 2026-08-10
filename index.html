@@ -1271,6 +1271,317 @@
             cursor: pointer;
         }
 
+
+
+        /* === V7.0.3 月報卡片版面：只改呈現，不改 module payload === */
+        #reportTable {
+            display: block;
+            width: 100%;
+            table-layout: auto;
+            border-collapse: separate;
+        }
+        #reportTable > thead { display: none; }
+        #tableBody {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            width: 100%;
+        }
+        #tableBody .module-card-row {
+            display: grid;
+            grid-template-columns: minmax(132px, .18fr) minmax(300px, 1fr) minmax(360px, .58fr);
+            width: 100%;
+            border: 1px solid #a5b4fc;
+            border-radius: 10px;
+            background: rgba(255,255,255,.9);
+            overflow: visible;
+            box-sizing: border-box;
+            break-inside: avoid;
+            page-break-inside: avoid;
+        }
+        #tableBody .module-card-row > td {
+            display: flex;
+            align-items: center;
+            min-width: 0;
+            border: 0;
+            padding: 9px 12px;
+            box-sizing: border-box;
+            font-size: 15px;
+        }
+        .module-index-cell { grid-column:1; grid-row:1; }
+        .module-title-cell { grid-column:2; grid-row:1; }
+        .module-actions-cell { grid-column:3; grid-row:1; }
+        .module-index-cell,
+        .module-title-cell,
+        .module-actions-cell { min-height: 52px; }
+        .module-index-cell,
+        .module-title-cell { border-right: 1px solid #c7d2fe !important; }
+        .module-field-label {
+            flex: 0 0 auto;
+            color: #475569;
+            font-size: 15px;
+            font-weight: 800;
+            white-space: nowrap;
+            margin-right: 6px;
+        }
+        .module-index-control { display: inline-flex; align-items: center; min-width: 0; }
+        .module-index-input {
+            width: 48px;
+            min-height: 34px;
+            border: 1px solid #c7d2fe;
+            border-radius: 6px;
+            background: #fff;
+            color: #312e81;
+            text-align: center;
+            font-size: 16px;
+            font-weight: 900;
+            outline: none;
+        }
+        .module-index-input:focus { border-color:#6366f1; box-shadow:0 0 0 2px rgba(99,102,241,.16); }
+        .module-title-cell { align-items: flex-start !important; }
+        .module-title-editor {
+            flex: 1 1 auto;
+            min-width: 0;
+            min-height: 34px;
+            padding: 5px 7px 6px !important;
+            font-size: 16px;
+            line-height: 1.45;
+        }
+        #tableBody .module-content-cell {
+            grid-column: 1 / -1;
+            align-items: stretch;
+            flex-direction: column;
+            min-height: 118px;
+            padding: 14px 16px;
+            border-top: 1px solid #a5b4fc;
+            background: #fff;
+            overflow-x: auto;
+        }
+        .module-content-columns { width: 100%; min-width: 0; }
+        .module-content-cell .editable-div {
+            min-height: 88px;
+            padding: 4px 6px 10px;
+            font-size: 15px;
+            line-height: 1.55;
+        }
+        .module-content-cell img,
+        .module-content-cell .content-block,
+        .module-content-cell .custom-data-table,
+        .module-content-cell .kpi-card-container,
+        .module-content-cell .progress-card-container,
+        .module-content-cell .zone-card-container,
+        .module-content-cell .trend-chart-container { max-width: 100%; box-sizing: border-box; }
+        .module-actions-cell { align-items: center !important; }
+        .module-action-controls {
+            display: flex;
+            flex: 1 1 auto;
+            min-width: 0;
+            align-items: center;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .module-layout-select,
+        .module-action-btn {
+            min-height: 34px;
+            border: 1px solid #cbd5e1;
+            border-radius: 7px;
+            background: #fff;
+            color: #475569;
+            padding: 5px 8px;
+            font-size: 14px;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+        .module-action-btn { display:inline-flex; align-items:center; gap:5px; cursor:pointer; white-space:nowrap; }
+        .module-action-btn:hover { border-color:#818cf8; background:#eef2ff; color:#3730a3; }
+        .module-action-btn:disabled { opacity:.35; cursor:not-allowed; }
+        .module-attach-btn { margin:0; }
+        .module-delete-btn { border-color:#fecaca; color:#b91c1c; background:#fff7f7; }
+        .module-delete-btn:hover { border-color:#f87171; background:#fef2f2; color:#991b1b; }
+        .module-delete-locked { display:inline-flex; align-items:center; gap:5px; color:#94a3b8; font-size:13px; white-space:nowrap; }
+        .module-actions-cell .v7-item-lock-badge { flex-basis:100%; margin:2px 0 0 auto; text-align:right; }
+        @media screen and (max-width: 1100px) {
+            #tableBody .module-card-row { grid-template-columns: minmax(130px, .24fr) minmax(0, 1fr); }
+            .module-actions-cell { grid-column: 1 / -1; grid-row:2; border-top:1px solid #c7d2fe !important; }
+            #tableBody .module-content-cell { grid-row:3; }
+            .module-title-cell { border-right:0 !important; }
+            .module-action-controls { justify-content:flex-start; }
+        }
+        @media screen and (max-width: 700px) {
+            #tableBody .module-card-row { grid-template-columns: 1fr; }
+            #tableBody .module-card-row > td { grid-column:1; border-right:0 !important; }
+            .module-index-cell { grid-row:1; }
+            .module-title-cell { grid-row:2; }
+            .module-actions-cell { grid-row:3; }
+            #tableBody .module-content-cell { grid-row:4; }
+            .module-index-cell,
+            .module-title-cell,
+            .module-actions-cell { border-top:1px solid #c7d2fe !important; }
+            .module-index-cell { border-top:0 !important; }
+            .module-title-cell { flex-wrap:wrap; }
+            .module-title-editor { flex-basis:100%; }
+        }
+        @media print {
+            #reportTable { display:block !important; }
+            #reportTable > thead { display:none !important; }
+            #tableBody { display:block !important; }
+            #tableBody .module-card-row {
+                display:grid !important;
+                grid-template-columns: 105px minmax(0,1fr) !important;
+                margin-bottom:8px !important;
+                border:1px solid #000 !important;
+                border-radius:0 !important;
+                overflow:hidden !important;
+            }
+            #tableBody .module-card-row > td { display:flex !important; border:0 !important; padding:5px 7px !important; font-size:13px !important; }
+            #tableBody .module-card-row > .module-actions-cell { display:none !important; }
+            #tableBody .module-index-cell { border-right:1px solid #000 !important; }
+            #tableBody .module-content-cell { grid-column:1 / -1 !important; border-top:1px solid #000 !important; min-height:72px !important; }
+            #tableBody .module-title-editor,
+            #tableBody .module-content-cell .editable-div { font-size:13px !important; min-height:0 !important; }
+        }
+
+        /* === V7.0.3 100% 可讀性與工具列換行 === */
+        html, body { max-width:100%; overflow-x:hidden; }
+        body { font-size:15px; }
+        #v1-editor-workspace,
+        #reportContainer,
+        #richEditorToolbar { width:100%; min-width:0; max-width:100%; box-sizing:border-box; }
+        .v1-tabs-bar { min-width:0; overflow:visible; gap:8px; }
+        .v1-tab-btn { min-height:38px; padding:8px 14px; font-size:15px; line-height:1.25; }
+        .v1-mode-indicator { flex:1 1 280px; min-width:0; margin-left:auto; font-size:14px; line-height:1.35; text-align:right; overflow-wrap:anywhere; }
+        #richEditorToolbar {
+            max-height:min(52vh, 480px);
+            overflow-x:hidden !important;
+            overflow-y:auto !important;
+            scrollbar-gutter:stable;
+        }
+        .editor-toolbar-stack { width:100%; min-width:0 !important; }
+        .editor-toolbar-row {
+            display:flex;
+            flex-wrap:wrap;
+            justify-content:flex-start;
+            align-items:center;
+            width:100%;
+            min-width:0;
+            gap:8px;
+        }
+        .toolbar-group {
+            display:flex;
+            flex-wrap:wrap;
+            align-items:center;
+            min-width:0;
+            max-width:100%;
+            gap:6px;
+            box-sizing:border-box;
+        }
+        .toolbar-basic-group { flex:1 1 720px; }
+        .toolbar-global-group { flex:0 1 auto; }
+        .toolbar-advanced-group { flex:1 1 100%; }
+        .toolbar-block-group { flex:0 1 auto; }
+        .toolbar-status-group {
+            flex:1 1 520px;
+            min-width:0 !important;
+            max-width:100%;
+            font-size:13px !important;
+            line-height:1.45 !important;
+            text-align:left !important;
+            overflow-wrap:anywhere;
+            box-sizing:border-box;
+        }
+        #richEditorToolbar .toolbar-btn {
+            min-width:0;
+            max-width:220px;
+            height:34px;
+            min-height:34px;
+            padding:6px 8px;
+            font-size:14px;
+            line-height:1.2;
+            box-sizing:border-box;
+        }
+        #richEditorToolbar select.toolbar-btn { padding:3px 7px; }
+        #richEditorToolbar .toolbar-group > span { font-size:13px; line-height:1.3; }
+        #richEditorToolbar .toolbar-basic-group .inline-flex { flex-wrap:wrap; }
+        #v5TopStatus .v5-session-bar { max-width:100%; margin:0; font-size:13px; line-height:1.45; box-sizing:border-box; }
+        #v5TopStatus .v5-sync-btn { min-height:32px; padding:5px 10px; font-size:13px; }
+        #reportContainer { font-size:15px; }
+        .module-content-cell .editable-div { font-size:16px; line-height:1.6; }
+        @media screen and (max-width:1200px) {
+            .toolbar-basic-group,
+            .toolbar-global-group,
+            .toolbar-advanced-group,
+            .toolbar-block-group,
+            .toolbar-status-group { flex:1 1 100%; }
+            .toolbar-global-group { justify-content:flex-start; }
+            .v1-mode-indicator { flex-basis:100%; text-align:left; margin-left:0; }
+        }
+        @media screen and (max-width:700px) {
+            body { font-size:15px; }
+            .v1-tabs-bar { padding:7px; }
+            .v1-tab-btn { flex:1 1 auto; text-align:center; }
+            #richEditorToolbar { max-height:58vh; }
+            #richEditorToolbar .toolbar-btn { max-width:100%; }
+        }
+
+        /* === V7.0.3 緊湊 module meta row === */
+        @media screen and (min-width:1101px) {
+            #tableBody .module-card-row {
+                grid-template-columns:132px minmax(260px, 1fr) 500px;
+            }
+            .module-index-cell,
+            .module-title-cell,
+            .module-actions-cell {
+                min-height:78px;
+                padding:8px 12px;
+                align-self:stretch;
+                box-sizing:border-box;
+            }
+            .module-index-cell,
+            .module-title-cell {
+                flex-direction:row;
+                align-items:center !important;
+                gap:8px;
+            }
+            .module-title-editor { flex:1 1 auto; min-width:0; }
+            .module-actions-cell {
+                position:relative;
+                justify-content:center;
+                gap:0;
+                padding-bottom:23px;
+            }
+            .module-actions-heading {
+                width:100%;
+                flex-wrap:nowrap;
+                align-items:center;
+                gap:6px;
+            }
+            .module-action-controls {
+                flex:1 1 auto;
+                flex-wrap:nowrap;
+                gap:4px;
+                min-width:0;
+            }
+            .module-layout-select {
+                flex:0 0 104px;
+                min-width:104px;
+                width:104px;
+            }
+            .module-action-btn {
+                flex:0 0 auto;
+                padding:5px 7px;
+                white-space:nowrap;
+            }
+            .module-actions-cell .v7-item-lock-badge {
+                position:absolute;
+                right:12px;
+                bottom:4px;
+                max-width:calc(100% - 24px);
+                overflow:hidden;
+                text-overflow:ellipsis;
+                white-space:nowrap;
+            }
+        }
     </style>
 </head>
 <body class="p-2 sm:p-4 relative site-access-locked">
@@ -1299,12 +1610,12 @@
 
     <!-- 頂部控制與富文本工具列 -->
     <div id="richEditorToolbar" class="no-print sticky top-0 z-40 dreamy-bg rounded-lg shadow-sm border border-white p-2 mb-3 overflow-x-auto no-scrollbar backdrop-blur-sm bg-opacity-90">
-        <div class="flex flex-col gap-2 min-w-[1050px]">
+        <div class="editor-toolbar-stack flex flex-col gap-2 min-w-0 w-full">
             
             <!-- === 第一排 === -->
-            <div class="flex justify-between items-center w-full gap-4">
+            <div class="editor-toolbar-row editor-toolbar-primary flex items-center w-full gap-2">
                 <!-- 左上：基礎編輯 -->
-                <div class="flex items-center gap-1 bg-white/60 p-1 rounded border border-indigo-100 shrink-0">
+                <div class="toolbar-group toolbar-basic-group flex items-center gap-1 bg-white/60 p-1 rounded border border-indigo-100">
                     <span class="text-xs font-bold text-indigo-800 mx-1">基礎編輯:</span>
                     <button class="toolbar-btn" onmousedown="event.preventDefault()" onclick="execCmd('bold')" title="加粗/取消加粗"><i class="fas fa-bold"></i></button>
                     <div class="inline-flex items-center gap-1 px-1 py-0.5 rounded border border-slate-200 bg-white/70" title="快速文字顏色">
@@ -1362,7 +1673,7 @@
                 </div>
                 
                 <!-- 右上：全局操作按鈕 -->
-                <div class="flex items-center gap-1.5 shrink-0">
+                <div class="toolbar-group toolbar-global-group flex items-center gap-1.5">
                     <button onclick="manualSave()" class="toolbar-btn !border-blue-500 !bg-blue-50 !text-blue-700 hover:!bg-blue-100 font-bold shadow-sm" title="將變更寫入本地儲存"><i class="fas fa-save mr-1"></i>保存</button>
                     <input type="file" id="excelUpload" class="hidden" accept=".xlsx, .xls" onchange="importExcel(event)">
                     <button onclick="document.getElementById('excelUpload').click()" class="toolbar-btn !border-green-300 !text-green-700 hover:!bg-green-50" title="支援還原隱藏版式資料"><i class="fas fa-file-import mr-1"></i>匯入Excel</button>
@@ -1373,9 +1684,9 @@
             </div>
 
             <!-- === 第二排 === -->
-            <div class="flex justify-between items-center w-full gap-4">
+            <div class="editor-toolbar-row editor-toolbar-secondary flex items-center w-full gap-2">
                 <!-- 左下：進階排版 -->
-                <div class="flex items-center gap-1 bg-white/60 p-1 rounded border border-indigo-100 shrink-0">
+                <div class="toolbar-group toolbar-advanced-group flex items-center gap-1 bg-white/60 p-1 rounded border border-indigo-100">
                     <span class="text-xs font-bold text-indigo-800 mx-1">進階排版:</span>
                     
                     <button class="toolbar-btn !border-pink-300 !bg-pink-50 text-pink-700 hover:!bg-pink-100 font-bold" onclick="insertHighlight()" title="插入帶顏色的數值輸入框">
@@ -1418,17 +1729,20 @@
                         <i class="fas fa-chart-area mr-1"></i>趨勢圖
                     </button>
 
-                    <span class="mx-1 text-gray-300">|</span>
-                    <span class="text-xs text-gray-600 mr-1">插入區塊:</span>
+                </div>
+            </div>
+
+            <!-- === 第三排：插入區塊與雲端狀態 === -->
+            <div class="editor-toolbar-row editor-toolbar-tertiary flex items-center w-full gap-2">
+                <div class="toolbar-group toolbar-block-group flex items-center gap-1 bg-white/60 p-1 rounded border border-indigo-100">
+                    <span class="text-sm font-bold text-indigo-800 mx-1">插入區塊:</span>
                     <button class="toolbar-btn !bg-blue-50 !border-blue-300 text-blue-700" onclick="insertBlock('blue')" title="藍色: 資訊/總結"><i class="fas fa-info-circle"></i></button>
                     <button class="toolbar-btn !bg-green-50 !border-green-300 text-green-700" onclick="insertBlock('green')" title="綠色: 數據/達標"><i class="fas fa-check-circle"></i></button>
                     <button class="toolbar-btn !bg-red-50 !border-red-300 text-red-700" onclick="insertBlock('red')" title="紅色: 異常/警示"><i class="fas fa-exclamation-circle"></i></button>
                     <button class="toolbar-btn !bg-orange-50 !border-orange-300 text-orange-700" onclick="insertBlock('orange')" title="橘色: 分析/趨勢"><i class="fas fa-chart-line"></i></button>
                     <button class="toolbar-btn !bg-purple-50 !border-purple-300 text-purple-700" onclick="insertBlock('purple')" title="紫色: 行動/計畫"><i class="fas fa-tasks"></i></button>
                 </div>
-
-                <!-- 右下：雲端/權限狀態 -->
-                <div id="v5TopStatus" class="text-[11px] text-indigo-700 font-bold no-print bg-white/80 px-3 py-1.5 rounded shadow-sm border border-indigo-200 text-right leading-tight shrink-0 flex-1 min-w-[500px]">
+                <div id="v5TopStatus" class="toolbar-status-group text-indigo-700 font-bold no-print bg-white/80 px-3 py-2 rounded shadow-sm border border-indigo-200 leading-snug">
                     <i class="fas fa-cloud text-sky-500 mr-1"></i>V7 逐項雲端協作：不同項目可同時編輯；同項目需先取得編輯權。本機草稿與備份仍保留。
                 </div>
             </div>
@@ -1575,8 +1889,8 @@
 
     <script src="./vendor/supabase-2.112.2.js"></script>
     <script src="./monthly-collaboration-core.js"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.2"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.2"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.3"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.3"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont() {
@@ -2166,6 +2480,7 @@
             
             reportData.forEach((item, index) => {
                 const tr = document.createElement('tr');
+                tr.className = 'module-card-row';
                 tr.dataset.index = index;
                 if (item._v7Id) tr.dataset.v7EntityId = item._v7Id;
                 
@@ -2193,7 +2508,7 @@
                 const layoutParts = layoutStr.split(':').map(Number);
                 const colCount = layoutParts.length;
                 
-                let columnsHtml = `<div class="flex flex-col sm:flex-row gap-3 w-full h-full items-stretch">`;
+                let columnsHtml = `<div class="module-content-columns flex flex-col sm:flex-row gap-3 w-full h-full items-stretch">`;
                 for (let i = 0; i < colCount; i++) {
                     const rawColData = item.columns[i] || '';
                     const colData = rawColData.replace(/(<span[^>]*class="highlight-val"[^>]*)contenteditable="true"([^>]*>)/gi, '$1$2');
@@ -2210,51 +2525,38 @@
                 columnsHtml += `</div>`;
 
                 tr.innerHTML = `
-                    <td class="text-center font-bold text-indigo-900 bg-indigo-50/30 align-middle text-sm no-print-input">
-                        <div class="flex flex-col items-center justify-center gap-2">
-                            <div>
-                                <input type="number" min="1" max="${reportData.length}" value="${index + 1}" class="w-10 text-center bg-transparent outline-none border-b border-indigo-200 focus:border-indigo-500 font-bold hover:bg-white transition-colors" onchange="reorderRow(${index}, this.value)">
-                                <span class="print-only hidden">${index + 1}</span>
-                            </div>
-                            <div class="cursor-pointer p-1 rounded hover:bg-indigo-100 group relative no-print w-full" onclick="openIconPicker(${index})" title="版型與圖標設定">
-                                <i class="${iconClass} item-icon group-hover:scale-110 transition-transform" style="color: ${iconColor};"></i>
-                                <span class="absolute -top-7 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white text-xs px-2 py-1 rounded hidden group-hover:block whitespace-nowrap shadow z-10">圖標/版型</span>
-                            </div>
-                            <i class="${iconClass} item-icon hidden print-icon-show mt-1" style="color: ${iconColor}; display:none;" print-display="block"></i>
-                        </div>
+                    <td class="module-index-cell no-print-input">
+                        <span class="module-field-label module-index-label">項次：</span>
+                        <span class="module-index-control">
+                            <input type="number" min="1" max="${reportData.length}" value="${index + 1}" class="module-index-input" data-v7-independent-action="1" onchange="reorderRow(${index}, this.value)" aria-label="調整項次 ${index + 1}">
+                            <span class="print-only hidden">${index + 1}</span>
+                        </span>
                     </td>
-                    <td>
-                        <div class="font-bold text-indigo-800 editable-div w-full text-base" contenteditable="true" onblur="updateData(${index}, 'title', this.innerHTML)">${item.title}</div>
-                        <div class="no-print">
-                            <label class="attach-btn" title="上傳附件"><i class="fas fa-plus-circle"></i> 加入附件<input type="file" multiple class="hidden-file-input" onchange="handleFileUpload(event, ${index})"></label>
-                        </div>
+                    <td class="module-title-cell">
+                        <span class="module-field-label module-title-label">報告條目：</span>
+                        <div class="module-title-editor font-bold text-indigo-800 editable-div" contenteditable="true" onblur="updateData(${index}, 'title', this.innerHTML)">${item.title}</div>
+                    </td>
+                    <td class="module-content-cell">
+                        ${columnsHtml}
                         ${attachmentsHtml}
                     </td>
-                    <td class="col-content">
-                        ${columnsHtml}
-                    </td>
-                    <td class="text-center no-print bg-red-50/30 align-middle">
-                        <div class="flex flex-col items-center gap-2 justify-center w-full">
-                            <div class="w-full mb-1">
-                                <select onchange="updateColLayout(${index}, this.value)" class="w-[75px] text-xs border border-gray-300 rounded text-gray-700 bg-white hover:bg-gray-50 cursor-pointer outline-none px-1 py-1 shadow-sm" title="設定本區塊的分欄比例">
-                                    <option value="1" ${layoutStr == '1' ? 'selected' : ''}>1 欄</option>
-                                    <option value="1:1" ${layoutStr == '1:1' ? 'selected' : ''}>2 欄 (均分)</option>
-                                    <option value="1:2" ${layoutStr == '1:2' ? 'selected' : ''}>2 欄 (1:2)</option>
-                                    <option value="2:1" ${layoutStr == '2:1' ? 'selected' : ''}>2 欄 (2:1)</option>
-                                    <option value="1:1:1" ${layoutStr == '1:1:1' ? 'selected' : ''}>3 欄 (均分)</option>
-                                    <option value="1:2:1" ${layoutStr == '1:2:1' ? 'selected' : ''}>3 欄 (1:2:1)</option>
-                                    <option value="1:1:1:1" ${layoutStr == '1:1:1:1' ? 'selected' : ''}>4 欄 (均分)</option>
-                                </select>
-                            </div>
-                            <div class="w-10 h-px bg-red-200"></div>
-                            <button onclick="openIconPicker(${index})" class="text-indigo-500 hover:text-indigo-700 transition-colors" title="更換模板與圖標"><i class="fas fa-layer-group"></i></button>
-                            <div class="w-8 h-px bg-red-200"></div>
-                            <div class="flex gap-2">
-                                <button onclick="moveRowUp(${index})" class="text-gray-400 hover:text-indigo-600 disabled:opacity-20 transition-colors" ${index === 0 ? 'disabled' : ''}><i class="fas fa-arrow-up"></i></button>
-                                <button onclick="moveRowDown(${index})" class="text-gray-400 hover:text-indigo-600 disabled:opacity-20 transition-colors" ${index === reportData.length - 1 ? 'disabled' : ''}><i class="fas fa-arrow-down"></i></button>
-                            </div>
-                            <div class="w-8 h-px bg-red-200"></div>
-                            ${v5IsOwner() ? `<button onclick="deleteRow(${index})" class="text-red-400 hover:text-red-600 transition-colors" title="刪除"><i class="fas fa-trash-alt"></i></button>` : `<span class="text-gray-300" title="只有 owner 可以刪除項次"><i class="fas fa-lock"></i></span>`}
+                    <td class="module-actions-cell no-print">
+                        <span class="module-field-label module-actions-label">操作：</span>
+                        <div class="module-action-controls">
+                            <select onchange="updateColLayout(${index}, this.value)" class="module-layout-select" title="設定本區塊的分欄比例" aria-label="項目 ${index + 1} 分欄比例">
+                                <option value="1" ${layoutStr == '1' ? 'selected' : ''}>1 欄</option>
+                                <option value="1:1" ${layoutStr == '1:1' ? 'selected' : ''}>2 欄 (均分)</option>
+                                <option value="1:2" ${layoutStr == '1:2' ? 'selected' : ''}>2 欄 (1:2)</option>
+                                <option value="2:1" ${layoutStr == '2:1' ? 'selected' : ''}>2 欄 (2:1)</option>
+                                <option value="1:1:1" ${layoutStr == '1:1:1' ? 'selected' : ''}>3 欄 (均分)</option>
+                                <option value="1:2:1" ${layoutStr == '1:2:1' ? 'selected' : ''}>3 欄 (1:2:1)</option>
+                                <option value="1:1:1:1" ${layoutStr == '1:1:1:1' ? 'selected' : ''}>4 欄 (均分)</option>
+                            </select>
+                            <button type="button" onclick="openIconPicker(${index})" class="module-action-btn" title="更換模板與圖標" aria-label="項目 ${index + 1} 版型與圖標"><i class="${iconClass}" style="color: ${iconColor};"></i><span>版型</span></button>
+                            <label class="module-action-btn module-attach-btn" title="上傳附件"><i class="fas fa-paperclip"></i><span>附件</span><input type="file" multiple class="hidden-file-input" onchange="handleFileUpload(event, ${index})"></label>
+                            <button type="button" onclick="moveRowUp(${index})" class="module-action-btn" data-v7-independent-action="1" ${index === 0 ? 'disabled' : ''} aria-label="項目 ${index + 1} 上移"><i class="fas fa-arrow-up"></i><span>上移</span></button>
+                            <button type="button" onclick="moveRowDown(${index})" class="module-action-btn" data-v7-independent-action="1" ${index === reportData.length - 1 ? 'disabled' : ''} aria-label="項目 ${index + 1} 下移"><i class="fas fa-arrow-down"></i><span>下移</span></button>
+                            ${v5IsOwner() ? `<button type="button" onclick="deleteRow(${index})" class="module-action-btn module-delete-btn" data-v7-independent-action="1" aria-label="刪除項目 ${index + 1}" title="刪除這個項目"><i class="fas fa-trash-alt"></i><span>刪除</span></button>` : `<span class="module-delete-locked" title="只有 owner 可以刪除項次"><i class="fas fa-lock"></i><span>僅 Owner 可刪除</span></span>`}
                         </div>
                     </td>
                 `;
@@ -3512,7 +3814,7 @@
                 <button class="v1-tab-btn" data-v1-tab="history" onclick="switchV1Tab('history')"><i class="fas fa-clock-rotate-left mr-1"></i>歷史 / 備份</button>
                 <button class="v1-tab-btn" data-v1-tab="records" onclick="switchV1Tab('records')"><i class="fas fa-database mr-1"></i>資料記錄</button>
                 <button class="v1-tab-btn" data-v1-tab="cloud" onclick="switchV1Tab('cloud')"><i class="fas fa-shield-halved mr-1"></i>數據管理</button>
-                <span class="ml-auto text-xs text-indigo-700 font-bold px-2">${window.MonthlyV7App?.isActive?.() ? 'V7：逐項 lease / CAS / Realtime' : 'V6：切換前相容模式'}</span>
+                <span class="v1-mode-indicator ml-auto text-indigo-700 font-bold px-2">${window.MonthlyV7App?.isActive?.() ? 'V7：逐項 lease / CAS / Realtime' : 'V6：切換前相容模式'}</span>
             `;
 
             const editor = document.createElement('div');

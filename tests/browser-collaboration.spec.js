@@ -6,7 +6,13 @@ async function enterAndLogin(page, username, password) {
   await page.goto('/');
   await page.locator('#site-access-password').fill('gate-pass');
   await page.getByRole('button', { name: '進入系統' }).click();
-  await expect(page.locator('body')).not.toHaveClass(/site-access-locked/);
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await expect.poll(() => page.evaluate(() => Boolean(
+    window.MonthlyV7App
+    && window.MonthlyV7App.client
+    && window.MonthlyV7App.client.siteSession
+    && window.MonthlyV7App.client.siteSession.id
+  )), { message: 'V7 authoritative site session should be ready before user login' }).toBe(true);
   await page.locator('#v5-login-username').fill(username);
   await page.locator('#v5-login-password').fill(password);
   await page.getByRole('button', { name: '登入', exact: true }).click();
@@ -16,6 +22,152 @@ async function enterAndLogin(page, username, password) {
 
 test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
+});
+
+test('月報項目改為兩層卡片且不改寫既有 module payload', async ({ page, request }) => {
+  await page.setViewportSize({ width: 1240, height: 1000 });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const before = await (await request.get('/__fake_state')).json();
+  const row = page.locator('#tableBody tr').first();
+
+  await expect(row).toHaveClass(/module-card-row/);
+  await expect(row.locator('.module-index-label')).toHaveText('項次：');
+  await expect(row.locator('.module-title-label')).toHaveText('報告條目：');
+  await expect(row.locator('.module-actions-label')).toHaveText('操作：');
+  await expect(row.locator('.module-content-cell [data-col-index="0"]')).toHaveText('A 內容');
+  await expect(page.locator('#reportTable thead')).toBeHidden();
+
+  const geometry = await row.evaluate((element) => {
+    const rect = (selector) => {
+      const box = element.querySelector(selector).getBoundingClientRect();
+      return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width };
+    };
+    const rowBox = element.getBoundingClientRect();
+    return {
+      row: { left: rowBox.left, right: rowBox.right, top: rowBox.top, bottom: rowBox.bottom, width: rowBox.width },
+      index: rect('.module-index-cell'),
+      title: rect('.module-title-cell'),
+      actions: rect('.module-actions-cell'),
+      content: rect('.module-content-cell'),
+      editable: rect('.module-content-cell [data-col-index="0"]')
+    };
+  });
+  expect(geometry.content.top).toBeGreaterThanOrEqual(Math.max(geometry.index.bottom, geometry.title.bottom, geometry.actions.bottom) - 1);
+  expect(geometry.content.width).toBeGreaterThanOrEqual(geometry.row.width - 2);
+  expect(geometry.content.top - geometry.row.top).toBeLessThanOrEqual(110);
+  const labelTops = await row.locator('.module-field-label').evaluateAll((labels) => labels.map((label) => label.getBoundingClientRect().top));
+  expect(Math.max(...labelTops) - Math.min(...labelTops)).toBeLessThanOrEqual(12);
+  expect(geometry.editable.width).toBeGreaterThan(geometry.content.width * 0.9);
+  expect(geometry.title.width).toBeGreaterThan(geometry.index.width);
+
+  await page.emulateMedia({ media: 'print' });
+  const printGeometry = await row.evaluate((element) => {
+    const box = (selector) => element.querySelector(selector).getBoundingClientRect();
+    const rowBox = element.getBoundingClientRect();
+    const contentBox = box('.module-content-cell');
+    const indexBox = box('.module-index-cell');
+    const titleBox = box('.module-title-cell');
+    return {
+      rowWidth: rowBox.width,
+      contentWidth: contentBox.width,
+      contentTop: contentBox.top,
+      metaBottom: Math.max(indexBox.bottom, titleBox.bottom),
+      actionsDisplay: getComputedStyle(element.querySelector('.module-actions-cell')).display,
+      headerDisplay: getComputedStyle(document.querySelector('#reportTable thead')).display
+    };
+  });
+  expect(printGeometry.actionsDisplay).toBe('none');
+  expect(printGeometry.headerDisplay).toBe('none');
+  expect(printGeometry.contentWidth).toBeGreaterThanOrEqual(printGeometry.rowWidth - 2);
+  expect(printGeometry.contentTop).toBeGreaterThanOrEqual(printGeometry.metaBottom - 1);
+  await page.emulateMedia({ media: 'screen' });
+
+  const after = await (await request.get('/__fake_state')).json();
+  expect(after.modules.map((module) => module.payload)).toEqual(before.modules.map((module) => module.payload));
+});
+
+test('Owner 可確認刪除不需要的項目，normalized authority 保留其餘 module', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const before = await (await request.get('/__fake_state')).json();
+  const retained = structuredClone(before.modules[1]);
+  const dialogs = [];
+  let confirmDelete = false;
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    if (confirmDelete) await dialog.accept();
+    else await dialog.dismiss();
+  });
+
+  const firstRow = page.locator('#tableBody tr').first();
+  const deleteButton = firstRow.getByRole('button', { name: '刪除項目 1' });
+  await expect(deleteButton).toBeVisible();
+  await deleteButton.click();
+  await expect(page.locator('#tableBody tr')).toHaveCount(2);
+  const afterCancel = await (await request.get('/__fake_state')).json();
+  expect(afterCancel.modules).toEqual(before.modules);
+  expect(afterCancel.deletedModules).toEqual([]);
+
+  confirmDelete = true;
+  await deleteButton.click();
+
+  await expect(page.locator('#tableBody tr')).toHaveCount(1);
+  await expect(page.locator('#tableBody tr').first()).toContainText('B 原始項目');
+  expect(dialogs).toHaveLength(2);
+  expect(dialogs.every((message) => message.includes('確定要刪除'))).toBe(true);
+  const after = await (await request.get('/__fake_state')).json();
+  expect(after.modules).toHaveLength(1);
+  expect(after.modules[0].id).toBe(retained.id);
+  expect(after.modules[0].payload).toEqual(retained.payload);
+  expect(after.deletedModules).toContain(before.modules[0].id);
+});
+
+test('100% 縮放時工具列換行、文字可讀且無水平破版', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await expect(page.locator('.toolbar-advanced-group')).toBeVisible();
+  await expect(page.locator('.toolbar-block-group')).toContainText('插入區塊:');
+
+  const measure = () => page.evaluate(() => {
+    const px = (selector, property) => parseFloat(getComputedStyle(document.querySelector(selector))[property]);
+    const box = (selector) => {
+      const rect = document.querySelector(selector).getBoundingClientRect();
+      return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+    };
+    const toolbar = document.querySelector('#richEditorToolbar');
+    return {
+      viewportWidth: document.documentElement.clientWidth,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      toolbarClientWidth: toolbar.clientWidth,
+      toolbarScrollWidth: toolbar.scrollWidth,
+      toolbar: box('#richEditorToolbar'),
+      advanced: box('.toolbar-advanced-group'),
+      blocks: box('.toolbar-block-group'),
+      status: box('#v5TopStatus'),
+      toolbarButtonFont: px('#richEditorToolbar .toolbar-btn', 'fontSize'),
+      toolbarButtonHeight: box('#richEditorToolbar .toolbar-btn').height,
+      tabFont: px('.v1-tab-btn', 'fontSize'),
+      statusFont: px('#v5TopStatus', 'fontSize'),
+      contentFont: px('.module-content-cell .editable-div', 'fontSize'),
+      stackMinWidth: px('.editor-toolbar-stack', 'minWidth')
+    };
+  });
+
+  for (const width of [1440, 1024]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.waitForTimeout(100);
+    const geometry = await measure();
+    expect(geometry.documentScrollWidth).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+    expect(geometry.toolbarScrollWidth).toBeLessThanOrEqual(geometry.toolbarClientWidth + 1);
+    expect(geometry.status.right).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+    expect(geometry.blocks.top).toBeGreaterThan(geometry.advanced.top + 8);
+    expect(geometry.toolbarButtonFont).toBeGreaterThanOrEqual(14);
+    expect(geometry.toolbarButtonHeight).toBeGreaterThanOrEqual(32);
+    expect(geometry.tabFont).toBeGreaterThanOrEqual(14);
+    expect(geometry.statusFont).toBeGreaterThanOrEqual(13);
+    expect(geometry.contentFont).toBeGreaterThanOrEqual(16);
+    expect(geometry.stackMinWidth).toBe(0);
+    expect(geometry.toolbar.height).toBeLessThan(520);
+  }
 });
 
 test('兩個瀏覽器同項排他、不同 module 並行保存且不互相覆蓋', async ({ browser, request }) => {

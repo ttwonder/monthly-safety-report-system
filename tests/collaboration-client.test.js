@@ -352,7 +352,14 @@ test('report metadata、structure 與 KPI batch 使用各自短 lease 並更新 
   await client.deleteModule(created);
   assert.equal(client.currentReport().revision, 5);
   const claimTypes = transport.calls.filter((call) => call.name === 'monthly_v7_claim_lease').map((call) => call.params.p_entity_type);
-  assert.deepEqual(claimTypes, ['report_meta', 'report_structure', 'report_structure', 'kpi_batch', 'module']);
+  assert.deepEqual(claimTypes, ['report_meta', 'report_structure', 'report_structure', 'kpi_batch', 'report_structure', 'module']);
+  const deletion = transport.calls.find((call) => call.name === 'monthly_v7_delete_module');
+  assert.equal(deletion.params.p_structure_lease_id, 'lease-5');
+  assert.equal(deletion.params.p_structure_fencing_token, 5);
+  assert.equal(deletion.params.p_module_lease_id, 'lease-6');
+  assert.equal(deletion.params.p_module_fencing_token, 6);
+  assert.equal(client.getLease('report_structure', 'r1'), null);
+  assert.equal(client.getLease('module', 'm2'), null);
 });
 
 test('user 管理、正式 snapshot 與 site password rotation 走 server RPC 並撤銷本頁 sessions', async () => {
