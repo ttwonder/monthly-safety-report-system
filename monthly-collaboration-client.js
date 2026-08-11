@@ -329,6 +329,29 @@
       return payload;
     }
 
+    migratePendingOperationSignature(rpcName, params, pendingKey, pending, signature) {
+      if (!pending || pending.signature === signature) return pending;
+      if (rpcName !== 'monthly_v7_create_report_snapshot' || typeof pending !== 'object' || Array.isArray(pending)) return pending;
+      const hasExactKeys = (value, expected) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        const actual = Object.keys(value).sort();
+        const wanted = expected.slice().sort();
+        return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+      };
+      if (!hasExactKeys(pending, ['operationId', 'signature', 'createdAt'])
+        || typeof pending.operationId !== 'string' || !pending.operationId
+        || typeof pending.signature !== 'string' || typeof pending.createdAt !== 'string') return pending;
+      let previousParams;
+      try { previousParams = JSON.parse(pending.signature); } catch { return pending; }
+      const identityKeys = ['p_workspace_key', 'p_site_session_id', 'p_user_session_id', 'p_report_id'];
+      if (!hasExactKeys(params, [...identityKeys, 'p_snapshot_kind'])
+        || !hasExactKeys(previousParams, [...identityKeys, 'p_kind'])
+        || pendingKey !== `create_snapshot:${params.p_report_id}:${params.p_snapshot_kind}`
+        || identityKeys.some((key) => previousParams[key] !== params[key])
+        || previousParams.p_kind !== params.p_snapshot_kind) return pending;
+      return Object.assign({}, pending, { signature });
+    }
+
     async executeOperation(rpcName, params, pendingKey) {
       const storageKey = `monthly_v7_pending:${pendingKey}`;
       const signature = JSON.stringify(params);
@@ -336,6 +359,7 @@
       if (this.draftStorage) {
         try { pending = JSON.parse(this.draftStorage.getItem(storageKey) || 'null'); } catch { pending = null; }
       }
+      pending = this.migratePendingOperationSignature(rpcName, params, pendingKey, pending, signature);
       if (pending && pending.signature !== signature) {
         const error = new Error('PENDING_OPERATION_UNRESOLVED');
         error.code = 'PENDING_OPERATION_UNRESOLVED';

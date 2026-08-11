@@ -395,6 +395,112 @@ test('user 管理、正式 snapshot 與 site password rotation 走 server RPC �
   assert.equal(client.currentUser(), null);
 });
 
+test('舊 p_kind transport 失敗留下的 snapshot pending envelope 在 reload 後沿用 operation ID 並改送 p_snapshot_kind', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const snapshotOperationId = '00000000-0000-4000-8000-000000000888';
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_create_report_snapshot: (params) => {
+      if (Object.prototype.hasOwnProperty.call(params, 'p_kind')) {
+        const error = new Error('Could not find the function monthly_v7_create_report_snapshot(p_kind)');
+        error.code = 'PGRST202';
+        throw error;
+      }
+      return { ok: true, snapshotId: 's-migrated', contentSha256: 'abc', snapshot: { report: { title: '月報' } } };
+    }
+  });
+  const first = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, idFactory: () => 'tab',
+    operationIdFactory: () => snapshotOperationId
+  });
+  await first.initialize({ workspaceKey: 'workspace-test' });
+  await first.openSite('gate');
+  await first.login('owner', 'pass');
+  const oldParams = {
+    p_workspace_key: 'workspace-test',
+    p_site_session_id: 'site-1',
+    p_user_session_id: 'user-1',
+    p_report_id: 'r1',
+    p_kind: 'pdf'
+  };
+  await assert.rejects(
+    () => first.executeOperation('monthly_v7_create_report_snapshot', oldParams, 'create_snapshot:r1:pdf'),
+    (error) => error.code === 'PGRST202'
+  );
+  const pendingKey = 'monthly_v7_pending:create_snapshot:r1:pdf';
+  const oldPending = JSON.parse(drafts.getItem(pendingKey));
+  assert.equal(oldPending.operationId, snapshotOperationId);
+  assert.equal(JSON.parse(oldPending.signature).p_kind, 'pdf');
+
+  const reloaded = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts,
+    idFactory: () => 'unused-tab', operationIdFactory: () => 'must-not-create-new-operation-id'
+  });
+  await reloaded.initialize({ workspaceKey: 'workspace-test' });
+  await reloaded.loadSnapshot();
+  const result = await reloaded.createReportSnapshot('pdf');
+
+  assert.equal(result.snapshotId, 's-migrated');
+  const snapshotCalls = transport.calls.filter((call) => call.name === 'monthly_v7_create_report_snapshot');
+  assert.equal(snapshotCalls.length, 3);
+  assert.equal(snapshotCalls.filter((call) => 'p_kind' in call.params).length, 2);
+  const corrected = snapshotCalls.at(-1).params;
+  assert.equal(corrected.p_snapshot_kind, 'pdf');
+  assert.equal('p_kind' in corrected, false);
+  assert.equal(corrected.p_operation_id, snapshotOperationId);
+  assert.equal(drafts.getItem(pendingKey), null);
+});
+
+test('非精確舊 snapshot pending envelope 仍 fail closed 且不 dispatch', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_create_report_snapshot: { ok: true, snapshotId: 'must-not-dispatch' }
+  });
+  const client = new MonthlyV7Client({ transport, sessionStorage: sessions, draftStorage: drafts, idFactory: () => 'tab' });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  const pendingKey = 'monthly_v7_pending:create_snapshot:r1:pdf';
+  const baseSignature = {
+    p_workspace_key: 'workspace-test', p_site_session_id: 'site-1',
+    p_user_session_id: 'user-1', p_report_id: 'r1', p_kind: 'pdf'
+  };
+  const residues = [
+    {
+      operationId: '00000000-0000-4000-8000-000000000991',
+      signature: JSON.stringify({ ...baseSignature, p_user_session_id: 'different-user' }),
+      createdAt: '2026-08-11T00:00:00.000Z'
+    },
+    {
+      operationId: '00000000-0000-4000-8000-000000000992',
+      signature: JSON.stringify({ ...baseSignature, unexpected: true }),
+      createdAt: '2026-08-11T00:00:00.000Z'
+    },
+    {
+      operationId: '00000000-0000-4000-8000-000000000993',
+      signature: JSON.stringify(baseSignature),
+      createdAt: '2026-08-11T00:00:00.000Z',
+      unexpected: true
+    }
+  ];
+  for (const pending of residues) {
+    const residue = JSON.stringify(pending);
+    drafts.setItem(pendingKey, residue);
+    await assert.rejects(() => client.createReportSnapshot('pdf'), (error) => error.code === 'PENDING_OPERATION_UNRESOLVED');
+    assert.equal(transport.calls.filter((call) => call.name === 'monthly_v7_create_report_snapshot').length, 0);
+    assert.equal(drafts.getItem(pendingKey), residue);
+  }
+});
+
 test('V7 JSON 匯入掛回 legacy identity 並排除 users/site secrets', () => {
   const app = new MonthlyV7BrowserApp({ transport: fakeTransport({}) });
   app.client = {

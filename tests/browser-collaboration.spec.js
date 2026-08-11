@@ -504,3 +504,40 @@ test('V7 PDF 列印區直接使用 immutable snapshot，而非 live editor', asy
   await expect.poll(() => page.evaluate(() => window.__v7PrintCalled)).toBe(true);
   expect(errors).toEqual([]);
 });
+
+test('舊 p_kind 的 PostgREST 失敗 pending 在 reload 後改送正確 snapshot RPC', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const failed = await page.evaluate(async () => {
+    const client = window.MonthlyV7App.client;
+    const report = client.currentReport();
+    const pendingKey = `create_snapshot:${report.id}:pdf`;
+    const storageKey = `monthly_v7_pending:${pendingKey}`;
+    try {
+      await client.executeOperation('monthly_v7_create_report_snapshot', {
+        p_workspace_key: client.config.workspaceKey,
+        p_site_session_id: client.siteSession.id,
+        p_user_session_id: client.userSession.id,
+        p_report_id: report.id,
+        p_kind: 'pdf'
+      }, pendingKey);
+      return { rejected: false, pending: localStorage.getItem(storageKey), storageKey };
+    } catch (error) {
+      return { rejected: true, code: error.code, pending: localStorage.getItem(storageKey), storageKey };
+    }
+  });
+  expect(failed.rejected).toBe(true);
+  expect(failed.code).toBe('PGRST202');
+  expect(JSON.parse(JSON.parse(failed.pending).signature).p_kind).toBe('pdf');
+
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => Boolean(
+    window.MonthlyV7App?.client?.userSession?.id
+    && window.MonthlyV7App.client.currentReport()?.id
+  ))).toBe(true);
+  const recovered = await page.evaluate(async (storageKey) => {
+    const result = await window.MonthlyV7App.client.createReportSnapshot('pdf');
+    return { snapshotId: result.snapshotId, pending: localStorage.getItem(storageKey) };
+  }, failed.storageKey);
+  expect(recovered.snapshotId).toBeTruthy();
+  expect(recovered.pending).toBeNull();
+});

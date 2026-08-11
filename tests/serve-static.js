@@ -163,7 +163,11 @@ function rpc(name, p) {
   }
   if (name === 'monthly_v7_create_report_snapshot') {
     if (!Object.prototype.hasOwnProperty.call(p, 'p_snapshot_kind') || Object.prototype.hasOwnProperty.call(p, 'p_kind')) {
-      return { ok: false, error: 'POSTGREST_SIGNATURE_MISMATCH' };
+      const error = new Error('Could not find the function public.monthly_v7_create_report_snapshot with the supplied named arguments');
+      error.code = 'PGRST202';
+      error.details = 'Searched for monthly_v7_create_report_snapshot with p_kind instead of p_snapshot_kind';
+      error.statusCode = 404;
+      throw error;
     }
     const snapshot = { report: clone(state.report), modules: clone(state.modules), records: clone(state.records) };
     snapshot.report.title = '正式快照標題';
@@ -192,7 +196,10 @@ const server = http.createServer((req, res) => {
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
       try { const request = JSON.parse(body || '{}'); const data = rpc(request.name, request.params || {}); res.writeHead(200, { 'Content-Type': mime['.json'] }); res.end(JSON.stringify(data)); }
-      catch (error) { res.writeHead(500, { 'Content-Type': mime['.json'] }); res.end(JSON.stringify({ message: error.message })); }
+      catch (error) {
+        res.writeHead(Number(error.statusCode) || 500, { 'Content-Type': mime['.json'] });
+        res.end(JSON.stringify({ message: error.message, code: error.code || 'FAKE_RPC_ERROR', details: error.details || '' }));
+      }
     });
     return;
   }
