@@ -60,6 +60,27 @@ async function settleLayout(page) {
   }));
 }
 
+async function syncLatestExpectingSessionInvalid(page) {
+  await page.evaluate(() => {
+    window.__monthlySyncInvalidState = { status: 'pending', error: '' };
+    window.__monthlySyncInvalidPromise = window.MonthlyV7App.syncLatest()
+      .then(() => {
+        window.__monthlySyncInvalidState = { status: 'resolved', error: '' };
+      })
+      .catch((error) => {
+        window.__monthlySyncInvalidState = {
+          status: 'rejected',
+          error: String(error?.code || error?.message || error || '')
+        };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__monthlySyncInvalidState?.status || 'missing'), { timeout: 15000 })
+    .toMatch(/^(resolved|rejected)$/);
+  const state = await page.evaluate(() => window.__monthlySyncInvalidState);
+  expect(state.status).toBe('rejected');
+  expect(state.error).toMatch(/(?:READ|USER)_SESSION_INVALID/);
+}
+
 async function installPdfColorFixture(page) {
   await page.evaluate(() => {
     const rows = [
@@ -168,6 +189,165 @@ async function installTypographyFixture(page) {
 
 test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
+});
+
+test('登出帳號保留 site session 並立即移除 Owner 身份，不退回進站 gate', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+
+  await page.getByRole('button', { name: '登出', exact: true }).click();
+
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await expect(page.locator('#v5-login-username')).toBeVisible();
+  await expect(page.locator('#v5TopStatus')).toContainText('帳號已登出；網站仍已解鎖。');
+  await expect(page.locator('#v5TopStatus')).not.toContainText('伺服器撤銷未確認');
+  await expect(page.locator('#v5TopStatus')).not.toContainText('Owner A');
+  const state = await page.evaluate(() => ({
+    siteSessionId: window.MonthlyV7App?.client?.siteSession?.id || '',
+    userSession: window.MonthlyV7App?.client?.userSession || null,
+    currentUser: window.MonthlyV7App?.currentUser?.() || null,
+    storedSiteSession: sessionStorage.getItem('monthly_v7_site_session'),
+    storedUserSession: sessionStorage.getItem('monthly_v7_user_session'),
+    storedUserProjection: sessionStorage.getItem('monthly_v7_user_projection')
+  }));
+  expect(state.siteSessionId).not.toBe('');
+  expect(state.userSession).toBeNull();
+  expect(state.currentUser).toBeNull();
+  expect(state.storedSiteSession).not.toBeNull();
+  expect(state.storedUserSession).toBeNull();
+  expect(state.storedUserProjection).toBeNull();
+});
+
+test('READ_SESSION_INVALID 立即收斂為未登入、保留 site 與本機草稿', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const draftKey = await page.evaluate(() => {
+    const client = window.MonthlyV7App.client;
+    const module = client.snapshot.modules[0];
+    reportData[0].title = '失效前本機草稿';
+    const title = document.querySelector('#tableBody .module-title-editor');
+    if (title) title.textContent = reportData[0].title;
+    client.saveDraft('module', module.id, { ...module.payload, title: reportData[0].title }, module.revision);
+    return module.id;
+  });
+  await request.post('/__fake_invalidate_user_sessions');
+
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App.currentUser()), { timeout: 15000 }).toBeNull();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await expect(page.locator('#v5-login-username')).toBeVisible();
+  await expect(page.locator('#v5TopStatus')).not.toContainText('Owner A');
+  await expect(page.locator('#v5TopStatus')).toContainText('登入已失效；本機草稿已保留，請重新登入');
+  const state = await page.evaluate((moduleId) => ({
+    siteSessionId: window.MonthlyV7App.client.siteSession?.id || '',
+    draftTitle: window.MonthlyV7App.client.readDraft('module', moduleId)?.payload?.title || '',
+    invalidMessageCount: (document.getElementById('v5TopStatus')?.innerText.match(/登入已失效/g) || []).length
+  }), draftKey);
+  expect(state.siteSessionId).not.toBe('');
+  expect(state.draftTitle).toBe('失效前本機草稿');
+  expect(state.invalidMessageCount).toBe(1);
+});
+
+test('session invalid 不重建編輯 DOM，保留尚未完成防抖的焦點內容與草稿', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const editor = page.locator('#tableBody .module-title-editor').first();
+  await editor.evaluate((node) => {
+    node.focus();
+    node.textContent = '失效瞬間尚未完成防抖的標題';
+    node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '題' }));
+  });
+
+  await request.post('/__fake_invalidate_user_sessions');
+  await syncLatestExpectingSessionInvalid(page);
+
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App.currentUser())).toBeNull();
+  await expect(page.locator('#tableBody .module-title-editor').first()).toHaveText('失效瞬間尚未完成防抖的標題');
+  await expect.poll(() => page.evaluate(() => {
+    const id = window.MonthlyV7App.client.snapshot.modules[0].id;
+    return window.MonthlyV7App.client.readDraft('module', id)?.payload?.title || '';
+  }), { timeout: 5000 }).toBe('失效瞬間尚未完成防抖的標題');
+});
+
+test('session invalid 合併可見新內容時保留 module 與 report meta 的 superseding marker/base revision', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const expected = await page.evaluate(() => {
+    const client = window.MonthlyV7App.client;
+    const module = client.snapshot.modules[0];
+    const staleModule = client.snapshot.modules[1];
+    const report = client.currentReport();
+    const moduleMarker = {
+      rpcName: 'monthly_v7_save_module',
+      pendingKey: `save_module:${module.id}`,
+      operationId: '00000000-0000-4000-8000-000000000991',
+      signature: '{"fixture":"module-a"}'
+    };
+    const staleModuleMarker = {
+      rpcName: 'monthly_v7_save_module',
+      pendingKey: `save_module:${staleModule.id}`,
+      operationId: '00000000-0000-4000-8000-000000000993',
+      signature: '{"fixture":"module-stale"}'
+    };
+    const reportMarker = {
+      rpcName: 'monthly_v7_save_report_meta',
+      pendingKey: `save_report_meta:${report.id}`,
+      operationId: '00000000-0000-4000-8000-000000000992',
+      signature: '{"fixture":"report-a"}'
+    };
+    client.saveDraft(
+      'module', module.id,
+      { ...module.payload, title: '既有 module 後繼草稿 B' },
+      7,
+      { supersedesOperation: moduleMarker }
+    );
+    client.saveDraft(
+      'module', staleModule.id,
+      { ...staleModule.payload, title: '較新的 existing draft D' },
+      8,
+      { supersedesOperation: staleModuleMarker }
+    );
+    client.saveDraft(
+      'report_meta', report.id,
+      {
+        title: '既有 report meta 後繼草稿 B',
+        date: report.date || '', period: report.period || {}, settings: report.settings || {}
+      },
+      9,
+      { supersedesOperation: reportMarker }
+    );
+    const titles = document.querySelectorAll('#tableBody .module-title-editor');
+    const title = titles[0];
+    title.textContent = '防抖前 module 新內容 C';
+    title.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'C' }));
+    titles[1].textContent = '未觸發 input 的舊 DOM B';
+    const mainTitle = document.getElementById('mainTitle');
+    mainTitle.textContent = '防抖前 report meta 新內容 C';
+    mainTitle.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'C' }));
+    clearTimeout(window._globalInputSaveTimer);
+    window._globalInputSaveTimer = null;
+    return {
+      moduleId: module.id, staleModuleId: staleModule.id, reportId: report.id,
+      moduleMarker, staleModuleMarker, reportMarker
+    };
+  });
+
+  await request.post('/__fake_invalidate_user_sessions');
+  await syncLatestExpectingSessionInvalid(page);
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App.currentUser())).toBeNull();
+
+  const drafts = await page.evaluate(({ moduleId, staleModuleId, reportId }) => {
+    const client = window.MonthlyV7App.client;
+    return {
+      module: client.readDraft('module', moduleId),
+      staleModule: client.readDraft('module', staleModuleId),
+      reportMeta: client.readDraft('report_meta', reportId)
+    };
+  }, expected);
+  expect(drafts.module.payload.title).toBe('防抖前 module 新內容 C');
+  expect(drafts.module.baseRevision).toBe(7);
+  expect(drafts.module.supersedesOperation).toEqual(expected.moduleMarker);
+  expect(drafts.staleModule.payload.title).toBe('較新的 existing draft D');
+  expect(drafts.staleModule.baseRevision).toBe(8);
+  expect(drafts.staleModule.supersedesOperation).toEqual(expected.staleModuleMarker);
+  expect(drafts.reportMeta.payload.title).toBe('防抖前 report meta 新內容 C');
+  expect(drafts.reportMeta.baseRevision).toBe(9);
+  expect(drafts.reportMeta.supersedesOperation).toEqual(expected.reportMarker);
 });
 
 test('月報項目改為兩層卡片且不改寫既有 module payload', async ({ page, request }) => {
@@ -547,20 +727,18 @@ test('編輯工具列可獨立收合與固定，四種組合皆可逆且 sticky 
   const collapsedHeight = await toolbar.evaluate((element) => element.getBoundingClientRect().height);
   expect(collapsedHeight).toBeLessThan(expandedHeight - 60);
 
-  await page.evaluate(() => {
+  let geometry = await page.evaluate(async () => {
     document.querySelector('.module-content-cell').style.minHeight = '5000px';
     refreshEditorStickyOffsets();
     window.scrollTo(0, 2200);
-  });
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(2000);
-  await settleLayout(page);
-  let geometry = await page.evaluate(() => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const box = (selector) => {
       const rect = document.querySelector(selector).getBoundingClientRect();
       return { top: rect.top, bottom: rect.bottom, height: rect.height };
     };
-    return { tabs: box('#v1TabsBar'), toolbar: box('#richEditorToolbar'), shield: box('#v1StickyShield') };
+    return { scrollY: window.scrollY, tabs: box('#v1TabsBar'), toolbar: box('#richEditorToolbar'), shield: box('#v1StickyShield') };
   });
+  expect(geometry.scrollY).toBeGreaterThan(2000);
   expect(geometry.toolbar.top).toBeGreaterThanOrEqual(geometry.tabs.bottom - 1);
   expect(geometry.toolbar.top).toBeLessThanOrEqual(geometry.tabs.bottom + 1);
   expect(geometry.shield.bottom).toBeGreaterThanOrEqual(geometry.toolbar.bottom + 7);
@@ -577,13 +755,16 @@ test('編輯工具列可獨立收合與固定，四種組合皆可逆且 sticky 
   await expect(pin).toContainText('未固定');
   await expect(toolbar).toHaveAttribute('data-toolbar-pinned', 'false');
   expect(await toolbar.evaluate((element) => getComputedStyle(element).position)).not.toBe('sticky');
-  geometry = await page.evaluate(() => {
+  geometry = await page.evaluate(async () => {
+    window.scrollTo(0, 2200);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const box = (selector) => {
       const rect = document.querySelector(selector).getBoundingClientRect();
       return { top: rect.top, bottom: rect.bottom, height: rect.height };
     };
-    return { tabs: box('#v1TabsBar'), toolbar: box('#richEditorToolbar'), shield: box('#v1StickyShield') };
+    return { scrollY: window.scrollY, tabs: box('#v1TabsBar'), toolbar: box('#richEditorToolbar'), shield: box('#v1StickyShield') };
   });
+  expect(geometry.scrollY).toBeGreaterThan(2000);
   expect(geometry.toolbar.bottom).toBeLessThan(0);
   expect(geometry.tabs.top).toBeGreaterThanOrEqual(-1);
   expect(geometry.shield.bottom).toBeLessThanOrEqual(geometry.tabs.bottom + 9);
@@ -807,7 +988,16 @@ test('full snapshot catch-up 不覆蓋尚未 blur 的本機 module', async ({ pa
   await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
   await title.fill('尚未 blur 的本機文字');
   await request.post('/__fake_structure_change');
-  await page.evaluate(() => window.MonthlyV7App.client.catchUp());
+  await page.evaluate(() => {
+    window.__fullSnapshotCatchUpState = { status: 'pending', error: '' };
+    window.__fullSnapshotCatchUpPromise = window.MonthlyV7App.client.catchUp()
+      .then(() => { window.__fullSnapshotCatchUpState = { status: 'done', error: '' }; })
+      .catch((error) => {
+        window.__fullSnapshotCatchUpState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__fullSnapshotCatchUpState?.status)).toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__fullSnapshotCatchUpState)).toEqual({ status: 'done', error: '' });
   await expect(page.locator('#tableBody tr')).toHaveCount(3);
   await expect(page.locator('#tableBody tr').first().locator('td').nth(1).locator('.editable-div')).toHaveText('尚未 blur 的本機文字');
   await expect(page.locator('#tableBody')).toContainText('遠端新增模塊');
@@ -1151,10 +1341,115 @@ test('PDF 前置保存未獲雲端確認時不得建立正式快照或列印舊�
 
   expect(await page.evaluate(() => window.__v7PrintCalled)).toBe(false);
   await expect(page.locator('body')).not.toHaveAttribute('data-print-source', 'snapshot');
-  expect(dialogs.some((message) => message.includes('RPC_TIMEOUT'))).toBe(true);
+  const timeoutDialog = dialogs.find((message) => message.includes('RPC_TIMEOUT')) || '';
+  expect(timeoutDialog).toContain('階段：保存資料（save_data）');
+  expect(timeoutDialog).toContain('RPC：monthly_v7_save_module');
+  expect(timeoutDialog).toMatch(/等待：\d+ ms/);
+  expect(timeoutDialog).toContain('本機草稿已保留，尚未列印');
+  await expect(page.locator('#v5TopStatus')).toContainText('保存資料（save_data）');
+  await expect(page.locator('body')).not.toHaveAttribute('data-v7-formal-print-lock');
+  await expect(page.locator('#v7FormalPrintLockOverlay')).toHaveCount(0);
   const server = await (await request.get('/__fake_state')).json();
   expect(server.modules[0].payload.title).toBe('A 原始項目');
   expect(await page.evaluate(() => localStorage.getItem('monthly_v7_draft:module:22222222-2222-4222-8222-222222222221'))).toContain('尚未獲雲端確認的 PDF 內容');
+});
+
+test('正式 PDF snapshot RPC timeout 標示 create_snapshot 階段與確切 RPC', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    window.MonthlyV7App.transport.requestTimeoutMs = 35;
+    window.__v7PrintCalled = false;
+    window.print = () => { window.__v7PrintCalled = true; };
+  });
+  await request.post('/__fake_hang_rpc?name=monthly_v7_create_report_snapshot&count=always');
+
+  await page.evaluate(() => printV1SelectedPdf());
+  await expect.poll(() => dialogs.length, { timeout: 15000 }).toBeGreaterThan(0);
+
+  const message = dialogs.find((value) => value.includes('RPC_TIMEOUT')) || '';
+  expect(message).toContain('階段：建立不可變快照（create_snapshot）');
+  expect(message).toContain('RPC：monthly_v7_create_report_snapshot');
+  expect(message).toMatch(/等待：\d+ ms/);
+  expect(await page.evaluate(() => window.__v7PrintCalled)).toBe(false);
+  await expect(page.locator('#v7FormalPrintLockOverlay')).toHaveCount(0);
+});
+
+test('正式 PDF 的 PostgREST SQLSTATE 28000 session invalid 顯示重新登入而非裸碼', async ({ page }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const transport = window.MonthlyV7App.transport;
+    const originalRpc = transport.rpc.bind(transport);
+    transport.rpc = async (name, params) => {
+      if (name === 'monthly_v7_create_report_snapshot') {
+        const error = new Error('READ_SESSION_INVALID');
+        error.code = '28000';
+        error.details = 'provider detail';
+        throw error;
+      }
+      return originalRpc(name, params);
+    };
+    window.__v7PrintCalled = false;
+    window.print = () => { window.__v7PrintCalled = true; };
+  });
+
+  await page.evaluate(() => {
+    window.__sqlstatePdfState = { status: 'pending', error: '' };
+    window.__sqlstatePdfPromise = printV1SelectedPdf()
+      .then(() => {
+        window.__sqlstatePdfState = { status: 'done', error: '' };
+      })
+      .catch((error) => {
+        window.__sqlstatePdfState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__sqlstatePdfState?.status), { timeout: 15000 }).toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__sqlstatePdfState)).toEqual({ status: 'done', error: '' });
+  await expect.poll(() => dialogs.length, { timeout: 15000 }).toBeGreaterThan(0);
+
+  const message = dialogs.at(-1) || '';
+  expect(message).toContain('登入已失效');
+  expect(message).toContain('本機草稿已保留');
+  expect(message).toContain('請重新登入');
+  expect(message).not.toContain('失敗：28000；');
+  expect(await page.evaluate(() => window.__v7PrintCalled)).toBe(false);
+  expect(await page.evaluate(() => window.MonthlyV7App.currentUser())).toBeNull();
+  expect(await page.evaluate(() => Boolean(window.MonthlyV7App.client.siteSession?.id))).toBe(true);
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await expect(page.locator('body')).not.toHaveAttribute('data-v7-formal-print-lock');
+  await expect(page.locator('#v7FormalPrintLockOverlay')).toHaveCount(0);
+});
+
+test('V7 session 失效後 PDF 不得降級走 legacy 本機列印', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    window.__v7PrintCalled = false;
+    window.print = () => { window.__v7PrintCalled = true; };
+  });
+  await request.post('/__fake_invalidate_user_sessions');
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App.currentUser()), { timeout: 15000 }).toBeNull();
+
+  await page.evaluate(() => printV1SelectedPdf());
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  expect(await page.evaluate(() => window.__v7PrintCalled)).toBe(false);
+  expect(dialogs.some((message) => message.includes('登入已失效') && message.includes('本機草稿已保留'))).toBe(true);
+  await expect(page.locator('body')).not.toHaveClass(/pdf-print-mode/);
+  await expect(page.locator('#v7FormalPrintLockOverlay')).toHaveCount(0);
 });
 
 test('重新登入後舊 PDF pending operation 可安全接續且不再出現 PENDING_OPERATION_UNRESOLVED', async ({ page }) => {
@@ -1302,10 +1597,21 @@ test('PDF print media 保留部件與圖表色彩且小型圖表不跨頁切斷'
   page.on('pageerror', (error) => errors.push(error.message));
   await enterAndLogin(page, 'owner', 'owner-pass');
   await installPdfColorFixture(page);
-  await page.evaluate(async () => {
-    await prepareV1PdfPrintArea();
-    document.body.classList.add('pdf-print-mode');
+  await page.evaluate(() => {
+    window.__pdfColorPrepareState = { status: 'pending', message: '' };
+    window.__pdfColorPreparePromise = Promise.resolve()
+      .then(() => prepareV1PdfPrintArea())
+      .then(() => {
+        document.body.classList.add('pdf-print-mode');
+        window.__pdfColorPrepareState = { status: 'done', message: '' };
+      })
+      .catch((error) => {
+        window.__pdfColorPrepareState = { status: 'error', message: String(error?.message || error || '') };
+      });
   });
+  await expect.poll(() => page.evaluate(() => window.__pdfColorPrepareState?.status || 'missing'), { timeout: 15000 })
+    .not.toBe('pending');
+  expect(await page.evaluate(() => window.__pdfColorPrepareState)).toEqual({ status: 'done', message: '' });
   await page.emulateMedia({ media: 'print' });
   await page.evaluate(async () => {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -1360,6 +1666,105 @@ test('PDF print media 保留部件與圖表色彩且小型圖表不跨頁切斷'
   expect(printState.canvasDatasetColors).toEqual(['#4f46e5', '#10b981']);
   expect(printState.atomicBreaks).toEqual(['avoid', 'avoid', 'avoid', 'avoid']);
   expect(errors).toEqual([]);
+});
+
+test('12 模塊 PDF 首頁不因首項 keep-together 只剩表頭，順序與長短分頁規則固定', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const originals = reportData.map((item) => JSON.parse(JSON.stringify(item)));
+    reportData = Array.from({ length: 12 }, (_, index) => {
+      const item = JSON.parse(JSON.stringify(originals[index % originals.length]));
+      item.id = 1000 + index;
+      item._v7Id = `fixture-module-${String(index + 1).padStart(2, '0')}`;
+      item.title = `十二模塊順序-${String(index + 1).padStart(2, '0')}`;
+      item.selectedForPdf = true;
+      item.pdfOrder = index + 1;
+      if (index === 0) {
+        item.columns = [Array.from({ length: 28 }, (_, line) => `<p style="margin:0;line-height:22px">${line === 0 ? '首項必須從第一頁開始，不可留下純表頭首頁' : `首項跨頁內容 ${String(line + 1).padStart(2, '0')}`}</p>`).join('')];
+      } else if (index === 4) {
+        item.columns = [Array.from({ length: 90 }, (_, line) => `<p>第五項長內容 ${line + 1}</p>`).join('')];
+      } else {
+        const height = index % 3 === 0 ? 250 : 120;
+        item.columns = [`<div style="height:${height}px">模塊 ${index + 1} 內容</div>`];
+      }
+      return item;
+    });
+    window.__twelveModuleFormal = {
+      snapshotId: 'fixture-twelve-modules',
+      snapshot: {
+        watermark: 12,
+        report: {
+          id: 'fixture-report',
+          legacyFileId: 'fixture-report',
+          title: '十二模塊正式 PDF 驗證',
+          date: '2026-08-11',
+          period: { startM: '8', startD: '1', endM: '8', endD: '31' },
+          revision: 12
+        },
+        modules: reportData.map((item, index) => ({
+          id: item._v7Id,
+          legacyItemId: item.id,
+          revision: index + 1,
+          payload: JSON.parse(JSON.stringify(item))
+        })),
+        records: []
+      }
+    };
+    renderTable();
+  });
+
+  await page.evaluate(() => {
+    window.__twelveModulePrepareState = { status: 'pending', error: '' };
+    window.__twelveModulePreparePromise = prepareV7FormalSnapshotPrintArea(window.__twelveModuleFormal, { selectAll: true })
+      .then((ok) => {
+        if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+        document.body.classList.add('pdf-print-mode');
+        window.__twelveModulePrepareState = { status: 'done', error: '' };
+      })
+      .catch((error) => {
+        window.__twelveModulePrepareState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__twelveModulePrepareState?.status), { timeout: 30000 }).toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__twelveModulePrepareState)).toEqual({ status: 'done', error: '' });
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+
+  const layout = await page.evaluate(() => {
+    const area = document.getElementById('pdfPrintArea');
+    const rows = Array.from(area.querySelectorAll('.module-card-row'));
+    const pageContentHeight = (210 - 6 - 12) * 96 / 25.4;
+    const firstTop = rows[0].getBoundingClientRect().top - area.getBoundingClientRect().top;
+    const firstPageRemaining = pageContentHeight - (firstTop % pageContentHeight);
+    return {
+      pageContentHeight,
+      firstPageRemaining,
+      titles: rows.map((row) => row.querySelector('.module-title-editor')?.textContent?.trim() || ''),
+      rows: rows.map((row) => ({
+        height: Number(row.dataset.pdfModuleHeight || 0),
+        keepTogether: row.classList.contains('pdf-keep-together'),
+        breakInside: getComputedStyle(row).breakInside
+      }))
+    };
+  });
+
+  expect(layout.titles).toEqual(Array.from({ length: 12 }, (_, index) => `十二模塊順序-${String(index + 1).padStart(2, '0')}`));
+  expect(layout.rows).toHaveLength(12);
+  expect(layout.rows[0].height).toBeLessThanOrEqual(layout.pageContentHeight);
+  expect(layout.rows[0].height).toBeGreaterThan(layout.firstPageRemaining);
+  expect(layout.rows[0].keepTogether).toBe(false);
+  expect(layout.rows[0].breakInside).toBe('auto');
+  expect(layout.rows[4].height).toBeGreaterThan(layout.pageContentHeight);
+  expect(layout.rows[4].keepTogether).toBe(false);
+  expect(layout.rows[4].breakInside).toBe('auto');
+  expect(layout.rows.slice(1).some((row) => row.height < layout.pageContentHeight && row.keepTogether)).toBe(true);
+
+  const pdfPath = testInfo.outputPath('twelve-module-layout.pdf');
+  const pdf = await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
+  await testInfo.attach('twelve-module-layout.pdf', { body: pdf, contentType: 'application/pdf' });
+  const pageObjects = pdf.toString('latin1').match(/\/Type\s*\/Page\b/g) || [];
+  expect(pageObjects.length).toBeGreaterThan(2);
+  expect(pageObjects.length).toBeLessThan(20);
 });
 
 test('PDF 只對單頁可容納的臨界項目啟用 keep-together，長項目維持可分頁', async ({ page }) => {

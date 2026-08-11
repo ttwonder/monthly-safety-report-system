@@ -94,6 +94,12 @@ function rpc(name, p) {
     state.userSessions.set(id, { userId: user.id, clientSessionId: p.p_client_session_id, siteSessionId: p.p_site_session_id });
     return { ok: true, user_session_id: id, user: clone(user) };
   }
+  if (name === 'monthly_v7_logout_user') {
+    const session = state.userSessions.get(p.p_user_session_id);
+    const belongsToSite = session && session.siteSessionId === p.p_site_session_id;
+    if (belongsToSite) state.userSessions.delete(p.p_user_session_id);
+    return { ok: true, revoked: Boolean(belongsToSite) };
+  }
   if (name === 'monthly_v7_logout') {
     state.userSessions.delete(p.p_user_session_id);
     state.siteSessions.delete(p.p_site_session_id);
@@ -180,10 +186,18 @@ function rpc(name, p) {
     return clone(result);
   }
   if (name === 'monthly_v7_get_changes_since') {
+    const session = state.userSessions.get(p.p_user_session_id);
+    if (!session || session.siteSessionId !== p.p_site_session_id || !state.siteSessions.has(p.p_site_session_id)) {
+      return { ok: false, error: 'READ_SESSION_INVALID' };
+    }
     const events = state.events.filter((row) => row.sequence > Number(p.p_after_sequence || 0));
     return { ok: true, watermark: events.length ? events.at(-1).sequence : Number(p.p_after_sequence || 0), hasMore: false, events: clone(events) };
   }
   if (name === 'monthly_v7_get_entity') {
+    const session = state.userSessions.get(p.p_user_session_id);
+    if (!session || session.siteSessionId !== p.p_site_session_id || !state.siteSessions.has(p.p_site_session_id)) {
+      return { ok: false, error: 'READ_SESSION_INVALID' };
+    }
     const module = state.modules.find((entry) => entry.id === p.p_entity_id);
     if (p.p_entity_type === 'module' && module) return { ok: true, entityType: 'module', entityId: module.id, revision: module.revision, deleted: false, payload: clone(module.payload) };
     return { ok: false, error: 'ENTITY_NOT_FOUND' };
@@ -224,6 +238,10 @@ const mime = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascri
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/__fake_reset' && req.method === 'POST') { state = freshState(); res.writeHead(204); return res.end(); }
+  if (url.pathname === '/__fake_invalidate_user_sessions' && req.method === 'POST') {
+    state.userSessions.clear();
+    res.writeHead(204); return res.end();
+  }
   if (url.pathname === '/__fake_structure_change' && req.method === 'POST') {
     state.modules.push({
       id: 'm3', legacyItemId: '103', sortRank: 3, revision: 1,

@@ -960,6 +960,38 @@ begin
 end;
 $$;
 
+create or replace function public.monthly_v7_logout_user(
+  p_workspace_key text,
+  p_site_session_id uuid,
+  p_user_session_id uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path=pg_catalog,public
+as $$
+declare
+  workspace_row public.monthly_v7_workspaces%rowtype;
+  removed_id uuid;
+begin
+  select * into workspace_row from public.monthly_v7_workspaces where legacy_workspace_key=p_workspace_key;
+  if not found then return jsonb_build_object('ok',true,'alreadyLoggedOut',true,'revoked',false); end if;
+
+  delete from public.monthly_v7_user_sessions
+  where id=p_user_session_id
+    and workspace_id=workspace_row.id
+    and site_session_id=p_site_session_id
+    and auth_uid=auth.uid()
+  returning id into removed_id;
+
+  return jsonb_build_object(
+    'ok', true,
+    'alreadyLoggedOut', removed_id is null,
+    'revoked', removed_id is not null
+  );
+end;
+$$;
+
 create or replace function public.monthly_v7_logout(
   p_workspace_key text,
   p_site_session_id uuid,
@@ -2709,6 +2741,7 @@ revoke execute on function public.monthly_v7_get_status(text) from public;
 revoke execute on function public.monthly_v7_open_site(text, text, text) from public;
 revoke execute on function public.monthly_v7_login_user(text, uuid, text, text, text) from public;
 revoke execute on function public.monthly_v7_get_snapshot(text, uuid, uuid) from public;
+revoke execute on function public.monthly_v7_logout_user(text, uuid, uuid) from public;
 revoke execute on function public.monthly_v7_logout(text, uuid, uuid) from public;
 revoke execute on function public.monthly_v7_session_user(uuid, uuid, text) from public, anon, authenticated;
 revoke execute on function public.monthly_v7_entity_exists(uuid, text, uuid) from public, anon, authenticated;
@@ -2739,6 +2772,7 @@ grant execute on function public.monthly_v7_can_read_change_events(uuid) to auth
 grant execute on function public.monthly_v7_open_site(text, text, text) to authenticated;
 grant execute on function public.monthly_v7_login_user(text, uuid, text, text, text) to authenticated;
 grant execute on function public.monthly_v7_get_snapshot(text, uuid, uuid) to authenticated;
+grant execute on function public.monthly_v7_logout_user(text, uuid, uuid) to authenticated;
 grant execute on function public.monthly_v7_logout(text, uuid, uuid) to authenticated;
 grant execute on function public.monthly_v7_claim_lease(text, uuid, text, text, uuid, int) to authenticated;
 grant execute on function public.monthly_v7_save_module(text, uuid, text, uuid, uuid, bigint, uuid, bigint, jsonb) to authenticated;

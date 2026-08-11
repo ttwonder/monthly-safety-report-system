@@ -127,7 +127,8 @@ docs/supabase-schema-v7-activate.sql
 8. 刪除 record/module 必須雲端成功後才從畫面消失。
 9. KPI 多 module 更新全成或全不成。
 10. Owner/Admin/Operator 與 site password rotation 權限正確。
-11. PDF、Excel、JSON、CSV、附件、手機/桌面版面無回歸。
+11. 點「登出」只撤銷 user session，網站保持已解鎖；重新登入成功。server 主動回 `READ_SESSION_INVALID`／`USER_SESSION_INVALID` 時身份列立即收斂為未登入，本機草稿仍存在且不重送舊 RPC。
+12. PDF、Excel、JSON、CSV、附件、手機/桌面版面無回歸；12 模塊正式 PDF 第一頁不得只剩表頭，長項自然跨頁且順序不變。
 
 ## 異常與回復原則
 

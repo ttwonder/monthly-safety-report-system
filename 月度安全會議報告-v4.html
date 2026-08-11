@@ -199,7 +199,8 @@
         });
 
         document.addEventListener('input', function(e) {
-            if (e.target.classList.contains('kpi-min') || 
+            v7MarkLocalDraftDirty(e.target);
+            if (e.target.classList.contains('kpi-min') ||
                 e.target.classList.contains('kpi-max') || 
                 e.target.classList.contains('current-val') || 
                 e.target.classList.contains('target-val') ||
@@ -2161,8 +2162,8 @@
 
     <script src="./vendor/supabase-2.112.2.js"></script>
     <script src="./monthly-collaboration-core.js"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.6"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.6"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.7"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.7"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont() {
@@ -3663,8 +3664,19 @@
         }
 
         // 【穩定保存】：保存時保留目前捲動位置與焦點，避免輸入中跳到頁面頂端
+        function v7MarkLocalDraftDirty(element) {
+            if (!element || typeof element.closest !== 'function') return;
+            const changedAt = String(Date.now());
+            const moduleEditor = element.closest('.module-title-editor, [data-col-index]');
+            if (moduleEditor) moduleEditor.dataset.v7LocalDraftDirtyAt = changedAt;
+            if (element.closest('#mainTitle, #reportDate, #startMonth, #startDay, #endMonth, #endDay, #globalFontEnSelector, #globalFontZhSelector')) {
+                document.documentElement.dataset.v7ReportMetaDirtyAt = changedAt;
+            }
+        }
+
         async function triggerAutoSave(element) {
             if (!element) return;
+            v7MarkLocalDraftDirty(element);
             const anchor = (element.closest && (element.closest('.editable-div') || element.closest('tr') || element.closest('.custom-data-table'))) || element;
             const viewportState = captureEditorViewportState(anchor);
             try {
@@ -4533,13 +4545,24 @@
         }
 
         function classifyV1PdfModulePageBreaks(printArea) {
-            const maxSinglePageHeight = 720;
+            const pageContentHeight = (210 - 6 - 12) * 96 / 25.4;
+            const maxSinglePageHeight = Math.floor(pageContentHeight) - 2;
             const rows = Array.from(printArea?.querySelectorAll?.('.module-card-row') || []);
-            rows.forEach((row) => {
-                row.classList.remove('pdf-keep-together');
+            rows.forEach((row) => row.classList.remove('pdf-keep-together'));
+            const printAreaTop = printArea?.getBoundingClientRect?.().top || 0;
+            const firstRowTop = rows.length ? rows[0].getBoundingClientRect().top - printAreaTop : 0;
+            const firstPageOffset = ((firstRowTop % pageContentHeight) + pageContentHeight) % pageContentHeight;
+            const firstPageRemaining = firstPageOffset < 1 ? pageContentHeight : pageContentHeight - firstPageOffset;
+            if (printArea?.dataset) {
+                printArea.dataset.pdfPageContentHeight = String(pageContentHeight);
+                printArea.dataset.pdfFirstPageRemaining = String(firstPageRemaining);
+            }
+            rows.forEach((row, index) => {
                 const measuredHeight = Math.ceil(Math.max(row.getBoundingClientRect().height || 0, row.scrollHeight || 0));
                 row.dataset.pdfModuleHeight = String(measuredHeight);
-                if (measuredHeight > 0 && measuredHeight <= maxSinglePageHeight) row.classList.add('pdf-keep-together');
+                const fitsWholePage = measuredHeight > 0 && measuredHeight <= maxSinglePageHeight;
+                const wouldLeaveHeaderOnlyFirstPage = index === 0 && measuredHeight > firstPageRemaining;
+                if (fitsWholePage && !wouldLeaveHeaderOnlyFirstPage) row.classList.add('pdf-keep-together');
             });
             return rows.map((row) => ({
                 height: Number(row.dataset.pdfModuleHeight || 0),
@@ -4722,6 +4745,105 @@
             }
         }
 
+        function v7PreserveVisibleEditorDrafts() {
+            const client = window.MonthlyV7App?.client;
+            if (!client) return;
+            const visibleIsNewerThanDraft = (node, draft) => {
+                const dirtyAt = Number(node?.dataset?.v7LocalDraftDirtyAt || 0);
+                if (!Number.isFinite(dirtyAt) || dirtyAt <= 0) return false;
+                if (!draft) return true;
+                const savedAt = Date.parse(String(draft.savedAt || ''));
+                return Number.isFinite(savedAt) && dirtyAt >= savedAt;
+            };
+            const draftOptions = (draft) => draft?.supersedesOperation
+                ? { supersedesOperation: draft.supersedesOperation }
+                : {};
+            document.querySelectorAll('#tableBody tr[data-index]').forEach(row => {
+                const index = Number(row.dataset.index);
+                const item = Number.isInteger(index) ? reportData[index] : null;
+                if (!item?._v7Id) return;
+                const snapshotRow = (client.snapshot?.modules || []).find(entry => entry.id === item._v7Id);
+                const baseline = snapshotRow?.payload || {};
+                const existingDraft = client.readDraft('module', item._v7Id);
+                const candidate = JSON.parse(JSON.stringify(existingDraft?.payload || item));
+                let visibleChange = false;
+                const title = row.querySelector('.module-title-editor');
+                const titleValue = title?.innerHTML ?? '';
+                const useVisibleTitle = title && (
+                    visibleIsNewerThanDraft(title, existingDraft)
+                    || (!existingDraft && titleValue !== String(baseline.title || ''))
+                );
+                if (useVisibleTitle && candidate.title !== titleValue) {
+                    candidate.title = titleValue;
+                    visibleChange = true;
+                }
+                row.querySelectorAll('[data-col-index]').forEach(node => {
+                    const colIndex = Number(node.dataset.colIndex);
+                    if (!Number.isInteger(colIndex) || colIndex < 0 || !Array.isArray(candidate.columns)) return;
+                    const value = sanitizeTrendChartHtml(node.innerHTML);
+                    const baselineValue = Array.isArray(baseline.columns) ? String(baseline.columns[colIndex] || '') : '';
+                    const useVisibleValue = visibleIsNewerThanDraft(node, existingDraft)
+                        || (!existingDraft && value !== baselineValue);
+                    if (useVisibleValue && candidate.columns[colIndex] !== value) {
+                        candidate.columns[colIndex] = value;
+                        visibleChange = true;
+                    }
+                });
+                const modelDiffersFromBaseline = item.title !== baseline.title
+                    || JSON.stringify(item.columns || []) !== JSON.stringify(baseline.columns || []);
+                const draftChanged = existingDraft
+                    ? JSON.stringify(candidate) !== JSON.stringify(existingDraft.payload)
+                    : visibleChange || modelDiffersFromBaseline;
+                if (!draftChanged) return;
+                reportData[index] = Object.assign({}, candidate, {
+                    _v7Id: item._v7Id,
+                    _v7Revision: item._v7Revision
+                });
+                client.saveDraft(
+                    'module',
+                    item._v7Id,
+                    candidate,
+                    Number(existingDraft?.baseRevision ?? item._v7Revision ?? 0),
+                    draftOptions(existingDraft)
+                );
+            });
+            const report = client.currentReport?.();
+            if (!report?.id) return;
+            const localMeta = v7CurrentReportMeta();
+            const baselineMeta = {
+                title: report.title || '月度安全會議報告',
+                date: report.date || '',
+                period: report.period || {}
+            };
+            const localCore = { title: localMeta.title, date: localMeta.date, period: localMeta.period };
+            const existingMetaDraft = client.readDraft('report_meta', report.id);
+            const dirtyAt = Number(document.documentElement.dataset.v7ReportMetaDirtyAt || 0);
+            const existingSavedAt = Date.parse(String(existingMetaDraft?.savedAt || ''));
+            const localMetaIsNewer = dirtyAt > 0 && (
+                !existingMetaDraft
+                || (Number.isFinite(existingSavedAt) && dirtyAt >= existingSavedAt)
+            );
+            let metaCandidate = existingMetaDraft?.payload || localMeta;
+            let shouldSaveMeta = false;
+            if (existingMetaDraft) {
+                if (localMetaIsNewer && JSON.stringify(localMeta) !== JSON.stringify(existingMetaDraft.payload)) {
+                    metaCandidate = localMeta;
+                    shouldSaveMeta = true;
+                }
+            } else if (JSON.stringify(localCore) !== JSON.stringify(baselineMeta)) {
+                shouldSaveMeta = true;
+            }
+            if (shouldSaveMeta) {
+                client.saveDraft(
+                    'report_meta',
+                    report.id,
+                    metaCandidate,
+                    Number(existingMetaDraft?.baseRevision ?? report.revision ?? 0),
+                    draftOptions(existingMetaDraft)
+                );
+            }
+        }
+
         function v7BlockInputWhileFormalPrint(event) {
             if (!v7FormalPrintLockToken || !event.isTrusted) return;
             event.preventDefault();
@@ -4763,11 +4885,61 @@
             document.getElementById('v7FormalPrintLockOverlay')?.remove();
         }
 
+        const V7_FORMAL_PDF_STAGE_LABELS = Object.freeze({
+            save_data: '保存資料',
+            create_snapshot: '建立不可變快照',
+            prepare_print: '準備列印版面'
+        });
+
+        async function v7RunFormalPdfStage(stage, action) {
+            try {
+                return await action();
+            } catch (error) {
+                if (error && !error.pdfStage) error.pdfStage = stage;
+                throw error;
+            }
+        }
+
+        function v7FormalPdfFailureMessage(error) {
+            const sessionCode = window.MonthlyV7App?.client?.sessionErrorCode?.(error) || '';
+            const code = String(error?.code || error?.message || error || 'PDF_EXPORT_FAILED');
+            if (sessionCode === 'SITE_SESSION_INVALID') {
+                return '網站進站驗證已失效；本機草稿已保留，請重新輸入進站密碼。';
+            }
+            if (sessionCode === 'USER_SESSION_INVALID' || sessionCode === 'READ_SESSION_INVALID') {
+                return '登入已失效；本機草稿已保留，請重新登入。';
+            }
+            if (code.includes('RPC_TIMEOUT')) {
+                const stage = String(error?.pdfStage || 'unknown');
+                const stageLabel = V7_FORMAL_PDF_STAGE_LABELS[stage] || '未知階段';
+                const rpcName = String(error?.rpcName || error?.operation || 'unknown');
+                const elapsedMs = Number.isFinite(Number(error?.elapsedMs)) ? Math.max(0, Math.round(Number(error.elapsedMs))) : 0;
+                return `RPC_TIMEOUT｜階段：${stageLabel}（${stage}）｜RPC：${rpcName}｜等待：${elapsedMs} ms。本機草稿已保留，尚未列印。`;
+            }
+            const stage = String(error?.pdfStage || '');
+            const stageText = stage ? `｜階段：${V7_FORMAL_PDF_STAGE_LABELS[stage] || '未知階段'}（${stage}）` : '';
+            return `${code}${stageText}；本機草稿已保留，尚未列印。`;
+        }
+
+        function v7ReportFormalPdfFailure(error) {
+            const message = v7FormalPdfFailureMessage(error);
+            v4SetCloudRuntimeStatus(message, 'error');
+            alert('建立正式 PDF 快照失敗：' + message);
+        }
+
+        function v7RequireFormalPdfUser() {
+            if (v5CurrentUser()) return true;
+            const error = new Error('USER_SESSION_INVALID');
+            error.code = 'USER_SESSION_INVALID';
+            v7ReportFormalPdfFailure(error);
+            return false;
+        }
+
         function v7StartVerifiedPrint(floor, printLockToken = null) {
             try { v7AssertFormalSnapshotIntent(floor); }
             catch (error) {
                 v7ReleaseFormalPrintLock(printLockToken);
-                alert('建立正式 PDF 快照失敗：' + error.message);
+                v7ReportFormalPdfFailure(error);
                 return false;
             }
             document.body.classList.add('pdf-print-mode');
@@ -4777,7 +4949,7 @@
                     window.print();
                 } catch (error) {
                     document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
-                    alert('建立正式 PDF 快照失敗：' + error.message);
+                    v7ReportFormalPdfFailure(error);
                 } finally {
                     v7ReleaseFormalPrintLock(printLockToken);
                 }
@@ -4828,15 +5000,16 @@
 
         async function printV1SelectedPdf() {
             syncV1PdfSelectionFromDom();
-            if (window.MonthlyV7App?.isActive?.() && v5CurrentUser()) {
+            if (window.MonthlyV7App?.isActive?.()) {
+                if (!v7RequireFormalPdfUser()) return;
                 let printLock = null;
                 try {
                     printLock = await v7AcquireFormalPrintLock();
                     syncV1PdfSelectionFromDom();
-                    const snapshotFloor = await v7ConfirmCloudBeforeFormalSnapshot();
-                    const formal = await v7CreateFreshFormalSnapshot('pdf', snapshotFloor);
+                    const snapshotFloor = await v7RunFormalPdfStage('save_data', () => v7ConfirmCloudBeforeFormalSnapshot());
+                    const formal = await v7RunFormalPdfStage('create_snapshot', () => v7CreateFreshFormalSnapshot('pdf', snapshotFloor));
                     v7AssertFormalSnapshotIntent(snapshotFloor);
-                    const ok = await prepareV7FormalSnapshotPrintArea(formal, { selectAll: false });
+                    const ok = await v7RunFormalPdfStage('prepare_print', () => prepareV7FormalSnapshotPrintArea(formal, { selectAll: false }));
                     v7AssertFormalSnapshotIntent(snapshotFloor);
                     if (!ok) {
                         v7ReleaseFormalPrintLock(printLock);
@@ -4846,7 +5019,7 @@
                     else v7ReleaseFormalPrintLock(printLock);
                 } catch (error) {
                     v7ReleaseFormalPrintLock(printLock);
-                    alert('建立正式 PDF 快照失敗：' + error.message);
+                    v7ReportFormalPdfFailure(error);
                 }
                 return;
             }
@@ -4894,14 +5067,15 @@
 
         async function printCurrentEditorReport() {
             // V7 必須從資料庫不可變 snapshot 列印；legacy mode 保留原 editor 列印。
-            if (window.MonthlyV7App?.isActive?.() && v5CurrentUser()) {
+            if (window.MonthlyV7App?.isActive?.()) {
+                if (!v7RequireFormalPdfUser()) return;
                 let printLock = null;
                 try {
                     printLock = await v7AcquireFormalPrintLock();
-                    const snapshotFloor = await v7ConfirmCloudBeforeFormalSnapshot();
-                    const formal = await v7CreateFreshFormalSnapshot('pdf', snapshotFloor);
+                    const snapshotFloor = await v7RunFormalPdfStage('save_data', () => v7ConfirmCloudBeforeFormalSnapshot());
+                    const formal = await v7RunFormalPdfStage('create_snapshot', () => v7CreateFreshFormalSnapshot('pdf', snapshotFloor));
                     v7AssertFormalSnapshotIntent(snapshotFloor);
-                    const ok = await prepareV7FormalSnapshotPrintArea(formal, { selectAll: true });
+                    const ok = await v7RunFormalPdfStage('prepare_print', () => prepareV7FormalSnapshotPrintArea(formal, { selectAll: true }));
                     if (!ok) {
                         v7ReleaseFormalPrintLock(printLock);
                         return;
@@ -4912,7 +5086,7 @@
                     return;
                 } catch (error) {
                     v7ReleaseFormalPrintLock(printLock);
-                    alert('建立正式 PDF 快照失敗：' + error.message);
+                    v7ReportFormalPdfFailure(error);
                     return;
                 }
             }
@@ -6763,11 +6937,21 @@
             showToast(`已登入：${user.displayName || user.username}`);
         }
         async function v5Logout() {
-            if (window.MonthlyV7App?.isActive?.()) await window.MonthlyV7App.logout();
-            else v5SetSession(null);
-            siteAccessForgetUnlock();
-            showToast('已登出；進門密碼需重新輸入');
-            siteAccessRenderGate();
+            let serverRevoked = true;
+            try {
+                if (window.MonthlyV7App?.isActive?.()) await window.MonthlyV7App.logoutUser();
+            } catch (error) {
+                serverRevoked = false;
+                console.warn('[Monthly V7] user logout acknowledgement unavailable', error);
+            } finally {
+                v5SetSession(null);
+            }
+            v4SetCloudRuntimeStatus(
+                serverRevoked ? '帳號已登出；網站仍已解鎖。' : '本分頁已登出；伺服器撤銷未確認，請稍後重新登入。',
+                serverRevoked ? 'muted' : 'warn'
+            );
+            renderV5SessionBar();
+            showToast(serverRevoked ? '帳號已登出' : '本分頁已登出；伺服器撤銷未確認');
         }
         async function v5SyncLatest() {
             await v4AutoSyncLatestFromCloud({ silent: false, source: '正在同步最新雲端資料...' });
@@ -7046,6 +7230,20 @@
             onRemoteChangeWhileEditing: () => v4SetCloudRuntimeStatus('正在編輯的項目有遠端新版本；目前草稿未被覆蓋。', 'warn'),
             onLeaseLost: () => v4SetCloudRuntimeStatus('編輯權已失效；內容保留為本機草稿，禁止直接覆蓋。', 'error'),
             onTransportError: (error) => console.warn('V7 collaboration error', error),
+            onSessionStateChanged: (event) => {
+                const code = String(event?.code || '');
+                if (code === 'READ_SESSION_INVALID' || code === 'USER_SESSION_INVALID' || code === 'SITE_SESSION_INVALID') {
+                    v7PreserveVisibleEditorDrafts();
+                }
+                if (code === 'READ_SESSION_INVALID' || code === 'USER_SESSION_INVALID') {
+                    v4SetCloudRuntimeStatus('登入已失效；本機草稿已保留，請重新登入。', 'warn');
+                } else if (code === 'SITE_SESSION_INVALID') {
+                    v4SetCloudRuntimeStatus('網站進站驗證已失效；本機草稿已保留，請重新輸入進站密碼。', 'warn');
+                    siteAccessForgetUnlock();
+                    siteAccessRenderGate();
+                }
+                renderV5SessionBar();
+            },
             onItemSaved: () => renderV5SessionBar(),
             onUsersChanged: () => setTimeout(() => window.MonthlyV7App?.loadSnapshot?.().catch(console.warn), 0)
         };

@@ -32,13 +32,71 @@
       this.config = null;
       this.status = { mode: 'unknown', authorityState: '', authorityEpoch: 0, minimumClientVersion: 0 };
       this.heartbeatTimer = null;
+      this.sessionGeneration = 0;
+    }
+
+    sessionErrorCode(value) {
+      const candidates = [];
+      const sources = [value, value && value.error, value && value.cause];
+      for (const source of sources) {
+        if (typeof source === 'string') {
+          candidates.push(source);
+        } else if (source && typeof source === 'object') {
+          candidates.push(source.code, source.error, source.message, source.details, source.hint);
+        }
+      }
+      for (const candidate of candidates) {
+        const text = String(candidate || '');
+        const code = ['SITE_SESSION_INVALID', 'USER_SESSION_INVALID', 'READ_SESSION_INVALID']
+          .find((sentinel) => text.includes(sentinel));
+        if (code) return code;
+      }
+      return '';
+    }
+
+    notifySessionStateChanged(reason, code = '') {
+      this.sessionGeneration += 1;
+      const event = Object.freeze({
+        reason: String(reason || ''),
+        code: String(code || ''),
+        generation: this.sessionGeneration,
+        siteUnlocked: this.isSiteUnlocked(),
+        user: this.currentUser()
+      });
+      if (typeof this.host.onSessionStateChanged === 'function') {
+        try { this.host.onSessionStateChanged(event); } catch (_) { /* session cleanup must still finish */ }
+      }
+      return event;
+    }
+
+    handleSessionError(value, requestGeneration = this.sessionGeneration) {
+      const code = this.sessionErrorCode(value);
+      if (!code || requestGeneration !== this.sessionGeneration) return code;
+      if (code === 'SITE_SESSION_INVALID') {
+        this.clearSessions('server-site-session-invalid', code);
+      } else {
+        this.clearUserSession('server-user-session-invalid', code);
+      }
+      return code;
+    }
+
+    async rpc(name, params) {
+      const requestGeneration = this.sessionGeneration;
+      try {
+        const result = await this.transport.rpc(name, params);
+        this.handleSessionError(result, requestGeneration);
+        return result;
+      } catch (error) {
+        this.handleSessionError(error, requestGeneration);
+        throw error;
+      }
     }
 
     async initialize(config) {
       this.config = Object.assign({}, config || {});
       if (!String(this.config.workspaceKey || '').trim()) throw new Error('workspaceKey is required');
       if (typeof this.transport.ensureAnonymous === 'function') await this.transport.ensureAnonymous(this.config);
-      const raw = await this.transport.rpc('monthly_v7_get_status', { p_workspace_key: this.config.workspaceKey });
+      const raw = await this.rpc('monthly_v7_get_status', { p_workspace_key: this.config.workspaceKey });
       const authorityState = String(raw && (raw.authority_state || raw.authorityState) || '');
       this.status = {
         mode: authorityState === 'NORMALIZED_ACTIVE' ? 'v7' : 'legacy',
@@ -56,11 +114,13 @@
 
     isActive() { return this.status.mode === 'v7'; }
     isSiteUnlocked() { return this.isActive() && !!(this.siteSession && this.siteSession.id); }
-    currentUser() { return this.user ? Object.assign({}, this.user) : null; }
+    currentUser() { return this.userSession && this.userSession.id && this.user ? Object.assign({}, this.user) : null; }
 
     async openSite(password) {
       if (!this.isActive()) throw new Error('V7 authority is not active');
-      const result = await this.transport.rpc('monthly_v7_open_site', {
+      this.sessionGeneration += 1;
+      this.clearUserSession();
+      const result = await this.rpc('monthly_v7_open_site', {
         p_workspace_key: this.config.workspaceKey,
         p_password: String(password || ''),
         p_client_session_id: this.clientSessionId
@@ -68,12 +128,13 @@
       if (!result || result.ok !== true) throw new Error(result && result.error || 'SITE_LOGIN_FAILED');
       this.siteSession = { id: result.site_session_id || result.siteSessionId, expiresAt: result.expires_at || result.expiresAt || '' };
       if (this.sessionStorage) this.sessionStorage.setItem('monthly_v7_site_session', JSON.stringify(this.siteSession));
+      this.sessionGeneration += 1;
       return Object.assign({}, this.siteSession);
     }
 
     async login(username, password) {
       if (!this.isSiteUnlocked()) throw new Error('SITE_SESSION_REQUIRED');
-      const result = await this.transport.rpc('monthly_v7_login_user', {
+      const result = await this.rpc('monthly_v7_login_user', {
         p_workspace_key: this.config.workspaceKey,
         p_site_session_id: this.siteSession.id,
         p_client_session_id: this.clientSessionId,
@@ -87,6 +148,7 @@
         this.sessionStorage.setItem('monthly_v7_user_session', JSON.stringify(this.userSession));
         this.sessionStorage.setItem('monthly_v7_user_projection', JSON.stringify(this.user));
       }
+      this.sessionGeneration += 1;
       await this.loadSnapshot();
       return this.currentUser();
     }
@@ -184,7 +246,7 @@
 
     async loadSnapshot(options = {}) {
       if (!this.isSiteUnlocked()) throw new Error('SITE_SESSION_REQUIRED');
-      const snapshot = await this.transport.rpc('monthly_v7_get_snapshot', {
+      const snapshot = await this.rpc('monthly_v7_get_snapshot', {
         p_workspace_key: this.config.workspaceKey,
         p_site_session_id: this.siteSession.id,
         p_user_session_id: this.userSession ? this.userSession.id : null
@@ -224,7 +286,7 @@
 
     async claimLease(entityType, entityId, ttlSeconds = 90) {
       this.requireUserSession();
-      const raw = await this.transport.rpc('monthly_v7_claim_lease', {
+      const raw = await this.rpc('monthly_v7_claim_lease', {
         p_workspace_key: this.config.workspaceKey,
         p_user_session_id: this.userSession.id,
         p_client_session_id: this.clientSessionId,
@@ -255,7 +317,7 @@
     async renewLease(entityType, entityId, ttlSeconds = 90) {
       const lease = this.getLease(entityType, entityId);
       if (!lease) return null;
-      const raw = await this.transport.rpc('monthly_v7_renew_lease', {
+      const raw = await this.rpc('monthly_v7_renew_lease', {
         p_workspace_key: this.config.workspaceKey,
         p_user_session_id: this.userSession.id,
         p_client_session_id: this.clientSessionId,
@@ -279,7 +341,7 @@
       const lease = this.getLease(entityType, entityId);
       if (!lease) return true;
       try {
-        const raw = await this.transport.rpc('monthly_v7_release_lease', {
+        const raw = await this.rpc('monthly_v7_release_lease', {
           p_workspace_key: this.config.workspaceKey,
           p_user_session_id: this.userSession.id,
           p_client_session_id: this.clientSessionId,
@@ -757,12 +819,13 @@
       let lastError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          const result = await this.transport.rpc(rpcName, request);
+          const result = await this.rpc(rpcName, request);
           const preserveMismatch = result && result.ok === false && result.error === 'IDEMPOTENCY_MISMATCH';
           if (this.draftStorage && !preserveMismatch) this.draftStorage.removeItem(storageKey);
           return result;
         } catch (error) {
           lastError = error;
+          if (this.sessionErrorCode(error)) throw error;
         }
       }
       throw lastError;
@@ -1283,7 +1346,7 @@
 
     async getEntity(entityType, entityId) {
       this.requireUserSession();
-      const entity = await this.transport.rpc('monthly_v7_get_entity', {
+      const entity = await this.rpc('monthly_v7_get_entity', {
         p_workspace_key: this.config.workspaceKey,
         p_site_session_id: this.siteSession.id,
         p_user_session_id: this.userSession.id,
@@ -1305,7 +1368,7 @@
       let pageCount = 0;
       let lastResult = { watermark: this.watermark, events: [], hasMore: false };
       do {
-        const raw = await this.transport.rpc('monthly_v7_get_changes_since', {
+        const raw = await this.rpc('monthly_v7_get_changes_since', {
           p_workspace_key: this.config.workspaceKey,
           p_site_session_id: this.siteSession.id,
           p_user_session_id: this.userSession.id,
@@ -1326,7 +1389,7 @@
             requiresFullSnapshot = true;
             continue;
           }
-          const entity = await this.transport.rpc('monthly_v7_get_entity', {
+          const entity = await this.rpc('monthly_v7_get_entity', {
             p_workspace_key: this.config.workspaceKey,
             p_site_session_id: this.siteSession.id,
             p_user_session_id: this.userSession.id,
@@ -1367,32 +1430,55 @@
       this.realtimeUnsubscribe = null;
     }
 
+    async logoutUser() {
+      try {
+        if (this.isActive() && this.userSession && this.userSession.id) {
+          const result = await this.rpc('monthly_v7_logout_user', {
+            p_workspace_key: this.config.workspaceKey,
+            p_site_session_id: this.siteSession ? this.siteSession.id : null,
+            p_user_session_id: this.userSession.id
+          });
+          this.commandResult(result, 'USER_LOGOUT_FAILED');
+        }
+      } finally {
+        this.clearUserSession('user-logout');
+      }
+    }
+
     async logout() {
       try {
         if (this.isActive() && this.siteSession && this.siteSession.id) {
-          await this.transport.rpc('monthly_v7_logout', {
+          await this.rpc('monthly_v7_logout', {
             p_workspace_key: this.config.workspaceKey,
             p_site_session_id: this.siteSession.id,
             p_user_session_id: this.userSession ? this.userSession.id : null
           });
         }
       } finally {
-        this.clearSessions();
+        this.clearSessions('site-logout');
       }
     }
 
-    clearSessions() {
+    clearUserSession(reason = '', code = '') {
       this.stopHeartbeat();
       this.stopRealtime();
-      this.siteSession = null;
       this.userSession = null;
       this.user = null;
       this.leases.clear();
       if (this.sessionStorage) {
-        this.sessionStorage.removeItem('monthly_v7_site_session');
         this.sessionStorage.removeItem('monthly_v7_user_session');
         this.sessionStorage.removeItem('monthly_v7_user_projection');
       }
+      if (reason) this.notifySessionStateChanged(reason, code);
+    }
+
+    clearSessions(reason = '', code = '') {
+      this.clearUserSession();
+      this.siteSession = null;
+      if (this.sessionStorage) {
+        this.sessionStorage.removeItem('monthly_v7_site_session');
+      }
+      if (reason) this.notifySessionStateChanged(reason, code);
     }
   }
 

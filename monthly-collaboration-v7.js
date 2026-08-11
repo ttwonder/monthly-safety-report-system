@@ -32,11 +32,14 @@
 
     async withTimeout(promise, operationName) {
       let timer = null;
+      const startedAt = Date.now();
       const timeout = new Promise((resolve, reject) => {
         timer = root.setTimeout(() => {
           const error = new Error('RPC_TIMEOUT');
           error.code = 'RPC_TIMEOUT';
           error.operation = operationName;
+          error.rpcName = operationName;
+          error.elapsedMs = Math.max(0, Date.now() - startedAt);
           reject(error);
         }, this.requestTimeoutMs);
       });
@@ -155,6 +158,10 @@
           if (typeof this.host.onRemoteChangeWhileEditing === 'function') this.host.onRemoteChangeWhileEditing(entity, event);
         },
         onTransportError: (error) => this.reportError(error),
+        onSessionStateChanged: (event) => {
+          if (typeof this.host.onSessionStateChanged === 'function') this.host.onSessionStateChanged(event);
+          this.decorateEditorRows();
+        },
         onItemSaved: (info) => {
           this.decorateEditorRows();
           if (typeof this.host.onItemSaved === 'function') this.host.onItemSaved(info);
@@ -196,6 +203,16 @@
       this.client.startRealtime();
       this.decorateEditorRows();
       return user;
+    }
+
+    async logoutUser() {
+      if (!this.client) return;
+      for (const timer of this.moduleReleaseTimers.values()) root.clearTimeout(timer);
+      this.moduleReleaseTimers.clear();
+      const leases = Array.from(this.client.leases.values());
+      await Promise.allSettled(leases.map((lease) => this.client.releaseLease(lease.entityType, lease.entityId)));
+      await this.client.logoutUser();
+      this.decorateEditorRows();
     }
 
     async logout() {
@@ -775,6 +792,7 @@
     reportError(error) {
       if (typeof this.host.onTransportError === 'function') this.host.onTransportError(error);
       else if (root.console) root.console.error(error);
+      if (this.client && this.client.sessionErrorCode(error)) return;
       this.setStatus(`逐項雲端操作失敗：${error && error.message || error}`, 'error');
     }
   }

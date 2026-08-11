@@ -170,6 +170,49 @@ test('V7 site/user session 驗證後只回傳安全 snapshot，並升級 legacy 
   }
 });
 
+test('V7 user-only logout 撤銷 user session 但保留 site session 可重新登入', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    const session = await openAndLogin(db, uid, 'owner', 'owner-pass', 'tab-user-logout');
+    const acl = (await db.query(`
+      select
+        not has_function_privilege('anon', 'public.monthly_v7_logout_user(text,uuid,uuid)', 'EXECUTE') as anon_blocked,
+        has_function_privilege('authenticated', 'public.monthly_v7_logout_user(text,uuid,uuid)', 'EXECUTE') as authenticated_allowed
+    `)).rows[0];
+    assert.deepEqual(acl, { anon_blocked: true, authenticated_allowed: true });
+
+    const result = rpcResult(await db.query(
+      'select public.monthly_v7_logout_user($1,$2,$3) as result',
+      ['workspace-test', session.site.site_session_id, session.login.user_session_id]
+    ));
+    assert.equal(result.ok, true);
+    assert.equal(result.revoked, true);
+
+    await assert.rejects(
+      () => db.query(
+        'select public.monthly_v7_get_snapshot($1,$2,$3) as result',
+        ['workspace-test', session.site.site_session_id, session.login.user_session_id]
+      ),
+      /USER_SESSION_INVALID/
+    );
+    const siteOnly = rpcResult(await db.query(
+      'select public.monthly_v7_get_snapshot($1,$2,$3::uuid) as result',
+      ['workspace-test', session.site.site_session_id, null]
+    ));
+    assert.equal(siteOnly.ok, true);
+    const relogin = rpcResult(await db.query(
+      'select public.monthly_v7_login_user($1,$2,$3,$4,$5) as result',
+      ['workspace-test', session.site.site_session_id, 'owner', 'owner-pass', 'tab-user-logout']
+    ));
+    assert.equal(relogin.ok, true);
+    assert.notEqual(relogin.user_session_id, session.login.user_session_id);
+  } finally {
+    await db.close();
+  }
+});
+
 test('V7 module lease 支援不同項目並行、同項排他、冪等重送與 fencing 接管', async () => {
   const db = await createLegacyDatabase();
   try {
