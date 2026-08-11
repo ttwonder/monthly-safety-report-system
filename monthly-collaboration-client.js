@@ -313,12 +313,16 @@
 
     draftKey(entityType, entityId) { return `monthly_v7_draft:${this.leaseKey(entityType, entityId)}`; }
 
-    saveDraft(entityType, entityId, payload, baseRevision) {
+    saveDraft(entityType, entityId, payload, baseRevision, options = {}) {
       if (!this.draftStorage) return;
-      this.draftStorage.setItem(this.draftKey(entityType, entityId), JSON.stringify({
+      const draft = {
         entityType, entityId, baseRevision: Number(baseRevision || 0), payload,
         savedAt: new Date().toISOString()
-      }));
+      };
+      if (options && options.supersedesOperation) {
+        draft.supersedesOperation = this.cloneJson(options.supersedesOperation, null);
+      }
+      this.draftStorage.setItem(this.draftKey(entityType, entityId), JSON.stringify(draft));
     }
 
     clearDraft(entityType, entityId) {
@@ -332,27 +336,384 @@
       return payload;
     }
 
+    pendingOperationError(code = 'PENDING_OPERATION_UNRESOLVED') {
+      const error = new Error(code);
+      error.code = code;
+      return error;
+    }
+
+    validatePendingEnvelope(pending) {
+      if (!pending || typeof pending !== 'object' || Array.isArray(pending)) {
+        throw this.pendingOperationError();
+      }
+      const actualKeys = Object.keys(pending).sort();
+      const legacyKeys = ['createdAt', 'operationId', 'signature'];
+      const actorKeys = ['actorUserId', 'createdAt', 'operationId', 'signature'];
+      const matches = (keys) => actualKeys.length === keys.length
+        && actualKeys.every((key, index) => key === keys[index]);
+      const actorEnvelope = matches(actorKeys);
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const parsedCreatedAt = new Date(pending && pending.createdAt);
+      if ((!matches(legacyKeys) && !actorEnvelope)
+        || typeof pending.operationId !== 'string' || !pending.operationId
+        || !uuidPattern.test(pending.operationId)
+        || typeof pending.signature !== 'string' || !pending.signature
+        || typeof pending.createdAt !== 'string' || !pending.createdAt
+        || Number.isNaN(parsedCreatedAt.getTime())
+        || parsedCreatedAt.toISOString() !== pending.createdAt
+        || (actorEnvelope && (typeof pending.actorUserId !== 'string' || !pending.actorUserId))) {
+        throw this.pendingOperationError();
+      }
+      let previousParams;
+      try { previousParams = JSON.parse(pending.signature); }
+      catch (_error) { throw this.pendingOperationError(); }
+      if (!previousParams || typeof previousParams !== 'object' || Array.isArray(previousParams)) {
+        throw this.pendingOperationError();
+      }
+      const leasePairs = [
+        ['p_lease_id', 'p_fencing_token'],
+        ['p_module_lease_id', 'p_module_fencing_token'],
+        ['p_structure_lease_id', 'p_structure_fencing_token']
+      ];
+      for (const [leaseKey, fencingKey] of leasePairs) {
+        const hasLease = Object.prototype.hasOwnProperty.call(previousParams, leaseKey);
+        const hasFencing = Object.prototype.hasOwnProperty.call(previousParams, fencingKey);
+        if (hasLease !== hasFencing) throw this.pendingOperationError();
+        if (hasLease && (typeof previousParams[leaseKey] !== 'string'
+          || !previousParams[leaseKey].trim()
+          || !Number.isSafeInteger(previousParams[fencingKey])
+          || previousParams[fencingKey] <= 0)) {
+          throw this.pendingOperationError();
+        }
+      }
+      return previousParams;
+    }
+
+    isExactLegacySnapshotSignature(rpcName, previousParams) {
+      if (rpcName !== 'monthly_v7_create_report_snapshot'
+        || !previousParams || typeof previousParams !== 'object' || Array.isArray(previousParams)) return false;
+      const expectedKeys = ['p_kind', 'p_report_id', 'p_site_session_id', 'p_user_session_id', 'p_workspace_key'];
+      const actualKeys = Object.keys(previousParams).sort();
+      if (actualKeys.length !== expectedKeys.length
+        || !actualKeys.every((key, index) => key === expectedKeys[index])) return false;
+      return expectedKeys.every((key) => typeof previousParams[key] === 'string' && previousParams[key].length > 0);
+    }
+
+    bindPendingActor(rpcName, pending, previousParams) {
+      const currentActorId = String(this.currentUser() && this.currentUser().id || '');
+      if (!currentActorId) throw this.pendingOperationError('PENDING_OPERATION_ACTOR_UNRESOLVED');
+      const legacySnapshotCandidate = rpcName === 'monthly_v7_create_report_snapshot'
+        && Object.prototype.hasOwnProperty.call(previousParams, 'p_kind')
+        && !Object.prototype.hasOwnProperty.call(previousParams, 'p_snapshot_kind');
+      const safeLegacySnapshotShape = this.isExactLegacySnapshotSignature(rpcName, previousParams);
+      if (legacySnapshotCandidate && !safeLegacySnapshotShape) {
+        throw this.pendingOperationError();
+      }
+      if (pending.actorUserId) {
+        if (String(pending.actorUserId) !== currentActorId) {
+          throw this.pendingOperationError('PENDING_OPERATION_ACTOR_MISMATCH');
+        }
+        return pending;
+      }
+      if (!safeLegacySnapshotShape) {
+        throw this.pendingOperationError('PENDING_OPERATION_ACTOR_UNRESOLVED');
+      }
+      return Object.assign({}, pending, { actorUserId: currentActorId });
+    }
+
     migratePendingOperationSignature(rpcName, params, pendingKey, pending, signature) {
-      if (!pending || pending.signature === signature) return pending;
-      if (rpcName !== 'monthly_v7_create_report_snapshot' || typeof pending !== 'object' || Array.isArray(pending)) return pending;
+      if (!pending) return pending;
+      this.validatePendingEnvelope(pending);
+      if (pending.signature === signature) return pending;
       const hasExactKeys = (value, expected) => {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
         const actual = Object.keys(value).sort();
         const wanted = expected.slice().sort();
         return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
       };
-      if (!hasExactKeys(pending, ['operationId', 'signature', 'createdAt'])
+      const legacyEnvelope = hasExactKeys(pending, ['operationId', 'signature', 'createdAt']);
+      const actorEnvelope = hasExactKeys(pending, ['operationId', 'signature', 'createdAt', 'actorUserId']);
+      if ((!legacyEnvelope && !actorEnvelope)
         || typeof pending.operationId !== 'string' || !pending.operationId
-        || typeof pending.signature !== 'string' || typeof pending.createdAt !== 'string') return pending;
+        || typeof pending.signature !== 'string' || typeof pending.createdAt !== 'string'
+        || (actorEnvelope && (typeof pending.actorUserId !== 'string' || !pending.actorUserId))
+        || !params || typeof params !== 'object' || Array.isArray(params)) return pending;
       let previousParams;
       try { previousParams = JSON.parse(pending.signature); } catch { return pending; }
-      const identityKeys = ['p_workspace_key', 'p_site_session_id', 'p_user_session_id', 'p_report_id'];
-      if (!hasExactKeys(params, [...identityKeys, 'p_snapshot_kind'])
-        || !hasExactKeys(previousParams, [...identityKeys, 'p_kind'])
-        || pendingKey !== `create_snapshot:${params.p_report_id}:${params.p_snapshot_kind}`
-        || identityKeys.some((key) => previousParams[key] !== params[key])
-        || previousParams.p_kind !== params.p_snapshot_kind) return pending;
-      return Object.assign({}, pending, { signature });
+      if (!previousParams || typeof previousParams !== 'object' || Array.isArray(previousParams)) return pending;
+      const sessionKeys = new Set([
+        'p_site_session_id', 'p_user_session_id', 'p_client_session_id'
+      ]);
+      const leaseKeys = new Set([
+        'p_lease_id', 'p_fencing_token',
+        'p_module_lease_id', 'p_module_fencing_token',
+        'p_structure_lease_id', 'p_structure_fencing_token'
+      ]);
+      const canonicalValue = (value) => {
+        if (Array.isArray(value)) return `[${value.map(canonicalValue).join(',')}]`;
+        if (value && typeof value === 'object') {
+          return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalValue(value[key])}`).join(',')}}`;
+        }
+        return JSON.stringify(value);
+      };
+      const normalizeRequest = (value) => {
+        const stable = JSON.parse(JSON.stringify(value));
+        if (rpcName === 'monthly_v7_create_report_snapshot'
+          && Object.prototype.hasOwnProperty.call(stable, 'p_kind')
+          && !Object.prototype.hasOwnProperty.call(stable, 'p_snapshot_kind')) {
+          stable.p_snapshot_kind = stable.p_kind;
+          delete stable.p_kind;
+        }
+        return stable;
+      };
+      const withoutKeys = (value, keys) => {
+        const stable = JSON.parse(JSON.stringify(value));
+        for (const key of keys) delete stable[key];
+        return stable;
+      };
+      if (rpcName === 'monthly_v7_create_report_snapshot'
+        && pendingKey !== `create_snapshot:${params.p_report_id}:${params.p_snapshot_kind}`) return pending;
+      const previousRequest = normalizeRequest(previousParams);
+      const currentRequest = normalizeRequest(params);
+      if (canonicalValue(withoutKeys(previousRequest, sessionKeys)) === canonicalValue(withoutKeys(currentRequest, sessionKeys))) {
+        return Object.assign({}, pending, { signature });
+      }
+      const recoverableKeys = new Set([...sessionKeys, ...leaseKeys]);
+      if (canonicalValue(withoutKeys(previousRequest, recoverableKeys)) !== canonicalValue(withoutKeys(currentRequest, recoverableKeys))) return pending;
+      const replayParams = JSON.parse(JSON.stringify(previousRequest));
+      for (const key of sessionKeys) {
+        if (Object.prototype.hasOwnProperty.call(currentRequest, key)) replayParams[key] = currentRequest[key];
+        else delete replayParams[key];
+      }
+      return Object.assign({}, pending, {
+        signature: JSON.stringify(replayParams),
+        replayParams
+      });
+    }
+
+    operationCanonical(value) {
+      if (Array.isArray(value)) return `[${value.map((entry) => this.operationCanonical(entry)).join(',')}]`;
+      if (value && typeof value === 'object') {
+        return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${this.operationCanonical(value[key])}`).join(',')}}`;
+      }
+      return JSON.stringify(value);
+    }
+
+    operationBusinessParams(value) {
+      const transientKeys = new Set([
+        'p_site_session_id', 'p_user_session_id', 'p_client_session_id',
+        'p_lease_id', 'p_fencing_token',
+        'p_module_lease_id', 'p_module_fencing_token',
+        'p_structure_lease_id', 'p_structure_fencing_token'
+      ]);
+      const result = JSON.parse(JSON.stringify(value || {}));
+      if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+      transientKeys.forEach((key) => delete result[key]);
+      return result;
+    }
+
+    pendingTargetsEntity(rpcName, pendingKey, previousParams, entityType, entityId) {
+      const hasExactKeys = (value, expected) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        const actual = Object.keys(value).sort();
+        const wanted = expected.slice().sort();
+        return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+      };
+      const id = String(entityId || '');
+      if (rpcName === 'monthly_v7_save_module') {
+        return entityType === 'module'
+          && pendingKey === `save_module:${id}`
+          && String(previousParams.p_module_id || '') === id
+          && Number.isFinite(Number(previousParams.p_expected_revision))
+          && hasExactKeys(previousParams, [
+            'p_workspace_key', 'p_user_session_id', 'p_client_session_id',
+            'p_module_id', 'p_expected_revision', 'p_lease_id', 'p_fencing_token', 'p_payload'
+          ]);
+      }
+      if (rpcName === 'monthly_v7_save_module_batch') {
+        const report = this.currentReport();
+        return entityType === 'module'
+          && report && pendingKey === `save_module_batch:${report.id}`
+          && String(previousParams.p_report_id || '') === String(report.id)
+          && Array.isArray(previousParams.p_changes)
+          && previousParams.p_changes.some((row) => String(row && row.moduleId || '') === id)
+          && hasExactKeys(previousParams, [
+            'p_workspace_key', 'p_user_session_id', 'p_client_session_id',
+            'p_report_id', 'p_changes', 'p_lease_id', 'p_fencing_token'
+          ]);
+      }
+      if (rpcName === 'monthly_v7_save_report_meta') {
+        return entityType === 'report_meta'
+          && pendingKey === `save_report_meta:${id}`
+          && String(previousParams.p_report_id || '') === id
+          && Number.isFinite(Number(previousParams.p_expected_revision))
+          && hasExactKeys(previousParams, [
+            'p_workspace_key', 'p_user_session_id', 'p_client_session_id',
+            'p_report_id', 'p_expected_revision', 'p_title', 'p_report_date',
+            'p_period', 'p_settings', 'p_lease_id', 'p_fencing_token'
+          ]);
+      }
+      return false;
+    }
+
+    pendingMarkerSignatureMatches(markerSignature, pendingSignature) {
+      if (markerSignature === pendingSignature) return true;
+      let markerParams;
+      let pendingParams;
+      try {
+        markerParams = JSON.parse(markerSignature);
+        pendingParams = JSON.parse(pendingSignature);
+      } catch (_error) { return false; }
+      if (!markerParams || !pendingParams || typeof markerParams !== 'object'
+        || typeof pendingParams !== 'object' || Array.isArray(markerParams) || Array.isArray(pendingParams)) {
+        return false;
+      }
+      const markerKeys = Object.keys(markerParams).sort();
+      const pendingKeys = Object.keys(pendingParams).sort();
+      if (this.operationCanonical(markerKeys) !== this.operationCanonical(pendingKeys)) return false;
+      const sessionKeys = new Set(['p_site_session_id', 'p_user_session_id', 'p_client_session_id']);
+      return markerKeys.every((key) => {
+        if (sessionKeys.has(key)) {
+          return typeof markerParams[key] === 'string' && markerParams[key].trim()
+            && typeof pendingParams[key] === 'string' && pendingParams[key].trim();
+        }
+        return this.operationCanonical(markerParams[key]) === this.operationCanonical(pendingParams[key]);
+      });
+    }
+
+    pendingEntityPayload(rpcName, previousParams, entityId) {
+      if (rpcName === 'monthly_v7_save_module') return previousParams.p_payload;
+      if (rpcName === 'monthly_v7_save_module_batch') {
+        const row = (previousParams.p_changes || [])
+          .find((entry) => String(entry && entry.moduleId || '') === String(entityId || ''));
+        return row && row.payload;
+      }
+      if (rpcName === 'monthly_v7_save_report_meta') {
+        return {
+          title: String(previousParams.p_title || ''),
+          date: String(previousParams.p_report_date || ''),
+          period: this.cloneJson(previousParams.p_period, {}),
+          settings: this.cloneJson(previousParams.p_settings, {})
+        };
+      }
+      return undefined;
+    }
+
+    saveSupersedingDraft(entityType, entityId, payload, baseRevision, rpcName, pendingKey) {
+      let supersedesOperation = null;
+      if (this.draftStorage) {
+        const pendingRaw = this.draftStorage.getItem(`monthly_v7_pending:${pendingKey}`);
+        if (pendingRaw !== null) {
+          try {
+            let pending = JSON.parse(pendingRaw);
+            const previousParams = this.validatePendingEnvelope(pending);
+            pending = this.bindPendingActor(rpcName, pending, previousParams);
+            const pendingPayload = this.pendingEntityPayload(rpcName, previousParams, entityId);
+            const isActualSuccessor = rpcName === 'monthly_v7_save_module_batch'
+              || this.operationCanonical(payload) !== this.operationCanonical(pendingPayload);
+            if (pending.actorUserId && isActualSuccessor
+              && this.pendingTargetsEntity(rpcName, pendingKey, previousParams, entityType, entityId)) {
+              supersedesOperation = {
+                rpcName, pendingKey,
+                operationId: pending.operationId,
+                signature: pending.signature
+              };
+            }
+          } catch (_error) {
+            supersedesOperation = null;
+          }
+        }
+      }
+      this.saveDraft(entityType, entityId, payload, baseRevision, { supersedesOperation });
+      return supersedesOperation;
+    }
+
+    async reconcileSupersededPending(rpcName, pendingKey, targets) {
+      if (!this.draftStorage || !Array.isArray(targets) || !targets.length) return null;
+      const pendingRaw = this.draftStorage.getItem(`monthly_v7_pending:${pendingKey}`);
+      if (pendingRaw === null) return null;
+      let pending;
+      try { pending = JSON.parse(pendingRaw); }
+      catch (_error) { throw this.pendingOperationError(); }
+      const previousParams = this.validatePendingEnvelope(pending);
+      pending = this.bindPendingActor(rpcName, pending, previousParams);
+      const markerKeys = ['operationId', 'pendingKey', 'rpcName', 'signature'];
+      let hasMarker = false;
+      for (const target of targets) {
+        const draft = this.readDraft(target.entityType, target.entityId);
+        const marker = draft && draft.supersedesOperation;
+        if (!marker) continue;
+        hasMarker = true;
+        const actualKeys = marker && typeof marker === 'object' && !Array.isArray(marker)
+          ? Object.keys(marker).sort() : [];
+        if (actualKeys.length !== markerKeys.length
+          || !actualKeys.every((key, index) => key === markerKeys[index])
+          || marker.rpcName !== rpcName
+          || marker.pendingKey !== pendingKey
+          || marker.operationId !== pending.operationId
+          || !this.pendingMarkerSignatureMatches(marker.signature, pending.signature)
+          || this.operationCanonical(draft.payload) !== this.operationCanonical(target.payload)
+          || !this.pendingTargetsEntity(rpcName, pendingKey, previousParams, target.entityType, target.entityId)) {
+          throw this.pendingOperationError();
+        }
+      }
+      if (!hasMarker) return null;
+      if (targets.some((target) => {
+        const draft = this.readDraft(target.entityType, target.entityId);
+        return !draft || !draft.supersedesOperation;
+      })) throw this.pendingOperationError();
+      if (rpcName === 'monthly_v7_save_module_batch') {
+        const pendingIds = (previousParams.p_changes || []).map((row) => String(row && row.moduleId || '')).sort();
+        const targetIds = targets.map((target) => String(target.entityId || '')).sort();
+        if (this.operationCanonical(pendingIds) !== this.operationCanonical(targetIds)) {
+          throw this.pendingOperationError();
+        }
+      }
+      for (const key of ['p_site_session_id', 'p_user_session_id', 'p_client_session_id']) {
+        if (!Object.prototype.hasOwnProperty.call(previousParams, key)) continue;
+        if (key === 'p_site_session_id') previousParams[key] = this.siteSession && this.siteSession.id;
+        if (key === 'p_user_session_id') previousParams[key] = this.userSession && this.userSession.id;
+        if (key === 'p_client_session_id') previousParams[key] = this.clientSessionId;
+      }
+      return {
+        result: await this.executeOperation(rpcName, previousParams, pendingKey),
+        previousParams
+      };
+    }
+
+    async replayPendingBeforeLease(rpcName, pendingKey, desiredParams) {
+      if (!this.draftStorage) return null;
+      const storageKey = `monthly_v7_pending:${pendingKey}`;
+      const pendingRaw = this.draftStorage.getItem(storageKey);
+      if (pendingRaw === null) return null;
+      let pending;
+      try {
+        pending = JSON.parse(pendingRaw);
+      } catch (_error) {
+        const error = new Error('PENDING_OPERATION_UNRESOLVED');
+        error.code = 'PENDING_OPERATION_UNRESOLVED';
+        throw error;
+      }
+      const previousParams = this.validatePendingEnvelope(pending);
+      pending = this.bindPendingActor(rpcName, pending, previousParams);
+      if (rpcName === 'monthly_v7_create_report_snapshot'
+        && Object.prototype.hasOwnProperty.call(previousParams, 'p_kind')
+        && !Object.prototype.hasOwnProperty.call(previousParams, 'p_snapshot_kind')) {
+        previousParams.p_snapshot_kind = previousParams.p_kind;
+        delete previousParams.p_kind;
+      }
+      const desiredBusiness = this.operationCanonical(this.operationBusinessParams(desiredParams));
+      const previousBusiness = this.operationCanonical(this.operationBusinessParams(previousParams));
+      if (desiredBusiness !== previousBusiness) {
+        const error = new Error('PENDING_OPERATION_UNRESOLVED');
+        error.code = 'PENDING_OPERATION_UNRESOLVED';
+        throw error;
+      }
+      for (const key of ['p_site_session_id', 'p_user_session_id', 'p_client_session_id']) {
+        if (Object.prototype.hasOwnProperty.call(desiredParams, key)) previousParams[key] = desiredParams[key];
+        else delete previousParams[key];
+      }
+      return this.executeOperation(rpcName, previousParams, pendingKey);
     }
 
     async executeOperation(rpcName, params, pendingKey) {
@@ -360,22 +721,45 @@
       const signature = JSON.stringify(params);
       let pending = null;
       if (this.draftStorage) {
-        try { pending = JSON.parse(this.draftStorage.getItem(storageKey) || 'null'); } catch { pending = null; }
+        const pendingRaw = this.draftStorage.getItem(storageKey);
+        if (pendingRaw !== null) {
+          try {
+            pending = JSON.parse(pendingRaw);
+          } catch (_error) {
+            const error = new Error('PENDING_OPERATION_UNRESOLVED');
+            error.code = 'PENDING_OPERATION_UNRESOLVED';
+            throw error;
+          }
+          const previousParams = this.validatePendingEnvelope(pending);
+          pending = this.bindPendingActor(rpcName, pending, previousParams);
+        }
       }
       pending = this.migratePendingOperationSignature(rpcName, params, pendingKey, pending, signature);
-      if (pending && pending.signature !== signature) {
+      const currentActorId = String((this.currentUser() && this.currentUser().id) || '');
+      if (pending && pending.actorUserId && pending.actorUserId !== currentActorId) {
+        const error = new Error('PENDING_OPERATION_ACTOR_MISMATCH');
+        error.code = 'PENDING_OPERATION_ACTOR_MISMATCH';
+        throw error;
+      }
+      const operationParams = pending && pending.replayParams ? pending.replayParams : params;
+      const operationSignature = JSON.stringify(operationParams);
+      if (pending && pending.signature !== operationSignature) {
         const error = new Error('PENDING_OPERATION_UNRESOLVED');
         error.code = 'PENDING_OPERATION_UNRESOLVED';
         throw error;
       }
       const operationId = pending && pending.operationId ? pending.operationId : this.operationIdFactory();
-      if (this.draftStorage) this.draftStorage.setItem(storageKey, JSON.stringify({ operationId, signature, createdAt: new Date().toISOString() }));
-      const request = Object.assign({}, params, { p_operation_id: operationId });
+      const storedEnvelope = { operationId, signature: operationSignature, createdAt: new Date().toISOString() };
+      if (pending && pending.actorUserId) storedEnvelope.actorUserId = pending.actorUserId;
+      else if (!pending && currentActorId) storedEnvelope.actorUserId = currentActorId;
+      if (this.draftStorage) this.draftStorage.setItem(storageKey, JSON.stringify(storedEnvelope));
+      const request = Object.assign({}, operationParams, { p_operation_id: operationId });
       let lastError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
           const result = await this.transport.rpc(rpcName, request);
-          if (this.draftStorage) this.draftStorage.removeItem(storageKey);
+          const preserveMismatch = result && result.ok === false && result.error === 'IDEMPOTENCY_MISMATCH';
+          if (this.draftStorage && !preserveMismatch) this.draftStorage.removeItem(storageKey);
           return result;
         } catch (error) {
           lastError = error;
@@ -387,60 +771,154 @@
     async saveModule(item) {
       this.requireUserSession();
       const entityId = item && item._v7Id;
+      if (!entityId || !Number.isFinite(Number(item && item._v7Revision))) {
+        throw new TypeError('V7 module identity/revision is required');
+      }
+      const pendingKey = `save_module:${entityId}`;
+      const superseded = await this.reconcileSupersededPending(
+        'monthly_v7_save_module', pendingKey,
+        [{ entityType: 'module', entityId, payload: this.modulePayload(item) }]
+      );
+      if (superseded) {
+        const priorResult = superseded.result;
+        if (priorResult && priorResult.ok === true) {
+          item._v7Revision = Number(priorResult.revision);
+          this.watermark = Math.max(this.watermark, Number(priorResult.watermark || 0));
+          const row = this.snapshot && (this.snapshot.modules || [])
+            .find((entry) => String(entry.id) === String(entityId));
+          if (row) {
+            row.revision = Number(priorResult.revision);
+            row.payload = this.cloneJson(superseded.previousParams.p_payload, {});
+          }
+          this.leases.delete(this.leaseKey('module', entityId));
+        } else if (priorResult && priorResult.error === 'LEASE_LOST') {
+          this.leases.delete(this.leaseKey('module', entityId));
+        } else {
+          const code = priorResult && priorResult.error || 'SAVE_FAILED';
+          const error = new Error(code);
+          error.code = code;
+          error.result = priorResult;
+          if (typeof this.host.onConflict === 'function') {
+            this.host.onConflict({
+              entityType: 'module', entityId, draft: this.modulePayload(item), result: priorResult
+            });
+          }
+          throw error;
+        }
+      }
       const expectedRevision = Number(item && item._v7Revision);
-      if (!entityId || !Number.isFinite(expectedRevision)) throw new TypeError('V7 module identity/revision is required');
       const payload = this.modulePayload(item);
       this.saveDraft('module', entityId, payload, expectedRevision);
-      const lease = this.getLease('module', entityId) || await this.claimLease('module', entityId);
-      const result = await this.executeOperation('monthly_v7_save_module', {
+      const desiredParams = {
         p_workspace_key: this.config.workspaceKey,
         p_user_session_id: this.userSession.id,
         p_client_session_id: this.clientSessionId,
         p_module_id: entityId,
         p_expected_revision: expectedRevision,
-        p_lease_id: lease.leaseId,
-        p_fencing_token: lease.fencingToken,
         p_payload: payload
-      }, `save_module:${entityId}`);
-      if (!result || result.ok !== true) {
+      };
+      const fail = async (result, releaseCurrent = false) => {
         const code = result && result.error || 'SAVE_FAILED';
-        if (['LEASE_LOST', 'REVISION_CONFLICT', 'AUTHORITY_CHANGED'].includes(code)) this.leases.delete(this.leaseKey('module', entityId));
+        if (releaseCurrent) await this.releaseLease('module', entityId);
+        else if (['LEASE_LOST', 'REVISION_CONFLICT', 'AUTHORITY_CHANGED'].includes(code)) this.leases.delete(this.leaseKey('module', entityId));
         const error = new Error(code);
         error.code = code;
         error.result = result;
         if (typeof this.host.onConflict === 'function') this.host.onConflict({ entityType: 'module', entityId, draft: payload, result });
         throw error;
+      };
+      const complete = async (result, releaseCurrent = false) => {
+        if (releaseCurrent) await this.releaseLease('module', entityId);
+        else this.leases.delete(this.leaseKey('module', entityId));
+        item._v7Revision = Number(result.revision);
+        this.watermark = Math.max(this.watermark, Number(result.watermark || 0));
+        this.clearDraft('module', entityId);
+        if (typeof this.host.onItemSaved === 'function') this.host.onItemSaved({ entityType: 'module', entityId, revision: item._v7Revision });
+        return result;
+      };
+
+      const replayed = await this.replayPendingBeforeLease('monthly_v7_save_module', pendingKey, desiredParams);
+      if (replayed) {
+        if (replayed.ok === true) return complete(replayed, true);
+        if (replayed.error !== 'LEASE_LOST') return fail(replayed, true);
+        this.leases.delete(this.leaseKey('module', entityId));
       }
-      item._v7Revision = Number(result.revision);
-      this.watermark = Math.max(this.watermark, Number(result.watermark || 0));
-      this.leases.delete(this.leaseKey('module', entityId));
-      this.clearDraft('module', entityId);
-      if (typeof this.host.onItemSaved === 'function') this.host.onItemSaved({ entityType: 'module', entityId, revision: item._v7Revision });
-      return result;
+
+      const lease = this.getLease('module', entityId) || await this.claimLease('module', entityId);
+      const result = await this.executeOperation('monthly_v7_save_module', Object.assign({}, desiredParams, {
+        p_lease_id: lease.leaseId,
+        p_fencing_token: lease.fencingToken
+      }), pendingKey);
+      if (!result || result.ok !== true) return fail(result, false);
+      return complete(result, false);
     }
 
     async saveReportMeta(meta) {
       this.requireUserSession();
       const report = this.currentReport();
       if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
-      const lease = this.getLease('report_meta', report.id) || await this.claimLease('report_meta', report.id);
-      const result = this.commandResult(await this.executeOperation('monthly_v7_save_report_meta', {
+      const pendingKey = `save_report_meta:${report.id}`;
+      const payload = {
+        title: String(meta && meta.title || report.title || ''),
+        date: String(meta && meta.date || report.date || ''),
+        period: JSON.parse(JSON.stringify(meta && meta.period || report.period || {})),
+        settings: JSON.parse(JSON.stringify(meta && meta.settings || report.settings || {}))
+      };
+      const superseded = await this.reconcileSupersededPending(
+        'monthly_v7_save_report_meta', pendingKey,
+        [{ entityType: 'report_meta', entityId: report.id, payload }]
+      );
+      if (superseded) {
+        const priorResult = superseded.result;
+        if (priorResult && priorResult.ok === true) {
+          report.revision = Number(priorResult.revision);
+          report.title = String(superseded.previousParams.p_title || '');
+          report.date = String(superseded.previousParams.p_report_date || '');
+          report.period = this.cloneJson(superseded.previousParams.p_period, {});
+          report.settings = this.cloneJson(superseded.previousParams.p_settings, {});
+          this.watermark = Math.max(this.watermark, Number(priorResult.watermark || 0));
+          this.leases.delete(this.leaseKey('report_meta', report.id));
+        } else if (priorResult && priorResult.error === 'LEASE_LOST') {
+          this.leases.delete(this.leaseKey('report_meta', report.id));
+        } else {
+          return this.commandResult(priorResult, 'SAVE_REPORT_META_FAILED');
+        }
+      }
+      this.saveDraft('report_meta', report.id, payload, Number(report.revision));
+      const desiredParams = {
         p_workspace_key: this.config.workspaceKey,
         p_user_session_id: this.userSession.id,
         p_client_session_id: this.clientSessionId,
         p_report_id: report.id,
         p_expected_revision: Number(report.revision),
+        p_title: payload.title,
+        p_report_date: payload.date,
+        p_period: payload.period,
+        p_settings: payload.settings
+      };
+      const complete = async (result, releaseCurrent = false) => {
+        if (releaseCurrent) await this.releaseLease('report_meta', report.id);
+        else this.leases.delete(this.leaseKey('report_meta', report.id));
+        report.revision = Number(result.revision);
+        Object.assign(report, payload);
+        this.clearDraft('report_meta', report.id);
+        return result;
+      };
+      const replayed = await this.replayPendingBeforeLease('monthly_v7_save_report_meta', pendingKey, desiredParams);
+      if (replayed) {
+        if (replayed.ok === true) return complete(this.commandResult(replayed, 'SAVE_REPORT_META_FAILED'), true);
+        if (replayed.error !== 'LEASE_LOST') {
+          await this.releaseLease('report_meta', report.id);
+          return this.commandResult(replayed, 'SAVE_REPORT_META_FAILED');
+        }
+        this.leases.delete(this.leaseKey('report_meta', report.id));
+      }
+      const lease = this.getLease('report_meta', report.id) || await this.claimLease('report_meta', report.id);
+      const result = this.commandResult(await this.executeOperation('monthly_v7_save_report_meta', Object.assign({}, desiredParams, {
         p_lease_id: lease.leaseId,
-        p_fencing_token: lease.fencingToken,
-        p_title: String(meta && meta.title || report.title || ''),
-        p_report_date: String(meta && meta.date || report.date || ''),
-        p_period: JSON.parse(JSON.stringify(meta && meta.period || report.period || {})),
-        p_settings: JSON.parse(JSON.stringify(meta && meta.settings || report.settings || {}))
-      }, `save_report_meta:${report.id}`), 'SAVE_REPORT_META_FAILED');
-      report.revision = Number(result.revision);
-      Object.assign(report, meta || {});
-      this.leases.delete(this.leaseKey('report_meta', report.id));
-      return result;
+        p_fencing_token: lease.fencingToken
+      }), pendingKey), 'SAVE_REPORT_META_FAILED');
+      return complete(result, false);
     }
 
     async createModule(payload) {
@@ -495,27 +973,88 @@
       this.requireUserSession();
       const report = this.currentReport();
       if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
-      const changes = (items || []).map((item) => ({
+      let saveItems = Array.isArray(items) ? items.slice() : [];
+      if (!saveItems.length || saveItems.some((item) => !item || !item._v7Id
+        || !Number.isFinite(Number(item._v7Revision)))) {
+        throw new TypeError('batch modules require V7 identities/revisions');
+      }
+      const pendingKey = `save_module_batch:${report.id}`;
+      const superseded = await this.reconcileSupersededPending(
+        'monthly_v7_save_module_batch', pendingKey,
+        saveItems.map((item) => ({
+          entityType: 'module', entityId: item._v7Id, payload: this.modulePayload(item)
+        }))
+      );
+      if (superseded) {
+        const priorResult = superseded.result;
+        if (priorResult && priorResult.ok === true) {
+          const priorUpdates = new Map((priorResult.updated || [])
+            .map((row) => [String(row.entityId || row.entity_id), Number(row.revision)]));
+          const priorPayloads = new Map((superseded.previousParams.p_changes || [])
+            .map((row) => [String(row.moduleId), this.cloneJson(row.payload, {})]));
+          for (const item of saveItems) {
+            const id = String(item._v7Id);
+            if (priorUpdates.has(id)) item._v7Revision = priorUpdates.get(id);
+            const row = this.snapshot && (this.snapshot.modules || [])
+              .find((entry) => String(entry.id) === id);
+            if (row && priorPayloads.has(id)) {
+              row.revision = Number(item._v7Revision);
+              row.payload = this.cloneJson(priorPayloads.get(id), {});
+            }
+          }
+          this.watermark = Math.max(this.watermark, Number(priorResult.watermark || 0));
+          this.leases.delete(this.leaseKey('kpi_batch', report.id));
+          saveItems = saveItems.filter((item) => {
+            const confirmed = priorPayloads.get(String(item._v7Id));
+            const changed = this.operationCanonical(this.modulePayload(item))
+              !== this.operationCanonical(confirmed);
+            if (!changed) this.clearDraft('module', item._v7Id);
+            return changed;
+          });
+          if (!saveItems.length) return priorResult;
+        } else if (priorResult && priorResult.error === 'LEASE_LOST') {
+          this.leases.delete(this.leaseKey('kpi_batch', report.id));
+        } else {
+          return this.commandResult(priorResult, 'SAVE_MODULE_BATCH_FAILED');
+        }
+      }
+      const changes = saveItems.map((item) => ({
         moduleId: item && item._v7Id,
         expectedRevision: Number(item && item._v7Revision),
         payload: this.modulePayload(item)
       }));
-      if (!changes.length || changes.some((row) => !row.moduleId || !Number.isFinite(row.expectedRevision))) throw new TypeError('batch modules require V7 identities/revisions');
       changes.forEach((row) => this.saveDraft('module', row.moduleId, row.payload, row.expectedRevision));
-      const lease = this.getLease('kpi_batch', report.id) || await this.claimLease('kpi_batch', report.id);
+      const desiredParams = {
+        p_workspace_key: this.config.workspaceKey,
+        p_user_session_id: this.userSession.id,
+        p_client_session_id: this.clientSessionId,
+        p_report_id: report.id,
+        p_changes: changes
+      };
       let result;
+      let replayedTerminal = false;
       try {
-        result = this.commandResult(await this.executeOperation('monthly_v7_save_module_batch', {
-          p_workspace_key: this.config.workspaceKey,
-          p_user_session_id: this.userSession.id,
-          p_client_session_id: this.clientSessionId,
-          p_report_id: report.id,
-          p_lease_id: lease.leaseId,
-          p_fencing_token: lease.fencingToken,
-          p_changes: changes
-        }, `save_module_batch:${report.id}`), 'SAVE_MODULE_BATCH_FAILED');
+        const replayed = await this.replayPendingBeforeLease('monthly_v7_save_module_batch', pendingKey, desiredParams);
+        if (replayed) {
+          if (replayed.ok === true) {
+            result = this.commandResult(replayed, 'SAVE_MODULE_BATCH_FAILED');
+            replayedTerminal = true;
+          } else if (replayed.error !== 'LEASE_LOST') {
+            replayedTerminal = true;
+            result = this.commandResult(replayed, 'SAVE_MODULE_BATCH_FAILED');
+          } else {
+            this.leases.delete(this.leaseKey('kpi_batch', report.id));
+          }
+        }
+        if (!result) {
+          const lease = this.getLease('kpi_batch', report.id) || await this.claimLease('kpi_batch', report.id);
+          result = this.commandResult(await this.executeOperation('monthly_v7_save_module_batch', Object.assign({}, desiredParams, {
+            p_lease_id: lease.leaseId,
+            p_fencing_token: lease.fencingToken
+          }), pendingKey), 'SAVE_MODULE_BATCH_FAILED');
+        }
       } catch (error) {
-        this.leases.delete(this.leaseKey('kpi_batch', report.id));
+        await this.releaseLease('kpi_batch', report.id);
         if (['REVISION_CONFLICT', 'LEASE_LOST', 'AUTHORITY_CHANGED'].includes(error.code)
           && typeof this.host.onConflict === 'function') {
           this.host.onConflict({
@@ -532,7 +1071,8 @@
         if (updates.has(item._v7Id)) item._v7Revision = updates.get(item._v7Id);
         this.clearDraft('module', item._v7Id);
       });
-      this.leases.delete(this.leaseKey('kpi_batch', report.id));
+      if (replayedTerminal) await this.releaseLease('kpi_batch', report.id);
+      else this.leases.delete(this.leaseKey('kpi_batch', report.id));
       // The batch RPC atomically expires its kpi_batch lease, but each editor may
       // still hold an independently claimed module lease. Release those server
       // leases after the committed batch so another editor need not wait for TTL.

@@ -23,7 +23,8 @@ function freshState() {
     ],
     passwords: { owner: 'owner-pass', operator: 'operator-pass' },
     sitePassword: 'gate-pass',
-    siteSessions: new Map(), userSessions: new Map(), leases: new Map(), operations: new Map(), deletedModules: [],
+    siteSessions: new Map(), userSessions: new Map(), leases: new Map(), operations: new Map(), deletedModules: [], snapshots: [],
+    hangRpcCounts: new Map(), hangAfterCommitCounts: new Map(),
     sequence: 0, events: []
   };
 }
@@ -31,6 +32,11 @@ function freshState() {
 let state = freshState();
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const now = () => Date.now();
+const canonical = (value) => {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+};
 
 function userForSession(id) {
   const session = state.userSessions.get(id);
@@ -43,6 +49,18 @@ function event(entityType, entityId, revision, operationId) {
   return row;
 }
 
+function replayOperation(operationId, actorUserId, requestHash) {
+  const existing = state.operations.get(operationId);
+  if (!existing) return null;
+  if (existing.actorUserId !== actorUserId || existing.requestHash !== requestHash) return { ok: false, error: 'IDEMPOTENCY_MISMATCH' };
+  return clone(existing.result);
+}
+
+function storeOperation(operationId, actorUserId, requestHash, result) {
+  state.operations.set(operationId, { actorUserId, requestHash, result: clone(result) });
+  return clone(result);
+}
+
 function resultState() {
   return {
     report: state.report,
@@ -50,6 +68,13 @@ function resultState() {
     records: state.records,
     deletedModules: state.deletedModules,
     sequence: state.sequence,
+    snapshots: state.snapshots,
+    operations: Array.from(state.operations.entries()).map(([operationId, operation]) => ({
+      operationId,
+      actorUserId: operation.actorUserId || '',
+      requestHash: operation.requestHash || '',
+      result: operation.result || operation
+    })),
     leases: Array.from(state.leases.entries()).map(([key, value]) => ({ key, ...value }))
   };
 }
@@ -100,19 +125,30 @@ function rpc(name, p) {
     return { ok: true, entity_type: p.p_entity_type, entity_id: p.p_entity_id, lease_id: lease.leaseId, fencing_token: lease.fencingToken, holder_user_id: lease.holderUserId, client_session_id: lease.clientSessionId, expires_at: new Date(lease.expiresAt).toISOString() };
   }
   if (name === 'monthly_v7_save_module') {
-    if (state.operations.has(p.p_operation_id)) return clone(state.operations.get(p.p_operation_id));
+    const user = userForSession(p.p_user_session_id);
+    if (!user) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const requestHash = canonical({
+      command: 'save_module', entityId: p.p_module_id, expectedRevision: Number(p.p_expected_revision),
+      leaseId: p.p_lease_id, fencingToken: Number(p.p_fencing_token), payload: p.p_payload
+    });
+    const replay = replayOperation(p.p_operation_id, user.id, requestHash);
+    if (replay) return replay;
     const key = `module:${p.p_module_id}`;
     const lease = state.leases.get(key);
     const module = state.modules.find((entry) => entry.id === p.p_module_id);
-    if (!lease || lease.expiresAt <= now() || lease.leaseId !== p.p_lease_id || lease.fencingToken !== Number(p.p_fencing_token) || lease.clientSessionId !== p.p_client_session_id) return { ok: false, error: 'LEASE_LOST' };
-    if (!module || module.revision !== Number(p.p_expected_revision)) return { ok: false, error: 'REVISION_CONFLICT', currentRevision: module && module.revision };
+    if (!lease || lease.expiresAt <= now() || lease.leaseId !== p.p_lease_id || lease.fencingToken !== Number(p.p_fencing_token)
+      || lease.clientSessionId !== p.p_client_session_id || lease.holderUserId !== user.id) {
+      return storeOperation(p.p_operation_id, user.id, requestHash, { ok: false, error: 'LEASE_LOST' });
+    }
+    if (!module || module.revision !== Number(p.p_expected_revision)) {
+      return storeOperation(p.p_operation_id, user.id, requestHash, { ok: false, error: 'REVISION_CONFLICT', currentRevision: module && module.revision });
+    }
     module.payload = clone(p.p_payload);
     module.revision += 1;
     lease.expiresAt = now() - 1;
     event('module', module.id, module.revision, p.p_operation_id);
     const result = { ok: true, entityId: module.id, revision: module.revision, watermark: state.sequence };
-    state.operations.set(p.p_operation_id, result);
-    return clone(result);
+    return storeOperation(p.p_operation_id, user.id, requestHash, result);
   }
   if (name === 'monthly_v7_delete_module') {
     if (state.operations.has(p.p_operation_id)) return clone(state.operations.get(p.p_operation_id));
@@ -169,10 +205,17 @@ function rpc(name, p) {
       error.statusCode = 404;
       throw error;
     }
-    const snapshot = { report: clone(state.report), modules: clone(state.modules), records: clone(state.records) };
-    snapshot.report.title = '正式快照標題';
-    if (snapshot.modules[0]) snapshot.modules[0].payload.title = '正式快照模塊';
-    return { ok: true, snapshotId: randomUUID(), contentSha256: 'fake-sha256', snapshot };
+    const session = state.userSessions.get(p.p_user_session_id);
+    const user = userForSession(p.p_user_session_id);
+    if (!session || !user || session.siteSessionId !== p.p_site_session_id) return { ok: false, error: 'READ_SESSION_INVALID' };
+    const requestHash = canonical({ command: 'create_report_snapshot', reportId: p.p_report_id, snapshotKind: p.p_snapshot_kind });
+    const replay = replayOperation(p.p_operation_id, user.id, requestHash);
+    if (replay) return replay;
+    const snapshotId = randomUUID();
+    const snapshot = { report: clone(state.report), modules: clone(state.modules), records: clone(state.records), watermark: state.sequence };
+    const result = { ok: true, snapshotId, snapshotKind: p.p_snapshot_kind, contentSha256: 'fake-sha256', snapshot, operationId: p.p_operation_id };
+    state.snapshots.push({ snapshotId, operationId: p.p_operation_id, actorUserId: user.id, watermark: snapshot.watermark, reportRevision: snapshot.report.revision, modules: clone(snapshot.modules) });
+    return storeOperation(p.p_operation_id, user.id, requestHash, result);
   }
   return { ok: false, error: `FAKE_RPC_NOT_IMPLEMENTED:${name}` };
 }
@@ -197,12 +240,41 @@ const server = http.createServer((req, res) => {
     event('module', module.id, module.revision, randomUUID());
     res.writeHead(204); return res.end();
   }
+  if (url.pathname === '/__fake_drop_first_module_lease' && req.method === 'POST') {
+    state.leases.delete(`module:${state.modules[0].id}`);
+    res.writeHead(204); return res.end();
+  }
+  if (url.pathname === '/__fake_hang_rpc' && req.method === 'POST') {
+    const name = String(url.searchParams.get('name') || '');
+    const rawCount = String(url.searchParams.get('count') || '1');
+    const count = rawCount === 'always' ? -1 : Math.max(0, Number(rawCount));
+    if (url.searchParams.get('mode') === 'after_commit') state.hangAfterCommitCounts.set(name, count);
+    else state.hangRpcCounts.set(name, count);
+    res.writeHead(204); return res.end();
+  }
   if (url.pathname === '/__fake_state') { res.writeHead(200, { 'Content-Type': mime['.json'] }); return res.end(JSON.stringify(resultState())); }
   if (url.pathname === '/__fake_rpc' && req.method === 'POST') {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
-      try { const request = JSON.parse(body || '{}'); const data = rpc(request.name, request.params || {}); res.writeHead(200, { 'Content-Type': mime['.json'] }); res.end(JSON.stringify(data)); }
+      try {
+        const request = JSON.parse(body || '{}');
+        const remainingAfterCommit = Number(state.hangAfterCommitCounts.get(request.name) || 0);
+        if (remainingAfterCommit === -1 || remainingAfterCommit > 0) {
+          rpc(request.name, request.params || {});
+          if (remainingAfterCommit > 0) state.hangAfterCommitCounts.set(request.name, remainingAfterCommit - 1);
+          return;
+        }
+        const remainingHangs = Number(state.hangRpcCounts.get(request.name) || 0);
+        if (remainingHangs === -1) return;
+        if (remainingHangs > 0) {
+          state.hangRpcCounts.set(request.name, remainingHangs - 1);
+          return;
+        }
+        const data = rpc(request.name, request.params || {});
+        res.writeHead(200, { 'Content-Type': mime['.json'] });
+        res.end(JSON.stringify(data));
+      }
       catch (error) {
         res.writeHead(Number(error.statusCode) || 500, { 'Content-Type': mime['.json'] });
         res.end(JSON.stringify({ message: error.message, code: error.code || 'FAKE_RPC_ERROR', details: error.details || '' }));

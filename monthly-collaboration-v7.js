@@ -21,11 +21,30 @@
   }
 
   class SupabaseV7Transport {
-    constructor(supabaseGlobal) {
+    constructor(supabaseGlobal, options = {}) {
       this.supabaseGlobal = supabaseGlobal;
       this.client = null;
       this.configKey = '';
       this.channels = new Set();
+      const configuredTimeout = Number(options.requestTimeoutMs ?? root.MONTHLY_V7_RPC_TIMEOUT_MS ?? 10000);
+      this.requestTimeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 10000;
+    }
+
+    async withTimeout(promise, operationName) {
+      let timer = null;
+      const timeout = new Promise((resolve, reject) => {
+        timer = root.setTimeout(() => {
+          const error = new Error('RPC_TIMEOUT');
+          error.code = 'RPC_TIMEOUT';
+          error.operation = operationName;
+          reject(error);
+        }, this.requestTimeoutMs);
+      });
+      try {
+        return await Promise.race([promise, timeout]);
+      } finally {
+        if (timer !== null) root.clearTimeout(timer);
+      }
     }
 
     async ensureAnonymous(config) {
@@ -59,7 +78,7 @@
 
     async rpc(name, params) {
       if (!this.client) throw new Error('SUPABASE_CLIENT_NOT_READY');
-      const response = await this.client.rpc(name, params || {});
+      const response = await this.withTimeout(this.client.rpc(name, params || {}), name);
       if (response.error) {
         const error = new Error(response.error.message || response.error.details || name);
         error.code = response.error.code || 'SUPABASE_RPC_ERROR';
@@ -219,7 +238,7 @@
       return new Map(((this.client.snapshot && this.client.snapshot.modules) || []).map((row) => [row.id, row]));
     }
 
-    syncModuleBaseline(item) {
+    syncModuleBaseline(item, confirmedPayload) {
       if (!this.client.snapshot) return;
       if (!Array.isArray(this.client.snapshot.modules)) this.client.snapshot.modules = [];
       let row = this.client.snapshot.modules.find((entry) => entry.id === item._v7Id);
@@ -228,7 +247,7 @@
         this.client.snapshot.modules.push(row);
       }
       row.revision = Number(item._v7Revision);
-      row.payload = clone(this.client.modulePayload(item));
+      row.payload = clone(confirmedPayload === undefined ? this.client.modulePayload(item) : confirmedPayload);
     }
 
     hasModuleDraft(entityId) {
@@ -276,9 +295,41 @@
 
     async saveChangedModules(changed, options = {}) {
       const commit = async () => {
-        if (changed.length === 1) await this.client.saveModule(changed[0]);
-        else await this.client.saveModuleBatch(changed);
-        changed.forEach((item) => this.syncModuleBaseline(item));
+        const submitted = changed.map((item) => ({
+          item,
+          payload: clone(this.client.modulePayload(item))
+        }));
+        const isBatch = changed.length > 1;
+        const rpcName = isBatch ? 'monthly_v7_save_module_batch' : 'monthly_v7_save_module';
+        const pendingKey = isBatch
+          ? `save_module_batch:${this.currentReport() && this.currentReport().id}`
+          : `save_module:${changed[0] && changed[0]._v7Id}`;
+        let cloudConfirmed = false;
+        try {
+          if (!isBatch) await this.client.saveModule(changed[0]);
+          else await this.client.saveModuleBatch(changed);
+          cloudConfirmed = true;
+          submitted.forEach(({ item, payload }) => this.syncModuleBaseline(item, payload));
+        } finally {
+          for (const { item, payload } of submitted) {
+            let liveItem = item;
+            if (typeof this.host.getLocalEntity === 'function') {
+              try { liveItem = await this.host.getLocalEntity('module', item._v7Id) || item; }
+              catch (_error) { liveItem = item; }
+            }
+            const currentPayload = this.client.modulePayload(liveItem);
+            const changedWhileSaving = canonical(currentPayload) !== canonical(payload);
+            if ((!cloudConfirmed && isBatch) || changedWhileSaving) {
+              if (!cloudConfirmed && typeof this.client.saveSupersedingDraft === 'function') {
+                this.client.saveSupersedingDraft(
+                  'module', item._v7Id, currentPayload, Number(item._v7Revision), rpcName, pendingKey
+                );
+              } else {
+                this.client.saveDraft('module', item._v7Id, currentPayload, Number(item._v7Revision));
+              }
+            }
+          }
+        }
       };
       try {
         await commit();
@@ -351,13 +402,41 @@
         period: clone(report.period || {}),
         settings: clone(report.settings || {})
       } : null;
-      if (currentMeta && canonical(nextMeta) === canonical(currentMeta)) {
+      const hasMetaDraft = !!(report && this.client.readDraft('report_meta', report.id));
+      if (currentMeta && !hasMetaDraft && canonical(nextMeta) === canonical(currentMeta)) {
         return { ok: true, skipped: true, revision: Number(report.revision) };
       }
       return this.enqueue(async () => {
-        const result = await this.client.saveReportMeta(nextMeta);
-        this.setStatus(`月報資訊已保存｜revision ${result.revision}`, 'ok');
-        return result;
+        let cloudConfirmed = false;
+        try {
+          const result = await this.client.saveReportMeta(nextMeta);
+          cloudConfirmed = true;
+          this.setStatus(`月報資訊已保存｜revision ${result.revision}`, 'ok');
+          return result;
+        } finally {
+          if (typeof this.host.getLocalEntity === 'function') {
+            let live = null;
+            try { live = await this.host.getLocalEntity('report_meta', report.id); }
+            catch (_error) { live = null; }
+            const liveMeta = live && {
+              title: String(live.title || ''),
+              date: String(live.date || ''),
+              period: clone(live.period || {}),
+              settings: clone(live.settings || {})
+            };
+            if (liveMeta && canonical(liveMeta) !== canonical(nextMeta)) {
+              const baseRevision = Number(report.revision);
+              if (!cloudConfirmed && typeof this.client.saveSupersedingDraft === 'function') {
+                this.client.saveSupersedingDraft(
+                  'report_meta', report.id, liveMeta, baseRevision,
+                  'monthly_v7_save_report_meta', `save_report_meta:${report.id}`
+                );
+              } else {
+                this.client.saveDraft('report_meta', report.id, liveMeta, baseRevision);
+              }
+            }
+          }
+        }
       });
     }
 

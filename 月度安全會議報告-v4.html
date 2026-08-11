@@ -1154,16 +1154,16 @@
             position: fixed !important;
             left: -12000px !important;
             top: 0 !important;
-            width: 1160px !important;
-            max-width: 1160px !important;
+            width: 285mm !important;
+            max-width: 285mm !important;
             background: #fff !important;
             visibility: visible !important;
             pointer-events: none !important;
             z-index: -1 !important;
         }
         body.pdf-render-prep #pdfPrintArea .v1-selected-editor-print-clone {
-            width: 1160px !important;
-            max-width: 1160px !important;
+            width: 285mm !important;
+            max-width: 285mm !important;
             box-shadow: none !important;
         }
         body.pdf-render-prep #pdfPrintArea .chart-table-area { display: block !important; }
@@ -1234,6 +1234,10 @@
             body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] th {
                 page-break-inside: auto !important;
                 break-inside: auto !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .v1-selected-editor-print-clone [data-cloned-id="tableBody"] .module-card-row.pdf-keep-together {
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
             }
             body.pdf-print-mode #pdfPrintArea .content-block,
             body.pdf-print-mode #pdfPrintArea .custom-data-table,
@@ -2157,8 +2161,8 @@
 
     <script src="./vendor/supabase-2.112.2.js"></script>
     <script src="./monthly-collaboration-core.js"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.5"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.5"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.6"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.6"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont() {
@@ -4528,6 +4532,26 @@
             });
         }
 
+        function classifyV1PdfModulePageBreaks(printArea) {
+            const maxSinglePageHeight = 720;
+            const rows = Array.from(printArea?.querySelectorAll?.('.module-card-row') || []);
+            rows.forEach((row) => {
+                row.classList.remove('pdf-keep-together');
+                const measuredHeight = Math.ceil(Math.max(row.getBoundingClientRect().height || 0, row.scrollHeight || 0));
+                row.dataset.pdfModuleHeight = String(measuredHeight);
+                if (measuredHeight > 0 && measuredHeight <= maxSinglePageHeight) row.classList.add('pdf-keep-together');
+            });
+            return rows.map((row) => ({
+                height: Number(row.dataset.pdfModuleHeight || 0),
+                keepTogether: row.classList.contains('pdf-keep-together')
+            }));
+        }
+
+        window.addEventListener('beforeprint', () => {
+            if (!document.body.classList.contains('pdf-print-mode')) return;
+            classifyV1PdfModulePageBreaks(document.getElementById('pdfPrintArea'));
+        });
+
         async function prepareV1PdfPrintArea() {
             const printArea = document.getElementById('pdfPrintArea');
             if (!printArea) return false;
@@ -4538,6 +4562,7 @@
             await waitForV1PdfCharts();
             if (window.renderAllCharts) window.renderAllCharts();
             await new Promise(resolve => setTimeout(resolve, 180));
+            classifyV1PdfModulePageBreaks(printArea);
             return true;
         }
 
@@ -4594,25 +4619,245 @@
             }
         }
 
-        function printV1SelectedPdf() {
+        function v7FormalSnapshotIntentPayload(value, legacyId) {
+            const payload = JSON.parse(JSON.stringify(value || {}));
+            if (payload.content !== undefined) {
+                payload.columns = [payload.content];
+                delete payload.content;
+            }
+            if (!payload.columns) payload.columns = [''];
+            if (!payload.colLayout) payload.colLayout = payload.colCount ? Array(payload.colCount).fill('1').join(':') : '1';
+            if (typeof payload.selectedForPdf === 'undefined') payload.selectedForPdf = true;
+            if (typeof payload.pdfOrder === 'undefined') payload.pdfOrder = 0;
+            if (legacyId !== undefined && legacyId !== null) payload.id = String(legacyId);
+            else if (payload.id !== undefined && payload.id !== null) payload.id = String(payload.id);
+            if (!payload.moduleCategory) payload.moduleCategory = v1GetCategory(payload).id;
+            return payload;
+        }
+
+        function v7FormalSnapshotIntentSignatureFromSnapshot(snapshot) {
+            if (!snapshot?.report || !Array.isArray(snapshot.modules)) return '';
+            const modules = snapshot.modules.map((item, index) => ({
+                id: String(item?.id || `missing-${index}`),
+                payload: v7FormalSnapshotIntentPayload(
+                    item?.payload && typeof item.payload === 'object' ? item.payload : {},
+                    item?.legacyItemId == null ? item?.id : item.legacyItemId
+                )
+            }));
+            const report = snapshot.report;
+            const meta = {
+                title: String(report.title || '月度安全會議報告'),
+                date: String(report.date || ''),
+                period: report.period && typeof report.period === 'object' ? report.period : {},
+                settings: report.settings && typeof report.settings === 'object' ? report.settings : {}
+            };
+            return v7FormalSnapshotIntentCanonical({ modules, meta });
+        }
+
+        function v7FormalSnapshotCoversFloor(formal, floor) {
+            const snapshot = formal?.snapshot;
+            if (!snapshot?.report || !Array.isArray(snapshot.modules) || !floor?.intentSignature) return false;
+            if (String(snapshot.report.id || '') !== String(floor.reportId || '')) return false;
+            if (Number(snapshot.report.revision || 0) < Number(floor.reportRevision || 0)) return false;
+            if (Number(snapshot.watermark || 0) < Number(floor.watermark || 0)) return false;
+            const snapshotRevisions = new Map(snapshot.modules.map((item) => [String(item.id || ''), Number(item.revision || 0)]));
+            if (!floor.moduleRevisions.every((item) => snapshotRevisions.has(item.id) && snapshotRevisions.get(item.id) >= item.revision)) return false;
+            return v7FormalSnapshotIntentSignatureFromSnapshot(snapshot) === floor.intentSignature;
+        }
+
+        async function v7CreateFreshFormalSnapshot(kind, floor) {
+            let formal = null;
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+                formal = await window.MonthlyV7App.createReportSnapshot(kind);
+                if (v7FormalSnapshotCoversFloor(formal, floor)) return formal;
+            }
+            const error = new Error('STALE_SNAPSHOT_AFTER_SAVE');
+            error.code = 'STALE_SNAPSHOT_AFTER_SAVE';
+            throw error;
+        }
+
+        function v7FormalSnapshotIntentCanonical(value) {
+            if (Array.isArray(value)) return `[${value.map(v7FormalSnapshotIntentCanonical).join(',')}]`;
+            if (value && typeof value === 'object') {
+                return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${v7FormalSnapshotIntentCanonical(value[key])}`).join(',')}}`;
+            }
+            return JSON.stringify(value);
+        }
+
+        function v7FormalSnapshotIntentSignature() {
+            const app = window.MonthlyV7App;
+            const modules = reportData.map((item, index) => ({
+                id: String(item?._v7Id || item?.id || `local-${index}`),
+                payload: v7FormalSnapshotIntentPayload(
+                    app?.client?.modulePayload ? app.client.modulePayload(item) : item,
+                    item?.id
+                )
+            }));
+            return v7FormalSnapshotIntentCanonical({ modules, meta: v7CurrentReportMeta() });
+        }
+
+        function v7AssertFormalSnapshotIntent(floor) {
+            if (!floor?.intentSignature) return true;
+            if (v7FormalSnapshotIntentSignature() === floor.intentSignature) return true;
+            const error = new Error('PDF_CONTENT_CHANGED_AFTER_SAVE');
+            error.code = 'PDF_CONTENT_CHANGED_AFTER_SAVE';
+            throw error;
+        }
+
+        let v7FormalPrintLockToken = null;
+
+        function v7SyncFocusedEditorToModel(element) {
+            if (!element || element === document.body) return;
+            const editable = element.closest?.('.editable-div');
+            const row = editable?.closest?.('tr[data-index]');
+            const index = Number(row?.dataset?.index);
+            if (!editable || !Number.isInteger(index) || !reportData[index]) return;
+            if (editable.classList.contains('module-title-editor')) {
+                reportData[index].title = editable.innerHTML;
+                return;
+            }
+            const colIndex = Number(editable.dataset.colIndex);
+            if (Number.isInteger(colIndex) && colIndex >= 0 && Array.isArray(reportData[index].columns)) {
+                reportData[index].columns[colIndex] = sanitizeTrendChartHtml(editable.innerHTML);
+            }
+        }
+
+        function v7BlockInputWhileFormalPrint(event) {
+            if (!v7FormalPrintLockToken || !event.isTrusted) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+        }
+
+        ['beforeinput', 'keydown', 'paste', 'cut', 'drop', 'pointerdown', 'mousedown', 'touchstart']
+            .forEach(type => document.addEventListener(type, v7BlockInputWhileFormalPrint, true));
+
+        async function v7AcquireFormalPrintLock() {
+            if (v7FormalPrintLockToken) {
+                const error = new Error('PDF_PRINT_ALREADY_RUNNING');
+                error.code = 'PDF_PRINT_ALREADY_RUNNING';
+                throw error;
+            }
+            const token = {};
+            const focused = document.activeElement;
+            v7FormalPrintLockToken = token;
+            document.body.dataset.v7FormalPrintLock = 'true';
+            let overlay = document.getElementById('v7FormalPrintLockOverlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'v7FormalPrintLockOverlay';
+                overlay.setAttribute('aria-label', '正在建立正式 PDF，編輯暫時鎖定');
+                overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:progress;background:transparent;';
+                document.body.appendChild(overlay);
+            }
+            v7SyncFocusedEditorToModel(focused);
+            if (focused && typeof focused.blur === 'function') focused.blur();
             syncV1PdfSelectionFromDom();
-            if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
-            setTimeout(async () => {
-                syncV1PdfSelectionFromDom();
-                await saveToDB(reportData, Date.now());
-                let ok = false;
-                if (window.MonthlyV7App?.isActive?.() && v5CurrentUser()) {
-                    try {
-                        const formal = await window.MonthlyV7App.createReportSnapshot('pdf');
-                        ok = await prepareV7FormalSnapshotPrintArea(formal, { selectAll: false });
-                    } catch (error) { alert('建立正式 PDF 快照失敗：' + error.message); return; }
-                } else {
-                    ok = await prepareV1PdfPrintArea();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            return token;
+        }
+
+        function v7ReleaseFormalPrintLock(token) {
+            if (!token || token !== v7FormalPrintLockToken) return;
+            v7FormalPrintLockToken = null;
+            delete document.body.dataset.v7FormalPrintLock;
+            document.getElementById('v7FormalPrintLockOverlay')?.remove();
+        }
+
+        function v7StartVerifiedPrint(floor, printLockToken = null) {
+            try { v7AssertFormalSnapshotIntent(floor); }
+            catch (error) {
+                v7ReleaseFormalPrintLock(printLockToken);
+                alert('建立正式 PDF 快照失敗：' + error.message);
+                return false;
+            }
+            document.body.classList.add('pdf-print-mode');
+            setTimeout(() => {
+                try {
+                    v7AssertFormalSnapshotIntent(floor);
+                    window.print();
+                } catch (error) {
+                    document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
+                    alert('建立正式 PDF 快照失敗：' + error.message);
+                } finally {
+                    v7ReleaseFormalPrintLock(printLockToken);
                 }
-                if (!ok) return;
-                document.body.classList.add('pdf-print-mode');
-                setTimeout(() => window.print(), 80);
             }, 80);
+            return true;
+        }
+
+        async function v7ConfirmCloudBeforeFormalSnapshot() {
+            const app = window.MonthlyV7App;
+            if (!app?.isActive?.() || !v5CurrentUser()) return null;
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                const intentSignature = v7FormalSnapshotIntentSignature();
+                const saved = await saveToDB(reportData, Date.now(), { resolveRevisionConflict: true });
+                if (saved?.error) throw saved.error;
+                if (saved?.cloudSaved !== true) {
+                    const error = new Error('CLOUD_SAVE_NOT_CONFIRMED');
+                    error.code = 'CLOUD_SAVE_NOT_CONFIRMED';
+                    throw error;
+                }
+                await app.flush(v7CurrentReportMeta());
+                const report = app.client?.currentReport?.() || {};
+                const unresolvedModules = reportData.filter((item) => item?._v7Id && app.client?.readDraft?.('module', item._v7Id));
+                const unresolvedMeta = report.id && app.client?.readDraft?.('report_meta', report.id);
+                const changedDuringSave = v7FormalSnapshotIntentSignature() !== intentSignature;
+                if (changedDuringSave && attempt < 2) continue;
+                if (changedDuringSave) {
+                    const error = new Error('PDF_CONTENT_CHANGED_DURING_SAVE');
+                    error.code = 'PDF_CONTENT_CHANGED_DURING_SAVE';
+                    throw error;
+                }
+                if (unresolvedModules.length || unresolvedMeta) {
+                    const error = new Error('PENDING_DRAFTS_UNRESOLVED');
+                    error.code = 'PENDING_DRAFTS_UNRESOLVED';
+                    throw error;
+                }
+                return {
+                    reportId: String(report.id || ''),
+                    reportRevision: Number(report.revision || 0),
+                    watermark: Number(app.client?.watermark || 0),
+                    moduleRevisions: reportData
+                        .filter((item) => item?._v7Id && Number.isFinite(Number(item._v7Revision)))
+                        .map((item) => ({ id: String(item._v7Id), revision: Number(item._v7Revision) })),
+                    intentSignature
+                };
+            }
+            throw new Error('PDF_CONTENT_CHANGED_DURING_SAVE');
+        }
+
+        async function printV1SelectedPdf() {
+            syncV1PdfSelectionFromDom();
+            if (window.MonthlyV7App?.isActive?.() && v5CurrentUser()) {
+                let printLock = null;
+                try {
+                    printLock = await v7AcquireFormalPrintLock();
+                    syncV1PdfSelectionFromDom();
+                    const snapshotFloor = await v7ConfirmCloudBeforeFormalSnapshot();
+                    const formal = await v7CreateFreshFormalSnapshot('pdf', snapshotFloor);
+                    v7AssertFormalSnapshotIntent(snapshotFloor);
+                    const ok = await prepareV7FormalSnapshotPrintArea(formal, { selectAll: false });
+                    v7AssertFormalSnapshotIntent(snapshotFloor);
+                    if (!ok) {
+                        v7ReleaseFormalPrintLock(printLock);
+                        return;
+                    }
+                    if (v7StartVerifiedPrint(snapshotFloor, printLock)) printLock = null;
+                    else v7ReleaseFormalPrintLock(printLock);
+                } catch (error) {
+                    v7ReleaseFormalPrintLock(printLock);
+                    alert('建立正式 PDF 快照失敗：' + error.message);
+                }
+                return;
+            }
+            if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
+            await new Promise(resolve => setTimeout(resolve, 80));
+            syncV1PdfSelectionFromDom();
+            await saveToDB(reportData, Date.now());
+            const ok = await prepareV1PdfPrintArea();
+            if (!ok) return;
+            document.body.classList.add('pdf-print-mode');
+            setTimeout(() => window.print(), 80);
         }
 
         async function v1ListSavedReports() {
@@ -4649,18 +4894,29 @@
 
         async function printCurrentEditorReport() {
             // V7 必須從資料庫不可變 snapshot 列印；legacy mode 保留原 editor 列印。
-            if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
             if (window.MonthlyV7App?.isActive?.() && v5CurrentUser()) {
+                let printLock = null;
                 try {
-                    await saveToDB(reportData, Date.now());
-                    const formal = await window.MonthlyV7App.createReportSnapshot('pdf');
+                    printLock = await v7AcquireFormalPrintLock();
+                    const snapshotFloor = await v7ConfirmCloudBeforeFormalSnapshot();
+                    const formal = await v7CreateFreshFormalSnapshot('pdf', snapshotFloor);
+                    v7AssertFormalSnapshotIntent(snapshotFloor);
                     const ok = await prepareV7FormalSnapshotPrintArea(formal, { selectAll: true });
-                    if (!ok) return;
-                    document.body.classList.add('pdf-print-mode');
-                    setTimeout(() => window.print(), 80);
+                    if (!ok) {
+                        v7ReleaseFormalPrintLock(printLock);
+                        return;
+                    }
+                    v7AssertFormalSnapshotIntent(snapshotFloor);
+                    if (v7StartVerifiedPrint(snapshotFloor, printLock)) printLock = null;
+                    else v7ReleaseFormalPrintLock(printLock);
                     return;
-                } catch (error) { alert('建立正式 PDF 快照失敗：' + error.message); return; }
+                } catch (error) {
+                    v7ReleaseFormalPrintLock(printLock);
+                    alert('建立正式 PDF 快照失敗：' + error.message);
+                    return;
+                }
             }
+            if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
             document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
             document.body.dataset.printSource = 'editor';
             const printArea = document.getElementById('pdfPrintArea');

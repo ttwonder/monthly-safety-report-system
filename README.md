@@ -53,10 +53,10 @@ GitHub Pages 首頁：`index.html`
 2. 使用內部 Owner / 管理員 / 使用者帳號登入。
 3. 點擊 module 或 record 取得該項目編輯權。
 4. 不同項目可由多人同時編輯；同項目被占用時保持唯讀。
-5. 一般修改會逐項提交；「保存修改」可 flush 未完成草稿。
+5. 一般修改會逐項提交；「保存修改」可 flush 未完成草稿。RPC 無回應時會在明確時限後失敗並保留 module 與 report metadata 草稿，不會永久停在「正在保存」；重新載入 snapshot 時會恢復草稿。再次保存會先對帳 pending，再嘗試 claim 目前 lease：若舊 operation 已是 terminal result，直接取回結果並釋放本頁任何新 lease；只有伺服器明確回覆 `LEASE_LOST` 後，才以目前 lease 與新 operation ID 提交同一份草稿。新 pending envelope 會綁定 actor；不同 actor 或 `IDEMPOTENCY_MISMATCH` 都保留 pending 證據並 fail closed。
 6. 若顯示 `REVISION_CONFLICT`，目前內容會先保留成本機草稿，不會直接覆蓋雲端。再次按「保存修改」會明確詢問：確定後才以目前畫面內容取得最新 revision 並重試一次；取消則雲端不變且草稿繼續保留。
 7. 「同步最新」透過 change sequence 補抓並逐項重讀，不覆蓋有草稿的項目。
-8. PDF 輸出前會建立正式 immutable snapshot。
+8. PDF 輸出會先確認 module 與 report metadata 都已成功提交且沒有待處理草稿，才建立正式 immutable snapshot；前置保存失敗時禁止輸出舊雲端內容。重新登入後，同一 workspace／report／snapshot kind 的既有 pending 快照會沿用 operation ID，由後端 actor 與 idempotency 驗證後接續；回傳 snapshot 的 report revision、watermark 與各 module revision 必須涵蓋剛保存後的最低狀態，否則改用新 operation 建立快照。分頁在實際 285mm 列印寬度量測：單頁可容納的項目整卡換頁，超過單頁的長項目才允許自然分頁，避免標頭與內容分離或近乎空白首頁。
 9. IndexedDB 歷史仍是裝置本機資料；它不會被宣稱為已完整遷移到 Supabase。
 
 ## 權限
@@ -76,5 +76,5 @@ npm run test:browser
 ```
 
 - `npm test`：core/client/HTML 契約與 PGlite PostgreSQL runtime tests。
-- `npm run test:browser`：隔離 fake Supabase，驗證雙瀏覽器同項排他／不同項並行、full-snapshot 草稿保護及 immutable PDF 列印來源。
+- `npm run test:browser`：隔離 fake Supabase，驗證雙瀏覽器同項排他／不同項並行、full-snapshot 草稿保護、保存逾時後重試與新瀏覽器雲端讀回，以及 immutable PDF 的前置保存與列印來源。
 - 正式 Supabase 尚須依切換手冊執行 readback 與 smoke tests；本機通過不能冒充正式環境已部署。
