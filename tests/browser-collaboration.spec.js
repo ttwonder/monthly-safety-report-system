@@ -26,6 +26,49 @@ async function settleLayout(page) {
   }));
 }
 
+async function installPdfColorFixture(page) {
+  await page.evaluate(() => {
+    const rows = [
+      { label: '06月', inspectionCount: 10, deficiencyTotal: 4, detentionTotal: 1, actionCompletionRate: 65 },
+      { label: '07月', inspectionCount: 14, deficiencyTotal: 6, detentionTotal: 2, actionCompletionRate: 78 },
+      { label: '08月', inspectionCount: 18, deficiencyTotal: 5, detentionTotal: 1, actionCompletionRate: 92 }
+    ];
+    const current = rows.at(-1);
+    const components = `
+      <table class="custom-data-table data-card-table" style="border:2px solid #f97316;border-collapse:collapse;background:#fff7ed;width:30%;">
+        <thead><tr><th colspan="2" style="color:#f97316;border-bottom:2px solid #f97316;">橙色資料卡</th></tr></thead>
+        <tbody><tr><td>檢查次數</td><td>18</td></tr></tbody>
+      </table>
+      <div class="kpi-card-container" style="border:2px solid #cbd5e1;padding:12px;background:#fff;">
+        <div>KPI 色帶</div>
+        <div class="kpi-bar-wrapper" style="position:relative;height:12px;">
+          <div class="kpi-bar-container" style="position:absolute;width:100%;height:100%;background:linear-gradient(to right,#22c55e 0%,#eab308 50%,#ef4444 100%);"></div>
+        </div>
+      </div>
+      <div class="zone-card-container" style="border:2px solid #cbd5e1;padding:12px;background:#fff;">
+        <div>三色區間</div>
+        <div class="zone-bar" style="height:10px;background:linear-gradient(to right,#22c55e 0%,#22c55e 30%,#eab308 30%,#eab308 70%,#ef4444 70%,#ef4444 100%);"></div>
+      </div>
+      <div class="trend-chart-container" style="border:2px solid #cbd5e1;padding:8px;background:#fff;">
+        <div class="chart-layout-wrapper" style="display:flex;gap:8px;width:100%;">
+          <div class="no-print chart-table-area" style="flex:0 0 auto;max-width:35%;">
+            <table class="chart-data-table"><thead><tr><th>週期</th><th>安全</th><th>品質</th></tr></thead>
+              <tbody><tr><td>06月</td><td>10</td><td>6</td></tr><tr><td>07月</td><td>14</td><td>9</td></tr><tr><td>08月</td><td>18</td><td>12</td></tr></tbody>
+            </table>
+          </div>
+          <div class="chart-canvas-area" style="flex:1 1 auto;height:180px;min-width:0;position:relative;"><canvas class="trend-canvas"></canvas></div>
+        </div>
+      </div>`;
+    reportData[0].title = 'PDF 版面與色彩回歸';
+    reportData[0].columns = [v3ReportKpiHtml(current, rows) + v3MultiLineSvg(rows) + components];
+    reportData[0].colLayout = '1';
+    reportData[0].selectedForPdf = true;
+    reportData.slice(1).forEach((item) => { item.selectedForPdf = false; });
+    renderTable();
+    v1EnsureModuleFields();
+  });
+}
+
 test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
 });
@@ -457,6 +500,20 @@ test('未提交的 module 變更離開後仍保留 lease，不提前放鎖', asy
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await enterAndLogin(page, 'owner', 'owner-pass');
+  let interceptedSaveCount = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_save_module') {
+      interceptedSaveCount += 1;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 'TEST_SAVE_UNAVAILABLE', message: 'deterministic unsaved draft' })
+      });
+      return;
+    }
+    await route.continue();
+  });
 
   const row = page.locator('#tableBody tr').first();
   const title = row.locator('td').nth(1).locator('.editable-div');
@@ -465,10 +522,13 @@ test('未提交的 module 變更離開後仍保留 lease，不提前放鎖', asy
   await title.evaluate((element) => element.removeAttribute('onblur'));
   await title.fill('尚未提交的本機內容');
   await page.locator('#v5TopStatus').click();
-  await page.waitForTimeout(700);
+  await expect.poll(() => interceptedSaveCount).toBeGreaterThan(0);
 
   await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
   await expect(title).toHaveText('尚未提交的本機內容');
+  const state = await page.request.get('/__fake_state').then((response) => response.json());
+  expect(state.modules[0].revision).toBe(1);
+  expect(state.modules[0].payload.title).toBe('A 原始項目');
   expect(errors).toEqual([]);
 });
 
@@ -502,6 +562,90 @@ test('V7 PDF 列印區直接使用 immutable snapshot，而非 live editor', asy
   await expect(page.locator('body')).toHaveAttribute('data-print-source', 'snapshot');
   await expect(page.locator('#pdfPrintArea')).toContainText('正式快照模塊');
   await expect.poll(() => page.evaluate(() => window.__v7PrintCalled)).toBe(true);
+  const layout = await page.locator('#pdfPrintArea .module-card-row').first().evaluate((row) => {
+    const box = (element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width };
+    };
+    return {
+      display: getComputedStyle(row).display,
+      row: box(row),
+      index: box(row.querySelector('.module-index-cell')),
+      title: box(row.querySelector('.module-title-cell')),
+      content: box(row.querySelector('.module-content-cell')),
+      actions: row.querySelectorAll('.module-actions-cell').length
+    };
+  });
+  expect(layout.display).toBe('grid');
+  expect(layout.actions).toBe(0);
+  expect(layout.content.top).toBeGreaterThanOrEqual(Math.max(layout.index.bottom, layout.title.bottom) - 1);
+  expect(Math.abs(layout.content.left - layout.row.left)).toBeLessThanOrEqual(1);
+  expect(Math.abs(layout.content.width - layout.row.width)).toBeLessThanOrEqual(2);
+  expect(errors).toEqual([]);
+});
+
+test('PDF print media 保留部件與圖表色彩且小型圖表不跨頁切斷', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await installPdfColorFixture(page);
+  await page.evaluate(async () => {
+    await prepareV1PdfPrintArea();
+    document.body.classList.add('pdf-print-mode');
+  });
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    window.renderAllCharts();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  });
+  await expect.poll(() => page.evaluate(() => {
+    const canvas = document.querySelector('#pdfPrintArea canvas.trend-canvas');
+    return Boolean(canvas && canvas.width > 10 && canvas.height > 10 && Chart.getChart(canvas));
+  })).toBe(true);
+
+  const printState = await page.evaluate(() => {
+    const root = document.querySelector('#pdfPrintArea');
+    const row = root.querySelector('.module-card-row');
+    const content = row.querySelector('.module-content-cell');
+    const bar = root.querySelector('.kpi-bar-container');
+    const zone = root.querySelector('.zone-bar');
+    const dataCardTitle = root.querySelector('.data-card-table th');
+    const svgStrokes = Array.from(root.querySelectorAll('svg[aria-label="KPI 趨勢圖"] polyline')).map((line) => getComputedStyle(line).stroke);
+    const canvas = root.querySelector('canvas.trend-canvas');
+    const chart = Chart.getChart(canvas);
+    const atomicBreaks = ['.data-card-table', '.kpi-card-container', '.zone-card-container', '.trend-chart-container']
+      .map((selector) => getComputedStyle(root.querySelector(selector)).breakInside);
+    return {
+      rowDisplay: getComputedStyle(row).display,
+      contentGridColumn: getComputedStyle(content).gridColumn,
+      reportHeaderDisplay: getComputedStyle(root.querySelector('table[data-cloned-id="reportTable"] > thead')).display,
+      printColorAdjust: getComputedStyle(bar).webkitPrintColorAdjust || getComputedStyle(bar).printColorAdjust,
+      kpiGradient: getComputedStyle(bar).backgroundImage,
+      zoneGradient: getComputedStyle(zone).backgroundImage,
+      dataCardTitleColor: getComputedStyle(dataCardTitle).color,
+      dataCardBorderColor: getComputedStyle(dataCardTitle).borderBottomColor,
+      svgStrokes,
+      canvasDatasetColors: chart.data.datasets.map((dataset) => dataset.borderColor),
+      atomicBreaks
+    };
+  });
+  expect(printState.rowDisplay).toBe('grid');
+  expect(printState.contentGridColumn).toBe('1 / -1');
+  expect(printState.reportHeaderDisplay).toBe('none');
+  expect(printState.printColorAdjust).toBe('exact');
+  expect(printState.kpiGradient).toContain('rgb(34, 197, 94)');
+  expect(printState.kpiGradient).toContain('rgb(234, 179, 8)');
+  expect(printState.kpiGradient).toContain('rgb(239, 68, 68)');
+  expect(printState.zoneGradient).toContain('rgb(34, 197, 94)');
+  expect(printState.zoneGradient).toContain('rgb(239, 68, 68)');
+  expect(printState.dataCardTitleColor).toBe('rgb(249, 115, 22)');
+  expect(printState.dataCardBorderColor).toBe('rgb(249, 115, 22)');
+  expect(printState.svgStrokes).toEqual([
+    'rgb(37, 99, 235)', 'rgb(249, 115, 22)', 'rgb(220, 38, 38)', 'rgb(22, 163, 74)'
+  ]);
+  expect(printState.canvasDatasetColors).toEqual(['#4f46e5', '#10b981']);
+  expect(printState.atomicBreaks).toEqual(['avoid', 'avoid', 'avoid', 'avoid']);
   expect(errors).toEqual([]);
 });
 

@@ -1009,7 +1009,7 @@
             body { background: white !important; margin: 0; padding: 0; }
             #reportContainer { box-shadow: none !important; border: none !important; background: transparent !important; padding: 0 !important; }
             .dreamy-bg { background: transparent !important; }
-            td, th { border: 1px solid #000 !important; color: #000 !important; break-inside: avoid; }
+            td, th { break-inside: avoid; }
             tr { page-break-inside: avoid; }
             thead { display: table-header-group; }
             .report-header-section { justify-content: center !important; position: relative !important; }
@@ -1023,10 +1023,10 @@
             .content-inline-img { outline: none !important; }
             .custom-data-table th, .custom-data-table td { outline: none !important; }
             .content-block { outline: none !important; }
-            .data-card-table { outline: none !important; border-color: #000 !important; }
-            .data-card-table th { border-bottom-color: #000 !important; color: #000 !important; }
-            .kpi-card-container, .progress-card-container, .zone-card-container, .trend-chart-container { outline: none !important; border-color: #000 !important; }
-            
+            .data-card-table { outline: none !important; }
+            .data-card-table th { outline: none !important; }
+            .kpi-card-container, .progress-card-container, .zone-card-container, .trend-chart-container { outline: none !important; }
+
             /* 列印時保留畫面中的趨勢圖排版，不再強制把圖表改成另一種滿版樣式 */
             .chart-table-area { display: block !important; }
             .chart-canvas-area { max-width: 100% !important; overflow: hidden !important; }
@@ -1188,6 +1188,11 @@
         @media print {
             body.pdf-print-mode { background:#fff !important; padding:0 !important; }
             body.pdf-print-mode > *:not(#pdfPrintArea) { display:none !important; }
+            body.pdf-print-mode #pdfPrintArea,
+            body.pdf-print-mode #pdfPrintArea * {
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
             body.pdf-print-mode #pdfPrintArea {
                 display:block !important;
                 position:static !important;
@@ -1226,7 +1231,10 @@
             }
             body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] tr,
             body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] td,
-            body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] th,
+            body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] th {
+                page-break-inside: auto !important;
+                break-inside: auto !important;
+            }
             body.pdf-print-mode #pdfPrintArea .content-block,
             body.pdf-print-mode #pdfPrintArea .custom-data-table,
             body.pdf-print-mode #pdfPrintArea .data-card-table,
@@ -1234,10 +1242,11 @@
             body.pdf-print-mode #pdfPrintArea .progress-card-container,
             body.pdf-print-mode #pdfPrintArea .zone-card-container,
             body.pdf-print-mode #pdfPrintArea .trend-chart-container {
-                page-break-inside: auto !important;
-                break-inside: auto !important;
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
             }
-            body.pdf-print-mode #pdfPrintArea thead { display: table-header-group; }
+            body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] > thead { display:none !important; }
+            body.pdf-print-mode #pdfPrintArea .module-content-cell thead { display:table-header-group; }
             body.pdf-print-mode .v1-pdf-paper { max-width:none !important; width:100% !important; box-shadow:none !important; border-radius:0 !important; padding:0 !important; }
             body.pdf-print-mode .v1-pdf-cover { margin-top:0 !important; }
             body.pdf-print-mode .no-print { display:none !important; }
@@ -1440,6 +1449,69 @@
         .module-delete-btn:hover { border-color:#f87171; background:#fef2f2; color:#991b1b; }
         .module-delete-locked { display:inline-flex; align-items:center; gap:5px; color:#94a3b8; font-size:13px; white-space:nowrap; }
         .module-actions-cell .v7-item-lock-badge { flex-basis:100%; margin:2px 0 0 auto; text-align:right; }
+
+        /* PDF clone 使用 data-cloned-id 避免與 live editor 產生重複 ID；仍須沿用兩層卡片版面。 */
+        .v1-selected-editor-print-clone table[data-cloned-id="reportTable"] {
+            display:block;
+            width:100%;
+            table-layout:auto;
+            border-collapse:separate;
+        }
+        .v1-selected-editor-print-clone table[data-cloned-id="reportTable"] > thead { display:none; }
+        .v1-selected-editor-print-clone [data-cloned-id="tableBody"] {
+            display:flex;
+            flex-direction:column;
+            gap:12px;
+            width:100%;
+        }
+        .v1-selected-editor-print-clone [data-cloned-id="tableBody"] .module-card-row {
+            display:grid;
+            grid-template-columns:105px minmax(0,1fr);
+            width:100%;
+            margin:0;
+            border:1px solid #a5b4fc;
+            border-radius:10px;
+            background:#fff;
+            overflow:visible;
+            box-sizing:border-box;
+            break-inside:avoid;
+            page-break-inside:avoid;
+        }
+        .v1-selected-editor-print-clone [data-cloned-id="tableBody"] .module-card-row > td {
+            display:flex;
+            align-items:center;
+            min-width:0;
+            border:0;
+            padding:7px 10px;
+            box-sizing:border-box;
+            font-size:13px;
+        }
+        .v1-selected-editor-print-clone .module-index-cell {
+            grid-column:1;
+            grid-row:1;
+            min-height:48px;
+            border-right:1px solid #a5b4fc !important;
+        }
+        .v1-selected-editor-print-clone .module-title-cell {
+            grid-column:2;
+            grid-row:1;
+            min-height:48px;
+        }
+        .v1-selected-editor-print-clone .module-content-cell {
+            grid-column:1 / -1;
+            grid-row:2;
+            align-items:stretch !important;
+            flex-direction:column;
+            min-height:72px;
+            border-top:1px solid #a5b4fc !important;
+            overflow:visible;
+        }
+        .v1-selected-editor-print-clone .module-actions-cell { display:none !important; }
+        .v1-selected-editor-print-clone .module-title-editor,
+        .v1-selected-editor-print-clone .module-content-cell .editable-div {
+            min-height:0 !important;
+            font-size:13px !important;
+        }
         @media screen and (max-width: 1100px) {
             #tableBody .module-card-row { grid-template-columns: minmax(130px, .24fr) minmax(0, 1fr); }
             .module-actions-cell { grid-column: 1 / -1; grid-row:2; border-top:1px solid #c7d2fe !important; }
