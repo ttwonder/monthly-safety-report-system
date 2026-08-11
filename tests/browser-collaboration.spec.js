@@ -124,6 +124,47 @@ async function installPdfColorFixture(page) {
   });
 }
 
+async function installTrendPdfGeometryFixture(page) {
+  await page.evaluate(() => {
+    const values = [
+      ['01', '4.1', '5.0', '12.5', '0.5'],
+      ['02', '4.4', '3.0', '0', '1'],
+      ['03', '2.7', '5.0', '8.8', '1.8'],
+      ['04', '3.0', '3.0', '0', '1.3'],
+      ['05', '4.0', '3.0', '10', '0.4'],
+      ['06', '3.7', '0', '8.5', '2.1'],
+      ['07', '4.8', '4.0', '8.0', '0'],
+      ['08', '0', '0', '0', '0'],
+      ['09', '0', '0', '0', '0'],
+      ['10', '0', '0', '0', '0'],
+      ['11', '0', '0', '0', '0'],
+      ['12', '0', '0', '0', '0']
+    ];
+    const cellStyle = 'border:1px solid #cbd5e1;padding:3px 5px;text-align:center;white-space:nowrap;font-size:13px;min-width:36px;';
+    const header = ['週期', 'SIRE', 'CDI', 'RS', 'PSC']
+      .map((label) => `<th style="${cellStyle}background:#f1f5f9;font-weight:bold;">${label}</th>`).join('');
+    const body = values.map((row) => `<tr>${row.map((value, index) => `<td class="${index ? 'chart-val' : ''}" style="${cellStyle}">${value}</td>`).join('')}</tr>`).join('');
+    const trend = (suffix) => `
+      <div class="trend-chart-container" data-trend-chart="1" style="border:2px solid #cbd5e1;padding:8px;border-radius:6px;background:#fff;width:100%;box-sizing:border-box;overflow:hidden;">
+        <div class="chart-title" style="font-size:14px;font-weight:bold;">多維度趨勢比較圖 ${suffix}</div>
+        <div class="chart-layout-wrapper" style="display:flex;flex-direction:row;flex-wrap:nowrap;gap:8px;align-items:stretch;width:100%;">
+          <div class="no-print chart-table-area chart-table-wrapper" style="flex:0 0 auto;max-width:35%;overflow-x:auto;background:#f8fafc;border:1px dashed #cbd5e1;padding:1px;">
+            <table class="chart-data-table" style="width:max-content;border-collapse:collapse;font-size:13px;background:#fff;line-height:1.3;margin:0;"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>
+          </div>
+          <div class="chart-canvas-area" data-chart-height="200" style="flex:1 1 auto;height:200px;min-width:0;position:relative;"><canvas class="trend-canvas"></canvas></div>
+        </div>
+      </div>`;
+    reportData[0].title = '趨勢圖 PDF 幾何回歸';
+    reportData[0].columns = [trend('A'), trend('B')];
+    reportData[0].colLayout = '1:1';
+    reportData[0].selectedForPdf = true;
+    reportData.slice(1).forEach((item) => { item.selectedForPdf = false; });
+    renderTable();
+    v1EnsureModuleFields();
+    window.renderAllCharts();
+  });
+}
+
 async function installTypographyFixture(page) {
   await page.evaluate(() => {
     const rows = [
@@ -1666,6 +1707,80 @@ test('PDF print media 保留部件與圖表色彩且小型圖表不跨頁切斷'
   expect(printState.canvasDatasetColors).toEqual(['#4f46e5', '#10b981']);
   expect(printState.atomicBreaks).toEqual(['avoid', 'avoid', 'avoid', 'avoid']);
   expect(errors).toEqual([]);
+});
+
+test('PDF 半欄趨勢圖完整顯示五欄表格且 canvas 不被拉伸', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await installTrendPdfGeometryFixture(page);
+  await page.evaluate(() => {
+    window.__trendGeometryPrepareState = { status: 'pending', error: '' };
+    window.__trendGeometryPreparePromise = prepareV1PdfPrintArea()
+      .then((ok) => {
+        if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+        document.body.classList.add('pdf-print-mode');
+        window.__trendGeometryPrepareState = { status: 'done', error: '' };
+      })
+      .catch((error) => {
+        window.__trendGeometryPrepareState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__trendGeometryPrepareState?.status), { timeout: 30000 }).toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__trendGeometryPrepareState)).toEqual({ status: 'done', error: '' });
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    window.renderAllCharts();
+  });
+  await expect.poll(() => page.evaluate(() => Array.from(document.querySelectorAll('#pdfPrintArea canvas.trend-canvas'))
+    .every((canvas) => canvas.width > 10 && canvas.height > 10 && Boolean(Chart.getChart(canvas))))).toBe(true);
+
+  const charts = await page.evaluate(() => Array.from(document.querySelectorAll('#pdfPrintArea .trend-chart-container')).map((container) => {
+    const tableArea = container.querySelector('.chart-table-area');
+    const table = container.querySelector('.chart-data-table');
+    const wrapper = container.querySelector('.chart-layout-wrapper');
+    const canvasArea = container.querySelector('.chart-canvas-area');
+    const canvas = container.querySelector('canvas.trend-canvas');
+    const rect = (node) => {
+      const box = node.getBoundingClientRect();
+      return { left: box.left, right: box.right, width: box.width, height: box.height };
+    };
+    const tableAreaRect = rect(tableArea);
+    const tableRect = rect(table);
+    const canvasRect = rect(canvas);
+    return {
+      headers: Array.from(table.querySelectorAll('thead th')).map((cell) => cell.textContent.trim()),
+      tableClientWidth: tableArea.clientWidth,
+      tableScrollWidth: tableArea.scrollWidth,
+      tableRight: tableRect.right,
+      tableAreaRight: tableAreaRect.right,
+      wrapperClientWidth: wrapper.clientWidth,
+      wrapperScrollWidth: wrapper.scrollWidth,
+      containerClientWidth: container.clientWidth,
+      containerScrollWidth: container.scrollWidth,
+      canvasWidth: canvasRect.width,
+      canvasHeight: canvasRect.height,
+      cssAspectRatio: canvasRect.width / canvasRect.height,
+      backingAspectRatio: canvas.width / canvas.height,
+      canvasAreaWidth: canvasArea.getBoundingClientRect().width
+    };
+  }));
+
+  expect(charts).toHaveLength(2);
+  for (const chart of charts) {
+    expect(chart.headers).toEqual(['週期', 'SIRE', 'CDI', 'RS', 'PSC']);
+    expect(chart.tableScrollWidth).toBeLessThanOrEqual(chart.tableClientWidth + 1);
+    expect(chart.tableRight).toBeLessThanOrEqual(chart.tableAreaRight + 1);
+    expect(chart.wrapperScrollWidth).toBeLessThanOrEqual(chart.wrapperClientWidth + 1);
+    expect(chart.containerScrollWidth).toBeLessThanOrEqual(chart.containerClientWidth + 1);
+    expect(chart.canvasAreaWidth).toBeGreaterThan(220);
+    expect(chart.canvasWidth).toBeGreaterThan(220);
+    expect(chart.canvasHeight).toBeGreaterThan(180);
+    expect(Math.abs(chart.cssAspectRatio - chart.backingAspectRatio)).toBeLessThan(0.03);
+  }
+
+  const pdfPath = testInfo.outputPath('trend-chart-table-complete.pdf');
+  const pdf = await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
+  await testInfo.attach('trend-chart-table-complete.pdf', { body: pdf, contentType: 'application/pdf' });
 });
 
 test('12 模塊 PDF 首頁不因首項 keep-together 只剩表頭，順序與長短分頁規則固定', async ({ page }, testInfo) => {

@@ -1167,15 +1167,47 @@
             max-width: 285mm !important;
             box-shadow: none !important;
         }
-        body.pdf-render-prep #pdfPrintArea .chart-table-area { display: block !important; }
-        body.pdf-render-prep #pdfPrintArea .chart-layout-wrapper { max-width: 100% !important; }
-        body.pdf-render-prep #pdfPrintArea .chart-canvas-area {
+        body.pdf-render-prep #pdfPrintArea .chart-layout-wrapper,
+        body.pdf-print-mode #pdfPrintArea .chart-layout-wrapper {
+            display: grid !important;
+            grid-template-columns: max-content minmax(0, 1fr) !important;
+            align-items: stretch !important;
+            gap: 8px !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            min-width: 0 !important;
+            box-sizing: border-box !important;
+        }
+        body.pdf-render-prep #pdfPrintArea .chart-table-area,
+        body.pdf-print-mode #pdfPrintArea .chart-table-area {
+            display: block !important;
+            flex: none !important;
+            width: max-content !important;
+            max-width: none !important;
+            min-width: 0 !important;
+            overflow: visible !important;
+            box-sizing: border-box !important;
+        }
+        body.pdf-render-prep #pdfPrintArea .chart-data-table,
+        body.pdf-print-mode #pdfPrintArea .chart-data-table {
+            width: max-content !important;
+            max-width: none !important;
+        }
+        body.pdf-render-prep #pdfPrintArea .chart-canvas-area,
+        body.pdf-print-mode #pdfPrintArea .chart-canvas-area {
+            width: 100% !important;
             max-width: 100% !important;
             min-width: 0 !important;
             overflow: hidden !important;
             position: relative !important;
         }
-        body.pdf-render-prep #pdfPrintArea .trend-canvas { display:block !important; max-width:100% !important; }
+        body.pdf-render-prep #pdfPrintArea .trend-canvas,
+        body.pdf-print-mode #pdfPrintArea .trend-canvas {
+            display: block !important;
+            width: 100% !important;
+            height: 100% !important;
+            max-width: 100% !important;
+        }
         @media (max-width: 900px) { .v1-pdf-layout { grid-template-columns:1fr; } .v1-pdf-side { position:static; } .v1-pdf-toc ol { columns:1; } }
         @page {
             size: A4 landscape;
@@ -2162,8 +2194,8 @@
 
     <script src="./vendor/supabase-2.112.2.js"></script>
     <script src="./monthly-collaboration-core.js"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.7"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.7"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.8"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.8"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont() {
