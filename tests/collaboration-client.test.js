@@ -114,6 +114,36 @@ test('claimLease 被占用時帶出持鎖者顯示名稱，不暴露 LEASE_HELD 
   });
 });
 
+test('首次 snapshot 載入也會恢復既有 module 草稿與舊 base revision', async () => {
+  const drafts = memoryStorage();
+  drafts.setItem('monthly_v7_draft:module:m1', JSON.stringify({
+    entityType: 'module', entityId: 'm1', baseRevision: 3,
+    payload: { title: '本機待救回', columns: ['本機內容'] }, savedAt: '2026-08-11T00:00:00Z'
+  }));
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 9,
+      report: { id: 'r1', legacyFileId: 'legacy', title: '月報', period: {}, revision: 2 },
+      modules: [{ id: 'm1', legacyItemId: '101', revision: 4, payload: { title: '雲端較新', columns: ['雲端內容'] } }],
+      records: [], users: []
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts, idFactory: () => 'tab-1'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  assert.equal(client.snapshot.modules[0].payload.title, '本機待救回');
+  assert.deepEqual(client.snapshot.modules[0].payload.columns, ['本機內容']);
+  assert.equal(client.snapshot.modules[0].revision, 3);
+  assert.ok(client.readDraft('module', 'm1'));
+});
+
 test('saveModule 以 lease/fence/CAS 保存，失鎖保留草稿且成功後才清除', async () => {
   const drafts = memoryStorage();
   let saveAttempt = 0;

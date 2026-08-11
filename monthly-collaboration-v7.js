@@ -208,7 +208,9 @@
       const run = this.persistChain.catch(() => undefined).then(task);
       this.persistChain = run;
       return run.catch((error) => {
-        this.reportError(error);
+        if (!['REVISION_CONFLICT', 'REVISION_CONFLICT_CANCELLED'].includes(error && error.code) && !error?.silent) {
+          this.reportError(error);
+        }
         throw error;
       });
     }
@@ -229,7 +231,68 @@
       row.payload = clone(this.client.modulePayload(item));
     }
 
-    async persistReportData(items) {
+    hasModuleDraft(entityId) {
+      return !!(this.client && entityId && this.client.readDraft('module', entityId));
+    }
+
+    async rebaseModulesForConfirmedRetry(items, conflictError) {
+      const pending = (items || []).filter((item) => item && item._v7Id);
+      const serverEntities = [];
+      for (const item of pending) {
+        const entity = await this.client.getEntity('module', item._v7Id);
+        if (entity.deleted || !Number.isFinite(Number(entity.revision))) {
+          const error = new Error('CONFLICT_ENTITY_UNAVAILABLE');
+          error.code = 'CONFLICT_ENTITY_UNAVAILABLE';
+          error.result = entity;
+          throw error;
+        }
+        serverEntities.push(entity);
+      }
+      const confirmed = typeof this.host.confirmRevisionOverwrite === 'function'
+        ? await Promise.resolve(this.host.confirmRevisionOverwrite({
+          entityType: 'module',
+          entityIds: pending.map((item) => item._v7Id),
+          drafts: pending.map((item) => clone(this.client.modulePayload(item))),
+          serverEntities: clone(serverEntities),
+          result: conflictError && conflictError.result
+        }))
+        : false;
+      if (!confirmed) {
+        this.setStatus('已取消覆蓋；雲端未變更，本機草稿仍完整保留。', 'warn');
+        const error = new Error('REVISION_CONFLICT_CANCELLED');
+        error.code = 'REVISION_CONFLICT_CANCELLED';
+        error.silent = true;
+        error.result = conflictError && conflictError.result;
+        throw error;
+      }
+      pending.forEach((item, index) => {
+        const entity = serverEntities[index];
+        this.acceptRemoteEntity(entity);
+        item._v7Revision = Number(entity.revision);
+        this.client.saveDraft('module', item._v7Id, this.client.modulePayload(item), item._v7Revision);
+      });
+      return serverEntities;
+    }
+
+    async saveChangedModules(changed, options = {}) {
+      const commit = async () => {
+        if (changed.length === 1) await this.client.saveModule(changed[0]);
+        else await this.client.saveModuleBatch(changed);
+        changed.forEach((item) => this.syncModuleBaseline(item));
+      };
+      try {
+        await commit();
+      } catch (error) {
+        if (error && error.code === 'REVISION_CONFLICT' && options.resolveRevisionConflict === true) {
+          await this.rebaseModulesForConfirmedRetry(changed, error);
+          await commit();
+          return;
+        }
+        throw error;
+      }
+    }
+
+    async persistReportData(items, options = {}) {
       if (!this.isActive()) return { mode: 'legacy' };
       if (!this.currentUser()) {
         this.setStatus('本機草稿已保存；請登入後再提交逐項變更。', 'warn');
@@ -255,15 +318,10 @@
         baseline = this.baselineModuleMap();
         const changed = liveItems.filter((item) => {
           const row = baseline.get(item._v7Id);
-          return row && canonical(this.client.modulePayload(item)) !== canonical(row.payload);
+          return row && (this.hasModuleDraft(item._v7Id)
+            || canonical(this.client.modulePayload(item)) !== canonical(row.payload));
         });
-        if (changed.length === 1) {
-          await this.client.saveModule(changed[0]);
-          this.syncModuleBaseline(changed[0]);
-        } else if (changed.length > 1) {
-          await this.client.saveModuleBatch(changed);
-          changed.forEach((item) => this.syncModuleBaseline(item));
-        }
+        if (changed.length > 0) await this.saveChangedModules(changed, options);
         const liveOrder = liveItems.map((item) => item._v7Id);
         const baseOrder = (this.client.snapshot.modules || []).map((row) => row.id);
         if (liveOrder.length && canonical(liveOrder) !== canonical(baseOrder)) {
@@ -280,8 +338,24 @@
     async persistReportMeta(meta) {
       if (!this.isActive()) return { mode: 'legacy' };
       if (!this.currentUser()) return { mode: 'v7', localOnly: true };
+      const report = this.currentReport();
+      const nextMeta = {
+        title: String(meta && meta.title || report && report.title || ''),
+        date: String(meta && meta.date || report && report.date || ''),
+        period: clone(meta && meta.period || report && report.period || {}),
+        settings: clone(meta && meta.settings || report && report.settings || {})
+      };
+      const currentMeta = report ? {
+        title: String(report.title || ''),
+        date: String(report.date || ''),
+        period: clone(report.period || {}),
+        settings: clone(report.settings || {})
+      } : null;
+      if (currentMeta && canonical(nextMeta) === canonical(currentMeta)) {
+        return { ok: true, skipped: true, revision: Number(report.revision) };
+      }
       return this.enqueue(async () => {
-        const result = await this.client.saveReportMeta(meta);
+        const result = await this.client.saveReportMeta(nextMeta);
         this.setStatus(`月報資訊已保存｜revision ${result.revision}`, 'ok');
         return result;
       });

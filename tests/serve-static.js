@@ -190,6 +190,13 @@ const server = http.createServer((req, res) => {
     event('report_structure', state.report.id, state.report.revision, randomUUID());
     res.writeHead(204); return res.end();
   }
+  if (url.pathname === '/__fake_remote_module_change' && req.method === 'POST') {
+    const module = state.modules[0];
+    module.payload = Object.assign({}, module.payload, { title: '遠端較新內容' });
+    module.revision += 1;
+    event('module', module.id, module.revision, randomUUID());
+    res.writeHead(204); return res.end();
+  }
   if (url.pathname === '/__fake_state') { res.writeHead(200, { 'Content-Type': mime['.json'] }); return res.end(JSON.stringify(resultState())); }
   if (url.pathname === '/__fake_rpc' && req.method === 'POST') {
     let body = '';

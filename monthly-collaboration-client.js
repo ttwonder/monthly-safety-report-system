@@ -112,8 +112,11 @@
 
     async mergeSnapshotWithProtectedLocal(snapshot) {
       const incoming = this.cloneJson(snapshot, {});
-      const previous = this.snapshot;
-      if (!previous) return incoming;
+      const previous = this.snapshot || {
+        report: this.cloneJson(incoming.report, {}),
+        modules: this.cloneJson(incoming.modules, []),
+        records: this.cloneJson(incoming.records, [])
+      };
       const protectedTargets = new Map();
       const protect = (entityType, entityId) => {
         if (!entityType || !entityId) return;
@@ -513,6 +516,15 @@
         }, `save_module_batch:${report.id}`), 'SAVE_MODULE_BATCH_FAILED');
       } catch (error) {
         this.leases.delete(this.leaseKey('kpi_batch', report.id));
+        if (['REVISION_CONFLICT', 'LEASE_LOST', 'AUTHORITY_CHANGED'].includes(error.code)
+          && typeof this.host.onConflict === 'function') {
+          this.host.onConflict({
+            entityType: 'module_batch',
+            entityId: error.result && (error.result.entityId || error.result.entity_id),
+            drafts: changes,
+            result: error.result
+          });
+        }
         throw error;
       }
       const updates = new Map((result.updated || []).map((row) => [row.entityId || row.entity_id, Number(row.revision)]));
@@ -727,6 +739,25 @@
       }, `update_site_password:${this.config.workspaceKey}`), 'UPDATE_SITE_PASSWORD_FAILED');
       this.clearSessions();
       return result;
+    }
+
+    async getEntity(entityType, entityId) {
+      this.requireUserSession();
+      const entity = await this.transport.rpc('monthly_v7_get_entity', {
+        p_workspace_key: this.config.workspaceKey,
+        p_site_session_id: this.siteSession.id,
+        p_user_session_id: this.userSession.id,
+        p_entity_type: entityType,
+        p_entity_id: entityId
+      });
+      if (!entity || entity.ok !== true) {
+        const code = entity && entity.error || 'ENTITY_READ_FAILED';
+        const error = new Error(code);
+        error.code = code;
+        error.result = entity;
+        throw error;
+      }
+      return entity;
     }
 
     async catchUp() {

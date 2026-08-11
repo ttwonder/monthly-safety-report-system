@@ -54,9 +54,10 @@ GitHub Pages 首頁：`index.html`
 3. 點擊 module 或 record 取得該項目編輯權。
 4. 不同項目可由多人同時編輯；同項目被占用時保持唯讀。
 5. 一般修改會逐項提交；「保存修改」可 flush 未完成草稿。
-6. 「同步最新」透過 change sequence 補抓並逐項重讀，不覆蓋有草稿的項目。
-7. PDF 輸出前會建立正式 immutable snapshot。
-8. IndexedDB 歷史仍是裝置本機資料；它不會被宣稱為已完整遷移到 Supabase。
+6. 若顯示 `REVISION_CONFLICT`，目前內容會先保留成本機草稿，不會直接覆蓋雲端。再次按「保存修改」會明確詢問：確定後才以目前畫面內容取得最新 revision 並重試一次；取消則雲端不變且草稿繼續保留。
+7. 「同步最新」透過 change sequence 補抓並逐項重讀，不覆蓋有草稿的項目。
+8. PDF 輸出前會建立正式 immutable snapshot。
+9. IndexedDB 歷史仍是裝置本機資料；它不會被宣稱為已完整遷移到 Supabase。
 
 ## 權限
 

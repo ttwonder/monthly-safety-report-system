@@ -3,7 +3,14 @@
 const { test, expect } = require('@playwright/test');
 
 async function enterAndLogin(page, username, password) {
-  await page.goto('/');
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.evaluate(async () => {
+    if (!window.MonthlyV7App?.initialized && typeof window.onload === 'function') {
+      const boot = window.onload;
+      window.onload = null;
+      await boot.call(window);
+    }
+  });
   await page.locator('#site-access-password').fill('gate-pass');
   await page.getByRole('button', { name: '進入系統' }).click();
   await expect(page.locator('#siteAccessGate')).toBeHidden();
@@ -66,6 +73,69 @@ async function installPdfColorFixture(page) {
     reportData.slice(1).forEach((item) => { item.selectedForPdf = false; });
     renderTable();
     v1EnsureModuleFields();
+  });
+}
+
+async function installTypographyFixture(page) {
+  await page.evaluate(() => {
+    const rows = [
+      { label: '06月', inspectionCount: 10, deficiencyTotal: 4, detentionTotal: 1, pscAvg: 0.4, highRiskCount: 1, repeatedCount: 1, actionCompletionRate: 65, safetyWalkCount: 2 },
+      { label: '07月', inspectionCount: 14, deficiencyTotal: 6, detentionTotal: 2, pscAvg: 0.43, highRiskCount: 2, repeatedCount: 1, actionCompletionRate: 78, safetyWalkCount: 3 },
+      { label: '08月', inspectionCount: 18, deficiencyTotal: 5, detentionTotal: 1, pscAvg: 0.28, highRiskCount: 1, repeatedCount: 0, actionCompletionRate: 92, safetyWalkCount: 4 }
+    ];
+    const legacySizedComponents = `
+      ${parseHighlights(BlockTemplates.blue('綜合評估', '本月船隊表現【穩定】，所有內文與數值應清楚可讀。'))}
+      <table class="custom-data-table data-card-table" style="border:2px solid #3b82f6;border-collapse:collapse;background:#fff;width:30%;">
+        <thead><tr><th colspan="2" style="font-size:14px;">指標名稱</th></tr></thead>
+        <tbody><tr><td style="font-size:13px;">檢查次數</td><td style="font-size:15px;">18</td></tr></tbody>
+      </table>
+      <div class="kpi-card-container" style="border:2px solid #cbd5e1;padding:12px 14px;background:#fff;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;">
+          <div class="fixture-card-title" style="font-size:14px;font-weight:bold;">Deficiency Index</div>
+          <div><span class="kpi-label-current" style="font-size:10px;">現值</span> <span class="kpi-val current-val" style="font-size:14px;font-weight:bold;">1.52</span></div>
+        </div>
+        <div class="kpi-bar-wrapper" style="position:relative;height:12px;margin:6px;"><div class="kpi-bar-container" style="position:absolute;width:100%;height:100%;background:linear-gradient(to right,#22c55e,#ef4444);"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;"><span class="kpi-min">0</span><span class="kpi-max">5</span></div>
+      </div>
+      <div class="progress-card-container" style="border:2px solid #cbd5e1;padding:12px 14px;background:#fff;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;">
+          <div class="fixture-card-title" style="font-size:14px;font-weight:bold;">完成率</div>
+          <div><span class="progress-label" style="font-size:10px;">完成度</span> <span class="kpi-val progress-val" style="font-size:14px;font-weight:bold;">92</span><span style="font-size:12px;">%</span></div>
+        </div>
+      </div>
+      <div class="zone-card-container" style="border:2px solid #cbd5e1;padding:12px 14px;background:#fff;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;">
+          <div class="fixture-card-title" style="font-size:14px;font-weight:bold;">風險區間</div>
+          <div><span class="zone-label-current" style="font-size:10px;">現值</span> <span class="zone-val current-val" style="font-size:14px;font-weight:bold;">2.64</span></div>
+        </div>
+        <div style="position:relative;height:14px;font-size:10px;"><span class="zone-limit-mid">2.45</span></div>
+        <div class="zone-bar" style="height:10px;background:linear-gradient(to right,#22c55e,#eab308,#ef4444);"></div>
+        <div style="position:relative;height:14px;font-size:10px;"><span class="zone-min">0</span><span class="zone-limit1">1.45</span><span class="zone-max">5</span></div>
+      </div>
+      <div class="trend-chart-container" style="border:2px solid #cbd5e1;padding:8px;background:#fff;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;">
+          <div class="chart-title" style="font-size:14px;font-weight:bold;">趨勢圖</div>
+          <div class="no-print"><span style="font-size:10px;">指標控制</span></div>
+        </div>
+        <div class="chart-layout-wrapper" style="display:flex;gap:8px;width:100%;">
+          <div class="no-print chart-table-area" style="flex:0 0 auto;max-width:35%;overflow-x:auto;">
+            <table class="chart-data-table" style="font-size:6px;"><thead><tr><th style="font-size:6px;">週期</th><th style="font-size:6px;">安全</th><th style="font-size:6px;">品質</th></tr></thead>
+              <tbody><tr><td style="font-size:6px;">06月</td><td class="chart-val" style="font-size:6px;">10</td><td class="chart-val" style="font-size:6px;">6</td></tr><tr><td style="font-size:6px;">07月</td><td class="chart-val" style="font-size:6px;">14</td><td class="chart-val" style="font-size:6px;">9</td></tr><tr><td style="font-size:6px;">08月</td><td class="chart-val" style="font-size:6px;">18</td><td class="chart-val" style="font-size:6px;">12</td></tr></tbody>
+            </table>
+          </div>
+          <div class="chart-canvas-area" style="flex:1 1 auto;height:220px;min-width:0;position:relative;"><canvas class="trend-canvas"></canvas></div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">${v3KpiCard('檢查總數', 18, '較上月增加 4 次', '#2563eb', [10, 14, 18])}</div>
+      ${v3MultiLineSvg(rows)}
+      ${v3TrendTable(rows)}
+    `;
+    reportData[0].title = '項目字級回歸';
+    reportData[0].columns = [legacySizedComponents];
+    reportData[0].colLayout = '1';
+    renderTable();
+    v1EnsureModuleFields();
+    window.renderAllCharts();
   });
 }
 
@@ -219,6 +289,118 @@ test('100% 縮放時工具列換行、文字可讀且無水平破版', async ({ 
   }
 });
 
+test('項目內容統一放大，部件標題維持原尺寸且圖表數值可讀', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await installTypographyFixture(page);
+  await expect.poll(() => page.evaluate(() => {
+    const canvas = document.querySelector('#tableBody canvas.trend-canvas');
+    return Boolean(canvas && canvas.width > 10 && canvas.height > 10 && Chart.getChart(canvas));
+  })).toBe(true);
+  await settleLayout(page);
+
+  const typography = await page.evaluate(() => {
+    const root = document.querySelector('#tableBody .module-content-cell');
+    const px = (selector) => parseFloat(getComputedStyle(root.querySelector(selector)).fontSize);
+    const canvas = root.querySelector('canvas.trend-canvas');
+    const chart = Chart.getChart(canvas);
+    const pointLabelPlugin = chart.config.plugins.find((plugin) => plugin.id === 'customDataLabels');
+    const pointLabelMatch = String(pointLabelPlugin.afterDatasetsDraw).match(/bold\s+(\d+)px/);
+    const svgFonts = Array.from(root.querySelectorAll('svg[aria-label="KPI 趨勢圖"] text'))
+      .map((node) => parseFloat(getComputedStyle(node).fontSize));
+    return {
+      blockTitle: px('.block-title'),
+      blockBody: px('.block-body'),
+      highlightedValue: px('.highlight-val'),
+      dataCardTitle: px('.data-card-table th'),
+      dataCardLabel: px('.data-card-table tbody td:first-child'),
+      dataCardValue: px('.data-card-table tbody td:nth-child(2)'),
+      cardTitle: px('.fixture-card-title'),
+      kpiLabel: px('.kpi-label-current'),
+      kpiValue: px('.kpi-val.current-val'),
+      kpiLimit: px('.kpi-min'),
+      progressLabel: px('.progress-label'),
+      progressValue: px('.progress-val'),
+      progressUnit: px('.progress-val + span'),
+      zoneLabel: px('.zone-label-current'),
+      zoneValue: px('.zone-val.current-val'),
+      zoneLimit: px('.zone-limit-mid'),
+      zoneLimitRowHeight: root.querySelector('.zone-limit-mid').parentElement.getBoundingClientRect().height,
+      chartTitle: px('.chart-title'),
+      chartControl: px('.trend-chart-container > div:first-child .no-print span'),
+      chartTableCell: px('.chart-data-table td'),
+      reportKpiValue: px('.report-kpi-value'),
+      reportKpiNote: px('.report-kpi-note'),
+      reportTableHeader: px('.report-detail-table th'),
+      reportTableValue: px('.report-detail-table td'),
+      svgFonts,
+      chartLegend: chart.config.options.plugins.legend.labels.font.size,
+      chartXTick: chart.config.options.scales.x.ticks.font.size,
+      chartYTick: chart.config.options.scales.y.ticks.font.size,
+      chartTopPadding: chart.config.options.layout.padding.top,
+      chartPointLabel: Number(pointLabelMatch?.[1] || 0)
+    };
+  });
+
+  expect(typography.blockTitle).toBe(14);
+  expect(typography.cardTitle).toBe(14);
+  expect(typography.chartTitle).toBe(14);
+  expect(typography.dataCardTitle).toBe(14);
+  expect(typography.blockBody).toBeGreaterThanOrEqual(16);
+  expect(typography.highlightedValue).toBeGreaterThanOrEqual(16);
+  expect(typography.dataCardLabel).toBeGreaterThanOrEqual(16);
+  expect(typography.dataCardValue).toBeGreaterThanOrEqual(17);
+  expect(typography.kpiLabel).toBeGreaterThanOrEqual(14);
+  expect(typography.kpiValue).toBeGreaterThanOrEqual(17);
+  expect(typography.kpiLimit).toBeGreaterThanOrEqual(13);
+  expect(typography.progressLabel).toBeGreaterThanOrEqual(14);
+  expect(typography.progressValue).toBeGreaterThanOrEqual(17);
+  expect(typography.progressUnit).toBeGreaterThanOrEqual(14);
+  expect(typography.zoneLabel).toBeGreaterThanOrEqual(14);
+  expect(typography.zoneValue).toBeGreaterThanOrEqual(17);
+  expect(typography.zoneLimit).toBeGreaterThanOrEqual(13);
+  expect(typography.zoneLimitRowHeight).toBeGreaterThanOrEqual(18);
+  expect(typography.chartControl).toBeGreaterThanOrEqual(12);
+  expect(typography.chartTableCell).toBeGreaterThanOrEqual(13);
+  expect(typography.reportKpiValue).toBeGreaterThanOrEqual(32);
+  expect(typography.reportKpiNote).toBeGreaterThanOrEqual(14);
+  expect(typography.reportTableHeader).toBeGreaterThanOrEqual(14);
+  expect(typography.reportTableValue).toBeGreaterThanOrEqual(16);
+  expect(Math.min(...typography.svgFonts)).toBeGreaterThanOrEqual(13);
+  expect(typography.chartLegend).toBeGreaterThanOrEqual(13);
+  expect(typography.chartXTick).toBeGreaterThanOrEqual(13);
+  expect(typography.chartYTick).toBeGreaterThanOrEqual(13);
+  expect(typography.chartTopPadding).toBeGreaterThanOrEqual(20);
+  expect(typography.chartPointLabel).toBeGreaterThanOrEqual(12);
+
+  for (const width of [1440, 1024, 390]) {
+    await page.setViewportSize({ width, height: 1100 });
+    await settleLayout(page);
+    const overflow = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      chartTableClientWidth: document.querySelector('.chart-table-area').clientWidth,
+      chartTableScrollWidth: document.querySelector('.chart-table-area').scrollWidth
+    }));
+    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+    expect(overflow.chartTableScrollWidth).toBeGreaterThanOrEqual(overflow.chartTableClientWidth);
+  }
+
+  await page.emulateMedia({ media: 'print' });
+  const printTypography = await page.evaluate(() => {
+    const root = document.querySelector('#tableBody .module-content-cell');
+    const px = (selector) => parseFloat(getComputedStyle(root.querySelector(selector)).fontSize);
+    return { blockTitle: px('.block-title'), blockBody: px('.block-body'), dataCardValue: px('.data-card-table tbody td:nth-child(2)') };
+  });
+  expect(printTypography.blockTitle).toBe(14);
+  expect(printTypography.blockBody).toBeGreaterThanOrEqual(16);
+  expect(printTypography.dataCardValue).toBeGreaterThanOrEqual(17);
+  await page.emulateMedia({ media: 'screen' });
+  expect(errors).toEqual([]);
+});
+
 test('長月報捲動時頁首與工具列保持可見，不會只剩固定漸層遮罩', async ({ page }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -251,7 +433,7 @@ test('長月報捲動時頁首與工具列保持可見，不會只剩固定漸�
 
 test('進站與登入後最左上角使用同一份 FPMC Logo 且不造成水平破版', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto('/');
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
 
   const gateLogo = page.locator('#siteAccessBrandLogo');
   await expect(gateLogo).toBeVisible();
@@ -529,6 +711,62 @@ test('未提交的 module 變更離開後仍保留 lease，不提前放鎖', asy
   const state = await page.request.get('/__fake_state').then((response) => response.json());
   expect(state.modules[0].revision).toBe(1);
   expect(state.modules[0].payload.title).toBe('A 原始項目');
+  expect(errors).toEqual([]);
+});
+
+test('revision conflict 保留本機草稿，重載後由使用者確認才以目前內容重試', async ({ page, request }) => {
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await request.post('/__fake_remote_module_change');
+
+  const moduleId = '22222222-2222-4222-8222-222222222221';
+  let row = page.locator(`#tableBody tr[data-v7-entity-id="${moduleId}"]`);
+  let title = row.locator('td').nth(1).locator('.editable-div');
+  await title.click();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await title.fill('本機待救回內容');
+  await page.locator('#mainTitle').click();
+
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('REVISION_CONFLICT');
+  let state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.modules[0].revision).toBe(2);
+  expect(state.modules[0].payload.title).toBe('遠端較新內容');
+  const savedDraft = await page.evaluate((id) => JSON.parse(localStorage.getItem(`monthly_v7_draft:module:${id}`) || 'null'), moduleId);
+  expect(savedDraft.payload.title.replace(/<br>$/i, '')).toBe('本機待救回內容');
+
+  await page.reload();
+  row = page.locator(`#tableBody tr[data-v7-entity-id="${moduleId}"]`);
+  title = row.locator('td').nth(1).locator('.editable-div');
+  await expect(title).toHaveText('本機待救回內容');
+  await expect.poll(() => page.locator('#v4-cloud-runtime-status').textContent()).toMatch(/已恢復 1 個未提交本機草稿|項目保存衝突：REVISION_CONFLICT/);
+
+  let cancellationPrompt = '';
+  page.once('dialog', async (dialog) => {
+    cancellationPrompt = dialog.message();
+    await dialog.dismiss();
+  });
+  await page.getByRole('button', { name: '保存修改' }).click();
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('已取消覆蓋');
+  state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.modules[0].revision).toBe(2);
+  expect(state.modules[0].payload.title).toBe('遠端較新內容');
+  expect(await page.evaluate((id) => localStorage.getItem(`monthly_v7_draft:module:${id}`), moduleId)).not.toBeNull();
+
+  let confirmation = '';
+  page.once('dialog', async (dialog) => {
+    confirmation = dialog.message();
+    await dialog.accept();
+  });
+  await page.getByRole('button', { name: '保存修改' }).click();
+  await expect.poll(async () => request.get('/__fake_state').then((response) => response.json()).then((next) => next.modules[0].revision)).toBe(3);
+  state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.modules[0].payload.title.replace(/<br>$/i, '')).toBe('本機待救回內容');
+  expect(cancellationPrompt).toContain('目前畫面內容');
+  expect(cancellationPrompt).toContain('取消');
+  expect(confirmation).toBe(cancellationPrompt);
+  expect(await page.evaluate((id) => localStorage.getItem(`monthly_v7_draft:module:${id}`), moduleId)).toBeNull();
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('逐項雲端保存完成');
   expect(errors).toEqual([]);
 });
 

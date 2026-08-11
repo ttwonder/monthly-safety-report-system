@@ -444,22 +444,22 @@
                         responsive: true,
                         maintainAspectRatio: false,
                         animation: { duration: 0 }, // 關閉動畫確保編輯順暢
-                        layout: { padding: { top: 12, right: 10 } }, // 留白：防止頂部標籤與右側節點被截斷
+                        layout: { padding: { top: 20, right: 12 } }, // 放大數值後保留足夠空間，避免頂部標籤與右側節點被截斷
                         plugins: {
                             legend: {
                                 position: 'top',
-                                labels: { boxWidth: 12, usePointStyle: false, font: { size: 10 } }
+                                labels: { boxWidth: 14, usePointStyle: false, font: { size: 13 } }
                             }
                         },
                         scales: {
                             y: { 
                                 beginAtZero: true,
                                 grid: { color: '#f1f5f9' },
-                                ticks: { font: { size: 10 } }
+                                ticks: { font: { size: 13 } }
                             },
                             x: {
                                 grid: { display: false },
-                                ticks: { font: { size: 10 } }
+                                ticks: { font: { size: 13 } }
                             }
                         }
                     },
@@ -473,7 +473,7 @@
                                 meta.data.forEach((element, index) => {
                                     // 繪製標籤
                                     ctx.fillStyle = dataset.borderColor; // 使用與折線相同的顏色
-                                    ctx.font = 'bold 6px sans-serif'; // 大小 6px
+                                    ctx.font = 'bold 12px sans-serif'; // 放大圖中每個節點的數值
                                     ctx.textAlign = 'center';
                                     ctx.textBaseline = 'bottom';
                                     const dataString = dataset.data[index];
@@ -515,9 +515,9 @@
             const colCount = headerRow.cells.length; // 改用 cells 精準抓取欄位數
             
             const tr = document.createElement('tr');
-            let innerHTML = '<td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;">新週期</td>';
+            let innerHTML = '<td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;">新週期</td>';
             for(let i = 1; i < colCount; i++) {
-                innerHTML += `<td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;" class="chart-val">0</td>`;
+                innerHTML += `<td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;" class="chart-val">0</td>`;
             }
             tr.innerHTML = innerHTML;
             tbody.appendChild(tr);
@@ -552,8 +552,8 @@
             const nextIdx = headerRow.cells.length; 
             const th = document.createElement('th');
             th.setAttribute('contenteditable', 'true');
-            // 【縮小一半】: padding:1px, font-size:6px, min-width:15px
-            th.style.cssText = "border: 1px solid #cbd5e1; background: #f1f5f9; padding: 1px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 15px; white-space: nowrap; font-size: 6px;";
+            // 可讀性：13px 字級、3px 5px 內距與 36px 最小寬度
+            th.style.cssText = "border: 1px solid #cbd5e1; background: #f1f5f9; padding: 3px 5px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 36px; white-space: nowrap; font-size: 13px;";
             th.innerText = `指標 ${nextIdx}`;
             headerRow.appendChild(th);
 
@@ -562,8 +562,8 @@
                 const tr = table.rows[i];
                 const td = document.createElement('td');
                 td.setAttribute('contenteditable', 'true');
-                // 【縮小一半】: padding:1px, font-size:6px
-                td.style.cssText = "border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;";
+                // 可讀性：13px 字級與 3px 5px 內距
+                td.style.cssText = "border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;";
                 td.className = "chart-val";
                 td.innerText = "0";
                 tr.appendChild(td);
@@ -643,30 +643,30 @@
                     <!-- 數據輸入表格 (列印時隱藏) -->
                     <!-- 放寬 max-width 至 35% 以防太擁擠 -->
                     <div style="flex: 0 0 auto; max-width: 35%; overflow-x: auto; background: #f8fafc; border-radius: 4px; border: 1px dashed #cbd5e1; padding: 1px;" class="no-print chart-table-area chart-table-wrapper no-scrollbar">
-                        <!-- 【全部縮小一半】：字體全面 6px，所有 padding 為 1px -->
-                        <table class="chart-data-table" contenteditable="false" style="width: max-content; border-collapse: collapse; font-size: 6px; background: #fff; line-height: 1; margin: 0;">
+                        <!-- 可讀性：資料表統一 13px，並保留水平捲動避免擠壓圖表 -->
+                        <table class="chart-data-table" contenteditable="false" style="width: max-content; border-collapse: collapse; font-size: 13px; background: #fff; line-height: 1.3; margin: 0;">
                             <thead>
                                 <tr>
-                                    <th contenteditable="true" style="border: 1px solid #cbd5e1; background: #f1f5f9; padding: 1px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 15px; white-space: nowrap; font-size: 6px;">週期</th>
-                                    <th contenteditable="true" style="border: 1px solid #cbd5e1; background: #f1f5f9; padding: 1px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 15px; white-space: nowrap; font-size: 6px;">指標 1</th>
-                                    <th contenteditable="true" style="border: 1px solid #cbd5e1; background: #f1f5f9; padding: 1px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 15px; white-space: nowrap; font-size: 6px;">指標 2</th>
+                                    <th contenteditable="true" style="border: 1px solid #cbd5e1; background: #f1f5f9; padding: 3px 5px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 36px; white-space: nowrap; font-size: 13px;">週期</th>
+                                    <th contenteditable="true" style="border: 1px solid #cbd5e1; background: #f1f5f9; padding: 3px 5px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 36px; white-space: nowrap; font-size: 13px;">指標 1</th>
+                                    <th contenteditable="true" style="border: 1px solid #cbd5e1; background: #f1f5f9; padding: 3px 5px; text-align: center; font-weight: bold; color: #475569; outline: none; min-width: 36px; white-space: nowrap; font-size: 13px;">指標 2</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr>
-                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;">Q1</td>
-                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;" class="chart-val">10</td>
-                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;" class="chart-val">15</td>
+                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;">Q1</td>
+                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;" class="chart-val">10</td>
+                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;" class="chart-val">15</td>
                                 </tr>
                                 <tr>
-                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;">Q2</td>
-                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;" class="chart-val">20</td>
-                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;" class="chart-val">18</td>
+                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;">Q2</td>
+                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;" class="chart-val">20</td>
+                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;" class="chart-val">18</td>
                                 </tr>
                                 <tr>
-                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;">Q3</td>
-                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;" class="chart-val">15</td>
-                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 1px; text-align: center; outline: none; white-space: nowrap; font-size: 6px;" class="chart-val">22</td>
+                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;">Q3</td>
+                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;" class="chart-val">15</td>
+                                    <td contenteditable="true" style="border: 1px solid #cbd5e1; padding: 3px 5px; text-align: center; outline: none; white-space: nowrap; font-size: 13px;" class="chart-val">22</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -878,7 +878,7 @@
             align-items: center;
             gap: 6px;
         }
-        .block-body { font-size: 13px; line-height: 1.4; color: #334155; }
+        .block-body { font-size: 16px; line-height: 1.6; color: #334155; }
         .block-body ul { list-style-type: disc; padding-left: 20px; margin-top: 2px; margin-bottom: 2px; }
         .block-body ol { list-style-type: decimal; padding-left: 20px; margin-top: 2px; margin-bottom: 2px; }
 
@@ -1671,6 +1671,97 @@
         #v5TopStatus .v5-sync-btn { min-height:32px; padding:5px 10px; font-size:13px; }
         #reportContainer { font-size:15px; }
         .module-content-cell .editable-div { font-size:16px; line-height:1.6; }
+
+        /* === V7.0.5 項目內容可讀性：部件標題維持，內文、標籤與數值統一放大 === */
+        :root {
+            --report-detail-font-size: 16px;
+            --report-detail-line-height: 1.6;
+            --report-compact-font-size: 14px;
+            --report-chart-font-size: 13px;
+            --report-key-value-font-size: 17px;
+        }
+        .module-content-cell .editable-div,
+        #tableBody .module-content-cell .editable-div,
+        .v1-selected-editor-print-clone .module-content-cell .editable-div {
+            font-size: var(--report-detail-font-size) !important;
+            line-height: var(--report-detail-line-height) !important;
+        }
+        .module-content-cell .block-title,
+        .module-content-cell .data-card-table th,
+        .module-content-cell .chart-title {
+            font-size: 14px !important;
+        }
+        .module-content-cell .block-body {
+            font-size: var(--report-detail-font-size) !important;
+            line-height: var(--report-detail-line-height) !important;
+        }
+        .module-content-cell .custom-data-table tbody td,
+        .module-content-cell .report-detail-table tbody td {
+            padding: 4px 6px !important;
+            font-size: var(--report-detail-font-size) !important;
+            line-height: 1.5 !important;
+        }
+        .module-content-cell .report-detail-table thead th {
+            padding: 4px 6px !important;
+            font-size: 14px !important;
+            line-height: 1.4 !important;
+        }
+        .module-content-cell .data-card-table tbody td:nth-child(2) {
+            font-size: var(--report-key-value-font-size) !important;
+        }
+        .module-content-cell :is(.kpi-label-avg, .kpi-label-current, .kpi-label-target, .progress-label, .zone-label-current) {
+            font-size: var(--report-compact-font-size) !important;
+            line-height: 1.35 !important;
+        }
+        .module-content-cell :is(.kpi-val, .progress-val, .zone-val) {
+            font-size: var(--report-key-value-font-size) !important;
+            line-height: 1.25 !important;
+        }
+        .module-content-cell .progress-val + span {
+            font-size: var(--report-compact-font-size) !important;
+        }
+        .module-content-cell .kpi-card-container > div:has(> .kpi-min) {
+            margin-top: 6px !important;
+            font-size: var(--report-chart-font-size) !important;
+            line-height: 1.35 !important;
+        }
+        .module-content-cell .zone-card-container > div:has(.zone-limit-mid),
+        .module-content-cell .zone-card-container > div:has(.zone-min) {
+            height: 18px !important;
+            font-size: var(--report-chart-font-size) !important;
+            line-height: 1.35 !important;
+        }
+        .module-content-cell .chart-data-table {
+            font-size: var(--report-chart-font-size) !important;
+            line-height: 1.3 !important;
+        }
+        .module-content-cell .chart-data-table th,
+        .module-content-cell .chart-data-table td {
+            min-width: 36px !important;
+            padding: 3px 5px !important;
+            font-size: var(--report-chart-font-size) !important;
+            line-height: 1.3 !important;
+        }
+        .module-content-cell .trend-chart-container > div:first-child .no-print {
+            flex-wrap: wrap;
+            font-size: 12px !important;
+            line-height: 1.3 !important;
+        }
+        .module-content-cell .trend-chart-container > div:first-child .no-print :is(span, input, button, i) {
+            font-size: 12px !important;
+        }
+        .module-content-cell .trend-chart-container > div:first-child .no-print .toolbar-btn {
+            min-height: 24px !important;
+        }
+        .module-content-cell .report-kpi-value {
+            font-size: 32px !important;
+            line-height: 1.15 !important;
+        }
+        .module-content-cell .report-kpi-note,
+        .module-content-cell .attachment-link {
+            font-size: var(--report-compact-font-size) !important;
+            line-height: 1.45 !important;
+        }
         @media screen and (max-width:1200px) {
             .toolbar-basic-group,
             .toolbar-global-group,
@@ -2066,8 +2157,8 @@
 
     <script src="./vendor/supabase-2.112.2.js"></script>
     <script src="./monthly-collaboration-core.js"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.4"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.4"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.5"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.5"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont() {
@@ -2266,7 +2357,7 @@
             });
         }
 
-        async function saveToDB(data, explicitTimestamp = null) {
+        async function saveToDB(data, explicitTimestamp = null, options = {}) {
             data = sanitizeReportDataForStorage(data);
             const dateStr = document.getElementById('reportDate').value;
             let titleStr = "月度安全會議報告";
@@ -2297,10 +2388,12 @@
                     timestamp: explicitTimestamp || Date.now() 
                 });
                 transaction.oncomplete = async () => {
-                    if (typeof v4QueueAutoSave === 'function') v4QueueAutoSave('月報編輯');
+                    if (!V4_CLOUD_APPLYING && typeof v4QueueAutoSave === 'function') v4QueueAutoSave('月報編輯');
                     if (window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING) {
                         try {
-                            const cloud = await window.MonthlyV7App.persistReportData(reportData);
+                            const cloud = await window.MonthlyV7App.persistReportData(reportData, {
+                                resolveRevisionConflict: options.resolveRevisionConflict === true
+                            });
                             resolve({ localSaved: true, cloudSaved: cloud?.saved === true, cloud });
                         } catch (error) {
                             resolve({ localSaved: true, cloudSaved: false, error });
@@ -2328,8 +2421,10 @@
             }
             return new Promise((resolve) => {
                 setTimeout(async () => {
-                    const saved = await saveToDB(reportData, Date.now());
-                    if (window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING && v5CurrentUser()) {
+                    const saved = await saveToDB(reportData, Date.now(), {
+                        resolveRevisionConflict: showMsg === true
+                    });
+                    if (!saved?.error && window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING && v5CurrentUser()) {
                         try { await window.MonthlyV7App.persistReportMeta(v7CurrentReportMeta()); }
                         catch (error) { saved.error = saved.error || error; }
                     }
@@ -2485,16 +2580,16 @@
                 </thead>
                 <tbody>
                     <tr>
-                        <td style="padding: 2px 4px; text-align: left; border: none; border-right: 2px solid ${borderColor}; font-size: 13px;">檢查次數</td>
-                        <td style="padding: 2px 4px; text-align: center; border: none; font-weight: bold; border-bottom: 1px solid #333; font-size: 15px;">0</td>
+                        <td style="padding: 2px 4px; text-align: left; border: none; border-right: 2px solid ${borderColor}; font-size: 16px;">檢查次數</td>
+                        <td style="padding: 2px 4px; text-align: center; border: none; font-weight: bold; border-bottom: 1px solid #333; font-size: 17px;">0</td>
                     </tr>
                     <tr>
-                        <td style="padding: 2px 4px; text-align: left; border: none; border-right: 2px solid ${borderColor}; font-size: 13px;">檢查缺失數</td>
-                        <td style="padding: 2px 4px; text-align: center; border: none; font-weight: bold; border-bottom: 1px solid #333; font-size: 15px;">0</td>
+                        <td style="padding: 2px 4px; text-align: left; border: none; border-right: 2px solid ${borderColor}; font-size: 16px;">檢查缺失數</td>
+                        <td style="padding: 2px 4px; text-align: center; border: none; font-weight: bold; border-bottom: 1px solid #333; font-size: 17px;">0</td>
                     </tr>
                     <tr>
-                        <td style="padding: 2px 4px; text-align: left; border: none; border-right: 2px solid ${borderColor}; font-size: 13px;">平均缺失數</td>
-                        <td style="padding: 2px 4px; text-align: center; border: none; font-weight: bold; border-bottom: 1px solid #333; font-size: 15px;">0.0</td>
+                        <td style="padding: 2px 4px; text-align: left; border: none; border-right: 2px solid ${borderColor}; font-size: 16px;">平均缺失數</td>
+                        <td style="padding: 2px 4px; text-align: center; border: none; font-weight: bold; border-bottom: 1px solid #333; font-size: 17px;">0.0</td>
                     </tr>
                 </tbody>
             </table>`;
@@ -2517,16 +2612,16 @@
                     <div style="display: flex; gap: 8px; align-items: baseline;">
                         <!-- Avg (預設隱藏，可透過眼睛按鈕開啟) -->
                         <div class="avg-group" style="display: none;">
-                            <span class="kpi-label-avg" style="color:#ca8a04; font-size: 10px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #fde047'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">Avg</span> 
-                            <span class="kpi-val avg-val" contenteditable="true" style="font-size: 13px; font-weight: bold; color: #ca8a04; border-bottom: 1px solid #fde047; outline: none; min-width: 16px; display: inline-block; text-align: center;" onblur="triggerAutoSave(this)">65</span>
+                            <span class="kpi-label-avg" style="color:#ca8a04; font-size: 14px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #fde047'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">Avg</span>
+                            <span class="kpi-val avg-val" contenteditable="true" style="font-size: 17px; font-weight: bold; color: #ca8a04; border-bottom: 1px solid #fde047; outline: none; min-width: 16px; display: inline-block; text-align: center;" onblur="triggerAutoSave(this)">65</span>
                         </div>
                         <div>
-                            <span class="kpi-label-current" style="color:#64748b; font-size: 10px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">現值</span> 
-                            <span class="kpi-val current-val" contenteditable="true" style="font-size: 14px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #94a3b8; outline: none; min-width: 16px; display: inline-block; text-align: center;" onblur="triggerAutoSave(this)">50</span>
+                            <span class="kpi-label-current" style="color:#64748b; font-size: 14px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">現值</span>
+                            <span class="kpi-val current-val" contenteditable="true" style="font-size: 17px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #94a3b8; outline: none; min-width: 16px; display: inline-block; text-align: center;" onblur="triggerAutoSave(this)">50</span>
                         </div>
                         <div>
-                            <span class="kpi-label-target" style="color:#ef4444; font-size: 10px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #fca5a5'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">KPI</span> 
-                            <span class="kpi-val target-val" contenteditable="true" style="font-size: 13px; font-weight: bold; color: #ef4444; border-bottom: 1px solid #fca5a5; outline: none; min-width: 16px; display: inline-block; text-align: center;" onblur="triggerAutoSave(this)">80</span>
+                            <span class="kpi-label-target" style="color:#ef4444; font-size: 14px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #fca5a5'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">KPI</span>
+                            <span class="kpi-val target-val" contenteditable="true" style="font-size: 17px; font-weight: bold; color: #ef4444; border-bottom: 1px solid #fca5a5; outline: none; min-width: 16px; display: inline-block; text-align: center;" onblur="triggerAutoSave(this)">80</span>
                         </div>
                         <!-- 切換顯示 Avg 數值與豎線的按鈕 -->
                         <button contenteditable="false" onclick="window.toggleAvg(this)" class="no-print" style="color: #cbd5e1; cursor: pointer; background: none; border: none; padding: 0 2px; font-size: 12px; margin-left: 2px;" title="顯示/隱藏 Avg 標線" onmouseover="this.style.color='#f59e0b'" onmouseout="this.style.color='#cbd5e1'"><i class="fas fa-eye"></i></button>
@@ -2549,7 +2644,7 @@
                 </div>
                 
                 <!-- 第三排：自訂區間最大最小值 -->
-                <div style="display: flex; justify-content: space-between; font-size: 10px; color: #94a3b8; margin-top: 4px;">
+                <div style="display: flex; justify-content: space-between; font-size: 13px; line-height: 1.35; color: #94a3b8; margin-top: 6px;">
                     <span contenteditable="true" class="kpi-min" style="outline:none; border-bottom: 1px dashed transparent;" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">0</span>
                     <span contenteditable="true" class="kpi-max" style="outline:none; border-bottom: 1px dashed transparent;" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">100</span>
                 </div>
@@ -2574,9 +2669,9 @@
                 <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 8px;">
                     <div style="font-weight: bold; color: #334155; font-size: 14px; outline: none; border-bottom: 1px dashed #94a3b8; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" contenteditable="true" onblur="triggerAutoSave(this)">項目名稱</div>
                     <div style="display: flex; gap: 4px; align-items: baseline;">
-                        <span class="progress-label" style="color:#64748b; font-size: 10px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">完成度</span> 
-                        <span class="kpi-val progress-val" contenteditable="true" style="font-size: 14px; font-weight: bold; color: #22c55e; border-bottom: 1px solid #bbf7d0; outline: none; min-width: 20px; display: inline-block; text-align: right;" onblur="triggerAutoSave(this)">50</span>
-                        <span style="color:#64748b; font-size: 12px; font-weight: bold;" contenteditable="false">%</span>
+                        <span class="progress-label" style="color:#64748b; font-size: 14px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">完成度</span>
+                        <span class="kpi-val progress-val" contenteditable="true" style="font-size: 17px; font-weight: bold; color: #22c55e; border-bottom: 1px solid #bbf7d0; outline: none; min-width: 20px; display: inline-block; text-align: right;" onblur="triggerAutoSave(this)">50</span>
+                        <span style="color:#64748b; font-size: 14px; font-weight: bold;" contenteditable="false">%</span>
                     </div>
                 </div>
                 
@@ -2608,13 +2703,13 @@
                 <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 2px;">
                     <div style="font-weight: bold; color: #334155; font-size: 14px; outline: none; border-bottom: 1px dashed #94a3b8; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" contenteditable="true" onblur="triggerAutoSave(this)">評估指標</div>
                     <div style="display: flex; gap: 4px; align-items: baseline;">
-                        <span class="zone-label-current" style="color:#64748b; font-size: 10px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">現值</span> 
-                        <span class="zone-val current-val" contenteditable="true" style="font-size: 14px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #94a3b8; outline: none; min-width: 20px; display: inline-block; text-align: right;" onblur="triggerAutoSave(this)">1.55</span>
+                        <span class="zone-label-current" style="color:#64748b; font-size: 14px; outline: none; border-bottom: 1px dashed transparent;" contenteditable="true" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">現值</span>
+                        <span class="zone-val current-val" contenteditable="true" style="font-size: 17px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #94a3b8; outline: none; min-width: 20px; display: inline-block; text-align: right;" onblur="triggerAutoSave(this)">1.55</span>
                     </div>
                 </div>
                 
                 <!-- 上方黃色中間值標籤 -->
-                <div style="position: relative; height: 14px; margin: 0 6px 1px 6px; font-size: 10px; color: #64748b;">
+                <div style="position: relative; height: 18px; margin: 0 6px 1px 6px; font-size: 13px; line-height: 1.35; color: #64748b;">
                     <span contenteditable="true" class="zone-limit-mid" style="position: absolute; left: 49%; bottom: 0px; transform: translateX(-50%); outline:none; border-bottom: 1px dashed #cbd5e1; transition: left 0.3s ease-out;" onblur="triggerAutoSave(this)">2.45</span>
                 </div>
                 
@@ -2625,7 +2720,7 @@
                 </div>
 
                 <!-- 下方交界標籤 -->
-                <div style="position: relative; height: 14px; margin: 1px 6px 0 6px; font-size: 10px; color: #64748b;">
+                <div style="position: relative; height: 18px; margin: 1px 6px 0 6px; font-size: 13px; line-height: 1.35; color: #64748b;">
                     <span contenteditable="true" class="zone-min" style="position: absolute; left: 0; top: 0px; outline:none; border-bottom: 1px dashed transparent;" onfocus="this.style.borderBottom='1px dashed #cbd5e1'" onblur="this.style.borderBottom='1px dashed transparent'; triggerAutoSave(this)">0</span>
                     <span contenteditable="true" class="zone-limit1" style="position: absolute; left: 29%; top: 0px; transform: translateX(-50%); outline:none; border-bottom: 1px dashed #cbd5e1; transition: left 0.3s ease-out;" onblur="triggerAutoSave(this)">1.45</span>
                     <span contenteditable="true" class="zone-limit2" style="position: absolute; left: 69%; top: 0px; transform: translateX(-50%); outline:none; border-bottom: 1px dashed #cbd5e1; transition: left 0.3s ease-out;" onblur="triggerAutoSave(this)">3.45</span>
@@ -5185,7 +5280,7 @@
         }
 
         function v3MultiLineSvg(rows) {
-            const width = 720, height = 260, left = 42, right = 16, top = 20, bottom = 42;
+            const width = 720, height = 260, left = 48, right = 18, top = 24, bottom = 46;
             const series = [
                 { key: 'inspectionCount', label: '檢查', color: '#2563eb' },
                 { key: 'deficiencyTotal', label: '缺失/觀察', color: '#f97316' },
@@ -5201,18 +5296,18 @@
                 const circles = rows.map((r, i) => `<circle cx="${x(i)}" cy="${y(r[s.key])}" r="3" fill="${s.color}"/>`).join('');
                 return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>${circles}`;
             }).join('');
-            const labels = rows.map((r, i) => `<text x="${x(i)}" y="${height - 18}" text-anchor="middle" font-size="11" fill="#475569">${r.label}</text>`).join('');
-            const grid = [0, .25, .5, .75, 1].map(t => `<line x1="${left}" y1="${top + plotH * t}" x2="${width - right}" y2="${top + plotH * t}" stroke="#e2e8f0"/><text x="${left - 8}" y="${top + plotH * t + 4}" text-anchor="end" font-size="10" fill="#94a3b8">${Math.round(max * (1 - t))}</text>`).join('');
+            const labels = rows.map((r, i) => `<text x="${x(i)}" y="${height - 16}" text-anchor="middle" font-size="13" fill="#475569">${r.label}</text>`).join('');
+            const grid = [0, .25, .5, .75, 1].map(t => `<line x1="${left}" y1="${top + plotH * t}" x2="${width - right}" y2="${top + plotH * t}" stroke="#e2e8f0"/><text x="${left - 9}" y="${top + plotH * t + 5}" text-anchor="end" font-size="13" fill="#64748b">${Math.round(max * (1 - t))}</text>`).join('');
             const legend = series.map((s, i) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px;"><span style="width:10px;height:10px;border-radius:99px;background:${s.color};display:inline-block;"></span>${s.label}</span>`).join('');
-            return `<div style="border:1px solid #dbeafe;border-radius:10px;padding:8px;background:#fff;break-inside:avoid;"><div style="font-size:12px;color:#334155;margin-bottom:4px;">${legend}</div><svg viewBox="0 0 ${width} ${height}" width="100%" height="260" role="img" aria-label="KPI 趨勢圖">${grid}${lines}${labels}</svg></div>`;
+            return `<div class="report-trend-svg" style="border:1px solid #dbeafe;border-radius:10px;padding:8px;background:#fff;break-inside:avoid;"><div style="font-size:14px;line-height:1.4;color:#334155;margin-bottom:4px;">${legend}</div><svg viewBox="0 0 ${width} ${height}" width="100%" height="260" role="img" aria-label="KPI 趨勢圖">${grid}${lines}${labels}</svg></div>`;
         }
 
         function v3KpiCard(title, value, note, color, sparkValues) {
-            return `<div class="v1-category-card" style="border-color:${color}33;background:linear-gradient(180deg,#fff,${color}0d);"><div class="text-xs font-bold" style="color:${color};">${title}</div><div class="text-3xl font-black" style="color:${color};">${value}</div><div style="height:44px;">${v3SparkSvg(sparkValues, color)}</div><div class="text-xs text-slate-500">${note}</div></div>`;
+            return `<div class="v1-category-card" style="border-color:${color}33;background:linear-gradient(180deg,#fff,${color}0d);"><div class="report-kpi-title text-xs font-bold" style="color:${color};">${title}</div><div class="report-kpi-value text-3xl font-black" style="color:${color};">${value}</div><div style="height:44px;">${v3SparkSvg(sparkValues, color)}</div><div class="report-kpi-note text-xs text-slate-500">${note}</div></div>`;
         }
 
         function v3TrendTable(rows) {
-            return `<div class="overflow-auto border border-slate-200 rounded-lg mt-3"><table style="min-width:760px;table-layout:auto;"><thead><tr><th>月份</th><th>檢查</th><th>缺失/觀察</th><th>滯留/重大</th><th>PSC平均</th><th>高風險</th><th>重複</th><th>行動完成率</th><th>Safety Walk</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.label}</td><td>${r.inspectionCount}</td><td>${r.deficiencyTotal}</td><td>${r.detentionTotal}</td><td>${r.pscAvg}</td><td>${r.highRiskCount}</td><td>${r.repeatedCount}</td><td>${r.actionCompletionRate}%</td><td>${r.safetyWalkCount}</td></tr>`).join('')}</tbody></table></div>`;
+            return `<div class="overflow-auto border border-slate-200 rounded-lg mt-3"><table class="report-detail-table" style="min-width:760px;table-layout:auto;"><thead><tr><th>月份</th><th>檢查</th><th>缺失/觀察</th><th>滯留/重大</th><th>PSC平均</th><th>高風險</th><th>重複</th><th>行動完成率</th><th>Safety Walk</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.label}</td><td>${r.inspectionCount}</td><td>${r.deficiencyTotal}</td><td>${r.detentionTotal}</td><td>${r.pscAvg}</td><td>${r.highRiskCount}</td><td>${r.repeatedCount}</td><td>${r.actionCompletionRate}%</td><td>${r.safetyWalkCount}</td></tr>`).join('')}</tbody></table></div>`;
         }
 
         function v3SetTrendMonths(months) {
@@ -5519,13 +5614,20 @@
                 V4_CLOUD_SAVING = true;
                 try {
                     v4SetCloudRuntimeStatus('正在逐項保存到雲端...', 'muted');
-                    await window.MonthlyV7App.persistReportData(reportData);
+                    await window.MonthlyV7App.persistReportData(reportData, {
+                        resolveRevisionConflict: !silent
+                    });
                     await window.MonthlyV7App.flush(v7CurrentReportMeta());
                     v4SetCloudRuntimeStatus(`逐項雲端保存完成｜watermark ${window.MonthlyV7App.client?.watermark || 0}`, 'ok');
                     if (!silent) showToast('逐項雲端保存完成');
                     renderV4CloudPane();
                     return true;
                 } catch (error) {
+                    if (error?.code === 'REVISION_CONFLICT_CANCELLED') {
+                        v4SetCloudRuntimeStatus('已取消覆蓋；雲端未變更，本機草稿仍完整保留。', 'warn');
+                        if (!silent) showToast('已取消覆蓋；本機草稿仍保留。');
+                        return false;
+                    }
                     v4SetCloudRuntimeStatus('逐項保存失敗：' + error.message + '（本機草稿已保留）', 'error');
                     if (!silent) alert('保存失敗，本機草稿已保留：' + error.message);
                     return false;
@@ -6658,18 +6760,32 @@
                 await v4ApplyCloudBundle(bundle, 'V7 逐項雲端', { silent: true });
                 // 現有 UI 會補 moduleCategory/pdfOrder 等穩定預設；立即校準 baseline，避免把正規化誤判成多人變更。
                 reportData.forEach(item => window.MonthlyV7App?.syncModuleBaseline?.(item));
+                const restoredDraftCount = reportData.filter(item => item?._v7Id
+                    && window.MonthlyV7App?.client?.readDraft?.('module', item._v7Id)).length;
                 const config = v4GetCloudConfig();
                 config.cloudRevision = Number(snapshot?.watermark || 0);
                 config.lastSyncAt = new Date().toISOString();
                 localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
-                v4SetCloudRuntimeStatus(`V7 逐項資料已載入｜watermark ${config.cloudRevision}`, 'ok');
+                if (restoredDraftCount > 0) {
+                    v4SetCloudRuntimeStatus(`已恢復 ${restoredDraftCount} 個未提交本機草稿；請按「保存修改」完成雲端提交。`, 'warn');
+                } else {
+                    v4SetCloudRuntimeStatus(`V7 逐項資料已載入｜watermark ${config.cloudRevision}`, 'ok');
+                }
             },
             applyEntity: v7ApplyRemoteEntity,
             setStatus: v4SetCloudRuntimeStatus,
             toast: showToast,
+            confirmRevisionOverwrite: (info) => {
+                const count = Math.max(1, Array.isArray(info?.entityIds) ? info.entityIds.length : 1);
+                return confirm(
+                    `偵測到 ${count} 個項目的雲端 revision 已更新。\n\n` +
+                    '按「確定」：以目前畫面內容作為下一版保存；同一項目的較新雲端內容會被取代。\n' +
+                    '按「取消」：不改動雲端，並繼續完整保留本機草稿。'
+                );
+            },
             onConflict: (info) => {
-                v4SetCloudRuntimeStatus(`項目保存衝突：${info?.result?.error || '雲端版本已改變'}。本機草稿已保留。`, 'error');
-                showToast('此項目未覆蓋雲端；本機草稿已保留，請同步後處理。');
+                v4SetCloudRuntimeStatus(`項目保存衝突：${info?.result?.error || '雲端版本已改變'}。本機草稿已保留；請按「保存修改」確認處理。`, 'error');
+                showToast('此項目未覆蓋雲端；本機草稿已保留。');
             },
             onRemoteChangeWhileEditing: () => v4SetCloudRuntimeStatus('正在編輯的項目有遠端新版本；目前草稿未被覆蓋。', 'warn'),
             onLeaseLost: () => v4SetCloudRuntimeStatus('編輯權已失效；內容保留為本機草稿，禁止直接覆蓋。', 'error'),
