@@ -37,6 +37,21 @@ async function enterAndLogin(page, username, password) {
     && window.MonthlyV7App.client.siteSession
     && window.MonthlyV7App.client.siteSession.id
   )), { message: 'V7 authoritative site session should be ready before user login' }).toBe(true);
+  await expect.poll(() => page.evaluate(() => {
+    const snapshotModules = window.MonthlyV7App?.client?.snapshot?.modules || [];
+    const snapshotIds = snapshotModules.map((item) => String(item?.id || ''));
+    const modelIds = Array.isArray(reportData)
+      ? reportData.map((item) => String(item?._v7Id || ''))
+      : [];
+    const domIds = Array.from(document.querySelectorAll('#tableBody tr[data-v7-entity-id]'))
+      .map((row) => String(row.dataset.v7EntityId || ''));
+    return snapshotIds.length > 0
+      && JSON.stringify(modelIds) === JSON.stringify(snapshotIds)
+      && JSON.stringify(domIds) === JSON.stringify(snapshotIds);
+  }), {
+    timeout: 30000,
+    message: 'site-entry boot should finish applying the authoritative snapshot before user login'
+  }).toBe(true);
   await page.evaluate(({ loginUsername, loginPassword }) => {
     window.__monthlyPwLoginState = { status: 'pending', error: '' };
     window.__monthlyPwLoginPromise = window.MonthlyV7App.login(loginUsername, loginPassword)
@@ -230,6 +245,22 @@ async function installTypographyFixture(page) {
 
 test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
+});
+
+test('雲端 module title 保留安全格式但不得建立或執行持久型 XSS 節點', async ({ page, request }) => {
+  await page.addInitScript(() => { window.__v7TitleXssExecuted = 0; });
+  await request.post('/__fake_malicious_module_title');
+  await enterAndLogin(page, 'owner', 'owner-pass');
+
+  const title = page.locator('#tableBody .module-title-editor').first();
+  await expect(title.locator('b')).toHaveText('安全粗體');
+  await expect(title.locator('b')).not.toHaveAttribute('data-safe-title');
+  await expect(title.locator('img,script,iframe,object,embed,svg,math')).toHaveCount(0);
+  expect(await title.evaluate((element) => Array.from(element.querySelectorAll('*')).some((node) =>
+    Array.from(node.attributes).some((attribute) => /^on/i.test(attribute.name))
+  ))).toBe(false);
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => window.__v7TitleXssExecuted)).toBe(0);
 });
 
 test('登出帳號保留 site session 並立即移除 Owner 身份，不退回進站 gate', async ({ page }) => {
@@ -652,27 +683,26 @@ test('項目內容統一放大，部件標題維持原尺寸且圖表數值可�
 test('長月報捲動時頁首與工具列保持可見，不會只剩固定漸層遮罩', async ({ page }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.evaluate(() => {
+  const geometry = await page.evaluate(async () => {
     const content = document.querySelector('.module-content-cell');
     content.style.minHeight = '5000px';
     refreshEditorStickyOffsets();
     window.scrollTo(0, 2200);
-  });
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(2000);
-
-  const geometry = await page.evaluate(() => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const box = (selector) => {
       const element = document.querySelector(selector);
       const rect = element.getBoundingClientRect();
       return { top: rect.top, bottom: rect.bottom, height: rect.height };
     };
     return {
+      scrollY: window.scrollY,
       tabs: box('#v1TabsBar'),
       toolbar: box('#richEditorToolbar'),
       shield: box('#v1StickyShield')
     };
   });
 
+  expect(geometry.scrollY).toBeGreaterThan(2000);
   expect(geometry.tabs.top).toBeGreaterThanOrEqual(-1);
   expect(geometry.toolbar.top).toBeGreaterThanOrEqual(geometry.tabs.bottom - 1);
   expect(geometry.toolbar.top).toBeLessThanOrEqual(geometry.tabs.bottom + 1);
@@ -879,12 +909,12 @@ test('兩個瀏覽器同項排他、不同 module 並行保存且不互相覆蓋
 
   await titleA1.click();
   await titleA1.fill('A 已由 Owner 保存');
-  await pageA.locator('#mainTitle').click();
+  await pageA.getByRole('button', { name: '保存修改' }).click();
   await expect.poll(async () => (await request.get('/__fake_state')).json().then((state) => state.modules[0].payload.title.replace(/<br>$/i, ''))).toBe('A 已由 Owner 保存');
 
   await titleB2.click();
   await titleB2.fill('B 已由 Operator 保存');
-  await pageB.locator('#mainTitle').click();
+  await pageB.getByRole('button', { name: '保存修改' }).click();
   await expect.poll(async () => (await request.get('/__fake_state')).json().then((state) => state.modules[1].payload.title.replace(/<br>$/i, ''))).toBe('B 已由 Operator 保存');
 
   const state = await (await request.get('/__fake_state')).json();
@@ -894,6 +924,213 @@ test('兩個瀏覽器同項排他、不同 module 並行保存且不互相覆蓋
 
   await contextA.close();
   await contextB.close();
+});
+
+test('格子停頓只保存本機草稿，週期上雲後仍保持編輯並顯示成功時間', async ({ page, request }) => {
+  await page.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 2500;
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+
+  const moduleId = '22222222-2222-4222-8222-222222222221';
+  const row = page.locator(`#tableBody tr[data-v7-entity-id="${moduleId}"]`);
+  const title = row.locator('td').nth(1).locator('.editable-div');
+  await title.click();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveAttribute('contenteditable', 'true');
+  await title.fill('分鐘級背景保存內容');
+  const expectedCaretOffset = '分鐘級背景保存內容'.length;
+  const initialCaretOffset = await title.evaluate((element) => {
+    element.focus({ preventScroll: true });
+    const textNode = element.firstChild;
+    if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return -1;
+    const range = document.createRange();
+    range.setStart(textNode, textNode.textContent.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const activeRange = selection.rangeCount ? selection.getRangeAt(0) : null;
+    if (!activeRange) return -1;
+    const prefix = activeRange.cloneRange();
+    prefix.selectNodeContents(element);
+    prefix.setEnd(activeRange.startContainer, activeRange.startOffset);
+    return prefix.toString().length;
+  });
+  expect(initialCaretOffset).toBe(expectedCaretOffset);
+
+  await expect.poll(() => page.evaluate((id) => {
+    const raw = localStorage.getItem(`monthly_v7_draft:module:${id}`);
+    if (!raw) return '';
+    try { return String(JSON.parse(raw)?.payload?.title || '').replace(/<br>$/i, ''); }
+    catch { return ''; }
+  }, moduleId)).toBe('分鐘級背景保存內容');
+  let state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.modules[0].revision).toBe(1);
+  expect(state.modules[0].payload.title).toBe('A 原始項目');
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveAttribute('contenteditable', 'true');
+
+  await expect.poll(async () => request.get('/__fake_state').then((response) => response.json())
+    .then((current) => current.modules[0].payload.title.replace(/<br>$/i, '')), { timeout: 10000 })
+    .toBe('分鐘級背景保存內容');
+  await expect.poll(() => page.evaluate(() => !V7_CLOUD_SAVE_PROMISE
+    && !V4_CLOUD_SAVING
+    && !v7HasUnsyncedCloudChanges())).toBe(true);
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveAttribute('contenteditable', 'true');
+  const caret = await title.evaluate((element) => {
+    const selection = window.getSelection();
+    const activeRange = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    let offset = -1;
+    if (activeRange) {
+      const prefix = activeRange.cloneRange();
+      prefix.selectNodeContents(element);
+      prefix.setEnd(activeRange.startContainer, activeRange.startOffset);
+      offset = prefix.toString().length;
+    }
+    return {
+      active: document.activeElement === element,
+      offset,
+      textLength: element.textContent.length
+    };
+  });
+  expect(caret).toEqual({ active: true, offset: expectedCaretOffset, textLength: expectedCaretOffset });
+  await expect(page.locator('#v4-cloud-runtime-status')).toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
+  await expect(page.locator('#v4-cloud-runtime-status')).not.toContainText('watermark');
+
+  await page.keyboard.type('，仍可繼續輸入');
+  await expect.poll(() => page.evaluate((id) => {
+    const raw = localStorage.getItem(`monthly_v7_draft:module:${id}`);
+    if (!raw) return '';
+    try { return String(JSON.parse(raw)?.payload?.title || '').replace(/<br>$/i, ''); }
+    catch { return ''; }
+  }, moduleId)).toBe('分鐘級背景保存內容，仍可繼續輸入');
+  state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.modules[0].payload.title.replace(/<br>$/i, '')).toBe('分鐘級背景保存內容');
+  await expect(title).toHaveText('分鐘級背景保存內容，仍可繼續輸入');
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+});
+
+test('手動保存保留目前格子的焦點、caret 與 module lease', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const row = page.locator('#tableBody tr').first();
+  const title = row.locator('td').nth(1).locator('.editable-div');
+  await title.click();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveAttribute('contenteditable', 'true');
+  await title.fill('手動保存仍可繼續輸入');
+  await title.evaluate((element) => {
+    const text = element.firstChild;
+    const range = document.createRange();
+    range.setStart(text, 4);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.waitForTimeout(1100);
+
+  await page.getByRole('button', { name: '保存修改' }).first().click();
+  await expect.poll(async () => request.get('/__fake_state').then((response) => response.json())
+    .then((state) => state.modules[0].payload.title.replace(/<br>$/i, ''))).toBe('手動保存仍可繼續輸入');
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveAttribute('contenteditable', 'true');
+  const focusState = await title.evaluate((element) => {
+    const selection = window.getSelection();
+    return {
+      active: document.activeElement === element,
+      offset: selection && selection.rangeCount ? selection.getRangeAt(0).startOffset : -1
+    };
+  });
+  expect(focusState).toEqual({ active: true, offset: 4 });
+  await expect(page.locator('#v4-cloud-runtime-status')).toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
+
+  await title.evaluate((element) => {
+    const text = element.firstChild;
+    const range = document.createRange();
+    range.setStart(text, 6);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.locator('button[onclick="manualSave()"]:visible').first().click();
+  await expect.poll(() => title.evaluate((element) => document.activeElement === element)).toBe(true);
+  expect(await title.evaluate(() => window.getSelection()?.getRangeAt(0)?.startOffset)).toBe(6);
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(page.locator('#v4-cloud-runtime-status')).toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
+});
+
+test('背景保存期間的新輸入只合併成一個後繼保存，不平行堆疊 RPC', async ({ page, request }) => {
+  await page.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 500;
+  });
+  let releaseFirstSave;
+  const firstSaveGate = new Promise((resolve) => { releaseFirstSave = resolve; });
+  let saveCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_save_module') {
+      saveCalls += 1;
+      if (saveCalls === 1) await firstSaveGate;
+    }
+    await route.continue();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+
+  const row = page.locator('#tableBody tr').first();
+  const title = row.locator('td').nth(1).locator('.editable-div');
+  await title.click();
+  await title.fill('第一輪送出內容');
+  await expect.poll(() => saveCalls, { timeout: 10000 }).toBe(1);
+
+  await title.fill('保存等待期間的最新內容');
+  await page.waitForTimeout(1600);
+  expect(saveCalls).toBe(1);
+  expect(await page.evaluate(() => v7HasUnsyncedCloudChanges())).toBe(true);
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveAttribute('contenteditable', 'true');
+
+  releaseFirstSave();
+  await expect.poll(() => saveCalls).toBe(2);
+  await expect.poll(() => page.evaluate(() => !v7HasUnsyncedCloudChanges()
+    && !V4_CLOUD_SAVING
+    && !V4_AUTO_SAVE_TIMER
+    && !V7_CLOUD_SAVE_PROMISE)).toBe(true);
+  const coordinatorState = await page.evaluate(() => ({
+    dirty: v7HasUnsyncedCloudChanges(),
+    saving: V4_CLOUD_SAVING,
+    hasTimer: Boolean(V4_AUTO_SAVE_TIMER),
+    hasPromise: Boolean(V7_CLOUD_SAVE_PROMISE),
+    dirtyGeneration: V7_CLOUD_DIRTY_GENERATION,
+    savedGeneration: V7_CLOUD_SAVED_GENERATION,
+    status: document.getElementById('v4-cloud-runtime-status')?.textContent || ''
+  }));
+  expect({
+    saveCalls,
+    dirty: coordinatorState.dirty,
+    saving: coordinatorState.saving,
+    hasTimer: coordinatorState.hasTimer,
+    hasPromise: coordinatorState.hasPromise,
+    status: coordinatorState.status
+  }).toEqual({
+    saveCalls: 2,
+    dirty: false,
+    saving: false,
+    hasTimer: false,
+    hasPromise: false,
+    status: expect.stringMatching(/雲端已保存｜\d{2}:\d{2}:\d{2}/)
+  });
+  expect(coordinatorState.dirtyGeneration).toBeGreaterThanOrEqual(2);
+  expect(coordinatorState.savedGeneration).toBe(coordinatorState.dirtyGeneration);
+  await expect.poll(async () => request.get('/__fake_state').then((response) => response.json())
+    .then((state) => state.modules[0].payload.title.replace(/<br>$/i, '')), { timeout: 15000 })
+    .toBe('保存等待期間的最新內容');
+  expect(saveCalls).toBe(2);
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveAttribute('contenteditable', 'true');
+  await expect(page.locator('#v4-cloud-runtime-status')).toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
 });
 
 test('未修改 module 離開後立即釋放，另一瀏覽器不必等待 TTL', async ({ browser }) => {
@@ -952,7 +1189,8 @@ test('未提交的 module 變更離開後仍保留 lease，不提前放鎖', asy
   await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
   await title.evaluate((element) => element.removeAttribute('onblur'));
   await title.fill('尚未提交的本機內容');
-  await page.locator('#v5TopStatus').click();
+  await page.waitForTimeout(1100);
+  await page.getByRole('button', { name: '保存修改' }).click();
   await expect.poll(() => interceptedSaveCount).toBeGreaterThan(0);
 
   await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
@@ -964,6 +1202,9 @@ test('未提交的 module 變更離開後仍保留 lease，不提前放鎖', asy
 });
 
 test('revision conflict 保留本機草稿，重載後由使用者確認才以目前內容重試', async ({ page, request }) => {
+  await page.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 1500;
+  });
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await enterAndLogin(page, 'owner', 'owner-pass');
@@ -988,6 +1229,50 @@ test('revision conflict 保留本機草稿，重載後由使用者確認才以�
   row = page.locator(`#tableBody tr[data-v7-entity-id="${moduleId}"]`);
   title = row.locator('td').nth(1).locator('.editable-div');
   await expect(title).toHaveText('本機待救回內容');
+  await expect.poll(() => page.evaluate((id) => {
+    const app = window.MonthlyV7App;
+    const snapshotIds = (app?.client?.snapshot?.modules || []).map((entry) => String(entry?.id || ''));
+    const modelIds = Array.isArray(reportData)
+      ? reportData.map((entry) => String(entry?._v7Id || ''))
+      : [];
+    return app?.initialized === true
+      && snapshotIds.includes(String(id))
+      && JSON.stringify(modelIds) === JSON.stringify(snapshotIds);
+  }, moduleId), {
+    timeout: 30000,
+    message: 'reload should finish applying the authoritative snapshot before protected-baseline assertions'
+  }).toBe(true);
+  const protectedBaseline = await page.evaluate((id) => {
+    const snapshotRow = window.MonthlyV7App.client.snapshot.modules.find((row) => row.id === id);
+    const baselineRow = window.MonthlyV7App.baselineModuleMap().get(id);
+    const live = reportData.find((item) => item._v7Id === id);
+    return {
+      hasDraft: window.MonthlyV7App.hasModuleDraft(id),
+      liveTitle: window.MonthlyV7App.client.modulePayload(live).title,
+      protectedServerTitle: snapshotRow?._serverPayload?.title || null,
+      baselineTitle: baselineRow?.payload?.title || null,
+      baselineRevision: baselineRow?.revision ?? null
+    };
+  }, moduleId);
+  expect(protectedBaseline).toEqual({
+    hasDraft: true,
+    liveTitle: '本機待救回內容',
+    protectedServerTitle: '遠端較新內容',
+    baselineTitle: '遠端較新內容',
+    baselineRevision: 2
+  });
+  const redundantDraftComparison = await page.evaluate(() => {
+    const item = reportData[1];
+    const baseline = window.MonthlyV7App.baselineModuleMap().get(item._v7Id);
+    const draft = window.MonthlyV7App.client.readDraft('module', item._v7Id);
+    return {
+      live: window.MonthlyV7App.client.modulePayload(item),
+      draft: draft?.payload || null,
+      baseline: baseline?.payload || null
+    };
+  });
+  expect(redundantDraftComparison.live).toEqual(redundantDraftComparison.baseline);
+  expect(redundantDraftComparison.draft).toEqual(redundantDraftComparison.baseline);
   await expect.poll(() => page.locator('#v4-cloud-runtime-status').textContent()).toMatch(/已恢復 1 個未提交本機草稿|項目保存衝突：REVISION_CONFLICT/);
 
   let cancellationPrompt = '';
@@ -1015,7 +1300,7 @@ test('revision conflict 保留本機草稿，重載後由使用者確認才以�
   expect(cancellationPrompt).toContain('取消');
   expect(confirmation).toBe(cancellationPrompt);
   expect(await page.evaluate((id) => localStorage.getItem(`monthly_v7_draft:module:${id}`), moduleId)).toBeNull();
-  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('逐項雲端保存完成');
+  await expect(page.locator('#v4-cloud-runtime-status')).toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
   expect(errors).toEqual([]);
 });
 
@@ -1045,6 +1330,56 @@ test('full snapshot catch-up 不覆蓋尚未 blur 的本機 module', async ({ pa
   expect(errors).toEqual([]);
 });
 
+test('report metadata 未確認前不得提前顯示整份雲端成功，失敗後維持 dirty 重試', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(async () => {
+    window.MonthlyV7App.transport.requestTimeoutMs = 35;
+    document.getElementById('mainTitle').textContent = 'metadata 尚未確認的月報標題';
+    await manualSave(false, { deferCloud: true });
+    const status = document.getElementById('v4-cloud-runtime-status');
+    window.__metaSaveStatusHistory = [String(status?.textContent || '')];
+    window.__metaSaveStatusObserver = new MutationObserver(() => {
+      window.__metaSaveStatusHistory.push(String(status?.textContent || ''));
+    });
+    window.__metaSaveStatusObserver.observe(status, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['class']
+    });
+  });
+  await request.post('/__fake_hang_rpc?name=monthly_v7_save_report_meta&count=always');
+
+  const saved = await page.evaluate(() => v5SaveChangesToCloud());
+
+  expect(saved).toBe(false);
+  const result = await page.evaluate(() => {
+    window.__metaSaveStatusObserver?.disconnect();
+    const reportId = window.MonthlyV7App.client.currentReport().id;
+    return {
+      history: window.__metaSaveStatusHistory,
+      finalStatus: document.getElementById('v4-cloud-runtime-status')?.textContent || '',
+      dirty: v7HasUnsyncedCloudChanges(),
+      actorPending: window.MonthlyV7App.client.hasCurrentActorPendingOperation(`save_report_meta:${reportId}`),
+      draft: localStorage.getItem(`monthly_v7_draft:report_meta:${reportId}`),
+      pending: localStorage.getItem(`monthly_v7_pending:save_report_meta:${reportId}`)
+    };
+  });
+  expect(result.history.some((value) => /(?:雲端已保存|月報資訊已保存)｜\d{2}:\d{2}:\d{2}/.test(value))).toBe(false);
+  expect(result.finalStatus).toContain('RPC_TIMEOUT');
+  expect(result.dirty).toBe(true);
+  expect(result.actorPending).toBe(true);
+  expect(result.draft).toContain('metadata 尚未確認的月報標題');
+  expect(result.pending).toBeTruthy();
+  expect(dialogs.some((message) => message.includes('RPC_TIMEOUT'))).toBe(true);
+});
+
 test('保存 RPC 無回應會結束為失敗並保留草稿，重試後可由新瀏覽器讀回雲端內容', async ({ page, request, browser }) => {
   const dialogs = [];
   page.on('dialog', async (dialog) => {
@@ -1063,6 +1398,7 @@ test('保存 RPC 無回應會結束為失敗並保留草稿，重試後可由新
 
   await page.evaluate(() => v5SaveChangesToCloud());
   await expect.poll(() => page.locator('#v5TopStatus').innerText()).toContain('RPC_TIMEOUT');
+  await expect(page.locator('#v4-cloud-runtime-status')).not.toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
   expect(dialogs.some((message) => message.includes('RPC_TIMEOUT'))).toBe(true);
   const afterTimeout = await (await request.get('/__fake_state')).json();
   expect(afterTimeout.modules[0].payload.title).toBe(before.modules[0].payload.title);
@@ -1075,21 +1411,27 @@ test('保存 RPC 無回應會結束為失敗並保留草稿，重試後可由新
 
   await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=0');
   await request.post('/__fake_drop_first_module_lease');
+  await page.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 500;
+  });
   await page.reload();
   await expect.poll(() => page.evaluate(() => Boolean(
     window.MonthlyV7App?.client?.userSession?.id
     && window.MonthlyV7App.client.currentReport()?.id
   ))).toBe(true);
   await expect(page.locator('#tableBody')).toContainText('逾時後仍待保存的內容');
-  await page.evaluate(() => v5SaveChangesToCloud());
-  await expect(page.locator('#v5TopStatus')).toContainText(/逐項雲端(?:保存完成|已保存)/);
+  await expect.poll(async () => request.get('/__fake_state').then((response) => response.json())
+    .then((state) => state.modules[0].payload.title), { timeout: 15000 })
+    .toBe('逾時後仍待保存的內容');
+  await expect(page.locator('#v5TopStatus')).toContainText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
   const afterRetry = await (await request.get('/__fake_state')).json();
   expect(afterRetry.modules[0].payload.title).toBe('逾時後仍待保存的內容');
   const cleared = await page.evaluate(() => ({
     draft: localStorage.getItem('monthly_v7_draft:module:22222222-2222-4222-8222-222222222221'),
-    pending: localStorage.getItem('monthly_v7_pending:save_module:22222222-2222-4222-8222-222222222221')
+    pending: localStorage.getItem('monthly_v7_pending:save_module:22222222-2222-4222-8222-222222222221'),
+    moduleDraftKeys: Object.keys(localStorage).filter((key) => key.startsWith('monthly_v7_draft:module:'))
   }));
-  expect(cleared).toEqual({ draft: null, pending: null });
+  expect(cleared).toEqual({ draft: null, pending: null, moduleDraftKeys: [] });
 
   const independentContext = await browser.newContext({ baseURL: 'http://127.0.0.1:4187' });
   const independentPage = await independentContext.newPage();
@@ -1369,18 +1711,28 @@ test('PDF 前置保存未獲雲端確認時不得建立正式快照或列印舊�
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.evaluate(() => {
     window.MonthlyV7App.transport.requestTimeoutMs = 35;
-    window.__v7PrintCalled = false;
-    window.print = () => { window.__v7PrintCalled = true; };
+    window.__v7PrintCalls = 0;
+    window.print = () => { window.__v7PrintCalls += 1; };
     reportData[0].title = '尚未獲雲端確認的 PDF 內容';
     renderTable();
     v1EnsureModuleFields();
   });
   await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=always');
 
-  await page.evaluate(() => printV1SelectedPdf());
-  await expect.poll(async () => (await page.evaluate(() => window.__v7PrintCalled)) || dialogs.length > 0).toBe(true);
+  await page.evaluate(() => {
+    window.__v7PdfAttemptState = { status: 'pending', error: '' };
+    window.__v7PdfAttemptPromise = printV1SelectedPdf()
+      .then(() => { window.__v7PdfAttemptState = { status: 'done', error: '' }; })
+      .catch((error) => {
+        window.__v7PdfAttemptState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__v7PdfAttemptState.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__v7PdfAttemptState)).toEqual({ status: 'done', error: '' });
+  await expect.poll(async () => (await page.evaluate(() => window.__v7PrintCalls > 0)) || dialogs.length > 0).toBe(true);
 
-  expect(await page.evaluate(() => window.__v7PrintCalled)).toBe(false);
+  expect(await page.evaluate(() => window.__v7PrintCalls)).toBe(0);
   await expect(page.locator('body')).not.toHaveAttribute('data-print-source', 'snapshot');
   const timeoutDialog = dialogs.find((message) => message.includes('RPC_TIMEOUT')) || '';
   expect(timeoutDialog).toContain('階段：保存資料（save_data）');
@@ -1393,6 +1745,30 @@ test('PDF 前置保存未獲雲端確認時不得建立正式快照或列印舊�
   const server = await (await request.get('/__fake_state')).json();
   expect(server.modules[0].payload.title).toBe('A 原始項目');
   expect(await page.evaluate(() => localStorage.getItem('monthly_v7_draft:module:22222222-2222-4222-8222-222222222221'))).toContain('尚未獲雲端確認的 PDF 內容');
+
+  await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=0');
+  dialogs.length = 0;
+  await page.evaluate(() => {
+    window.__v7PdfAttemptState = { status: 'pending', error: '' };
+    window.__v7PdfAttemptPromise = printV1SelectedPdf()
+      .then(() => { window.__v7PdfAttemptState = { status: 'done', error: '' }; })
+      .catch((error) => {
+        window.__v7PdfAttemptState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__v7PdfAttemptState.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__v7PdfAttemptState)).toEqual({ status: 'done', error: '' });
+  await expect.poll(() => page.evaluate(() => window.__v7PrintCalls), { timeout: 30000 }).toBe(1);
+  expect(dialogs).toEqual([]);
+  const recovered = await (await request.get('/__fake_state')).json();
+  expect(recovered.modules[0].payload.title).toBe('尚未獲雲端確認的 PDF 內容');
+  expect(recovered.snapshots).toHaveLength(1);
+  expect(recovered.snapshots[0].modules[0].payload.title).toBe('尚未獲雲端確認的 PDF 內容');
+  expect(await page.evaluate(() => ({
+    draft: localStorage.getItem('monthly_v7_draft:module:22222222-2222-4222-8222-222222222221'),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:22222222-2222-4222-8222-222222222221')
+  }))).toEqual({ draft: null, pending: null });
 });
 
 test('正式 PDF snapshot RPC timeout 標示 create_snapshot 階段與確切 RPC', async ({ page, request }) => {
@@ -1418,6 +1794,14 @@ test('正式 PDF snapshot RPC timeout 標示 create_snapshot 階段與確切 RPC
   expect(message).toMatch(/等待：\d+ ms/);
   expect(await page.evaluate(() => window.__v7PrintCalled)).toBe(false);
   await expect(page.locator('#v7FormalPrintLockOverlay')).toHaveCount(0);
+  const snapshotPendingKey = 'monthly_v7_pending:create_snapshot:11111111-1111-4111-8111-111111111111:pdf';
+  expect(await page.evaluate((key) => localStorage.getItem(key), snapshotPendingKey)).not.toBeNull();
+
+  await page.evaluate(() => v5SaveChangesToCloud());
+
+  await expect(page.locator('#v4-cloud-runtime-status')).not.toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('正式 PDF 快照結果尚未確認');
+  expect(await page.evaluate((key) => localStorage.getItem(key), snapshotPendingKey)).not.toBeNull();
 });
 
 test('正式 PDF 的 PostgREST SQLSTATE 28000 session invalid 顯示重新登入而非裸碼', async ({ page }) => {

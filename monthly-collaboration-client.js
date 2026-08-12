@@ -80,13 +80,39 @@
       return code;
     }
 
+    staleSessionResponseError(name, requestGeneration, code = '') {
+      const staleCode = String(code || 'STALE_SESSION_RESPONSE');
+      const error = new Error(staleCode);
+      error.code = staleCode;
+      error.staleSessionResponse = true;
+      error.rpcName = String(name || '');
+      error.requestGeneration = Number(requestGeneration);
+      error.currentGeneration = Number(this.sessionGeneration);
+      error.silent = true;
+      return error;
+    }
+
     async rpc(name, params) {
       const requestGeneration = this.sessionGeneration;
       try {
         const result = await this.transport.rpc(name, params);
-        this.handleSessionError(result, requestGeneration);
+        if (requestGeneration !== this.sessionGeneration) {
+          throw this.staleSessionResponseError(name, requestGeneration, this.sessionErrorCode(result));
+        }
+        const sessionCode = this.handleSessionError(result, requestGeneration);
+        if (requestGeneration !== this.sessionGeneration) {
+          const error = new Error(sessionCode || 'STALE_SESSION_RESPONSE');
+          error.code = sessionCode || 'STALE_SESSION_RESPONSE';
+          error.sessionInvalidHandled = !!sessionCode;
+          error.silent = true;
+          throw error;
+        }
         return result;
       } catch (error) {
+        if (error && (error.staleSessionResponse === true || error.sessionInvalidHandled === true)) throw error;
+        if (requestGeneration !== this.sessionGeneration) {
+          throw this.staleSessionResponseError(name, requestGeneration, this.sessionErrorCode(error));
+        }
         this.handleSessionError(error, requestGeneration);
         throw error;
       }
@@ -115,6 +141,32 @@
     isActive() { return this.status.mode === 'v7'; }
     isSiteUnlocked() { return this.isActive() && !!(this.siteSession && this.siteSession.id); }
     currentUser() { return this.userSession && this.userSession.id && this.user ? Object.assign({}, this.user) : null; }
+
+    captureSessionContext() {
+      const user = this.currentUser();
+      return Object.freeze({
+        generation: Number(this.sessionGeneration),
+        actorUserId: String(user && user.id || ''),
+        userSessionId: String(this.userSession && this.userSession.id || ''),
+        siteSessionId: String(this.siteSession && this.siteSession.id || ''),
+        clientSessionId: String(this.clientSessionId || '')
+      });
+    }
+
+    isSessionContextCurrent(context) {
+      if (!context || typeof context !== 'object') return false;
+      const current = this.captureSessionContext();
+      return Number(context.generation) === current.generation
+        && String(context.actorUserId || '') === current.actorUserId
+        && String(context.userSessionId || '') === current.userSessionId
+        && String(context.siteSessionId || '') === current.siteSessionId
+        && String(context.clientSessionId || '') === current.clientSessionId;
+    }
+
+    assertSessionContext(context, operationName = '') {
+      if (this.isSessionContextCurrent(context)) return context;
+      throw this.staleSessionResponseError(operationName, Number(context && context.generation));
+    }
 
     async openSite(password) {
       if (!this.isActive()) throw new Error('V7 authority is not active');
@@ -204,6 +256,10 @@
           const server = serverIndex >= 0 ? incoming.modules[serverIndex] : null;
           if (!draft && !local && !prior) continue;
           const row = this.cloneJson(server || prior, { id: entityId, sortRank: Number(prior && prior.sortRank || 0) });
+          if (server) {
+            row._serverPayload = this.cloneJson(server.payload, {});
+            row._serverRevision = Number(server.revision || 0);
+          }
           row.payload = this.cloneJson(draft && draft.payload, null) || this.cleanLocalPayload(local) || this.cloneJson(prior && prior.payload, {});
           row.revision = Number((draft && draft.baseRevision) ?? (local && local._v7Revision) ?? (prior && prior.revision) ?? 0);
           if (serverIndex >= 0) incoming.modules[serverIndex] = row;
@@ -315,45 +371,70 @@
     }
 
     async renewLease(entityType, entityId, ttlSeconds = 90) {
+      const operationContext = this.captureSessionContext();
       const lease = this.getLease(entityType, entityId);
       if (!lease) return null;
+      const key = this.leaseKey(entityType, entityId);
       const raw = await this.rpc('monthly_v7_renew_lease', {
         p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
+        p_user_session_id: operationContext.userSessionId,
+        p_client_session_id: operationContext.clientSessionId,
         p_entity_type: entityType,
         p_entity_id: entityId,
         p_lease_id: lease.leaseId,
         p_fencing_token: lease.fencingToken,
         p_ttl_seconds: ttlSeconds
       });
+      this.assertSessionContext(operationContext, 'renew_lease');
+      if (this.leases.get(key) !== lease) return null;
       if (!raw || raw.ok !== true) {
-        this.leases.delete(this.leaseKey(entityType, entityId));
+        this.leases.delete(key);
         if (typeof this.host.onLeaseLost === 'function') this.host.onLeaseLost({ entityType, entityId, lease, result: raw });
         return null;
       }
       const renewed = this.normalizeLease(raw);
-      this.leases.set(this.leaseKey(entityType, entityId), renewed);
+      if (this.leases.get(key) === lease) this.leases.set(key, renewed);
       return renewed;
     }
 
-    async releaseLease(entityType, entityId) {
-      const lease = this.getLease(entityType, entityId);
+    forgetCapturedLease(lease) {
+      if (!lease) return false;
+      const key = this.leaseKey(lease.entityType, lease.entityId);
+      if (this.leases.get(key) !== lease) return false;
+      this.leases.delete(key);
+      return true;
+    }
+
+    async releaseCapturedLease(lease, operationContext = this.captureSessionContext()) {
       if (!lease) return true;
+      const entityType = String(lease.entityType || '');
+      const entityId = String(lease.entityId || '');
+      const key = this.leaseKey(entityType, entityId);
+      if (!entityType || !entityId
+        || !this.isSessionContextCurrent(operationContext)
+        || this.leases.get(key) !== lease) return false;
       try {
         const raw = await this.rpc('monthly_v7_release_lease', {
           p_workspace_key: this.config.workspaceKey,
-          p_user_session_id: this.userSession.id,
-          p_client_session_id: this.clientSessionId,
+          p_user_session_id: operationContext.userSessionId,
+          p_client_session_id: operationContext.clientSessionId,
           p_entity_type: entityType,
           p_entity_id: entityId,
           p_lease_id: lease.leaseId,
           p_fencing_token: lease.fencingToken
         });
+        this.assertSessionContext(operationContext, 'release_lease');
         return !!(raw && raw.ok);
       } finally {
-        this.leases.delete(this.leaseKey(entityType, entityId));
+        if (this.isSessionContextCurrent(operationContext)
+          && this.leases.get(key) === lease) this.leases.delete(key);
       }
+    }
+
+    async releaseLease(entityType, entityId) {
+      const lease = this.getLease(entityType, entityId);
+      if (!lease) return true;
+      return this.releaseCapturedLease(lease, this.captureSessionContext());
     }
 
     startHeartbeat(intervalMs = 30000) {
@@ -389,6 +470,67 @@
 
     clearDraft(entityType, entityId) {
       if (this.draftStorage) this.draftStorage.removeItem(this.draftKey(entityType, entityId));
+    }
+
+    hasPendingOperation(pendingKey) {
+      if (!this.draftStorage || !pendingKey) return false;
+      return this.draftStorage.getItem(`monthly_v7_pending:${pendingKey}`) !== null;
+    }
+
+    hasCurrentActorPendingOperation(pendingKey) {
+      if (!this.draftStorage || !pendingKey) return false;
+      const pendingRaw = this.draftStorage.getItem(`monthly_v7_pending:${pendingKey}`);
+      if (pendingRaw === null) return false;
+      let pending;
+      try {
+        pending = JSON.parse(pendingRaw);
+        this.validatePendingEnvelope(pending);
+      } catch (_error) {
+        // A malformed envelope cannot safely be treated as clean. The normal replay
+        // path will surface PENDING_OPERATION_UNRESOLVED without replacing it.
+        return true;
+      }
+      const currentActorId = String(this.currentUser() && this.currentUser().id || '');
+      if (!currentActorId) return false;
+      if (!pending.actorUserId) return true;
+      return String(pending.actorUserId) === currentActorId;
+    }
+
+    pendingOperationTargets(rpcName, pendingKey) {
+      const targets = new Set();
+      if (!this.draftStorage || !pendingKey) return targets;
+      const pendingRaw = this.draftStorage.getItem(`monthly_v7_pending:${pendingKey}`);
+      if (pendingRaw === null) return targets;
+      let pending;
+      try { pending = JSON.parse(pendingRaw); }
+      catch (_error) { throw this.pendingOperationError(); }
+      const previousParams = this.validatePendingEnvelope(pending);
+      this.bindPendingActor(rpcName, pending, previousParams);
+      if (rpcName !== 'monthly_v7_save_module_batch') throw this.pendingOperationError();
+      const report = this.currentReport();
+      const changes = previousParams.p_changes;
+      if (!report || pendingKey !== `save_module_batch:${report.id}`
+        || String(previousParams.p_report_id || '') !== String(report.id)
+        || !Array.isArray(changes) || !changes.length) {
+        throw this.pendingOperationError();
+      }
+      const rowKeys = ['expectedRevision', 'moduleId', 'payload'];
+      for (const row of changes) {
+        const actualKeys = row && typeof row === 'object' && !Array.isArray(row)
+          ? Object.keys(row).sort() : [];
+        const entityId = String(row && row.moduleId || '');
+        if (actualKeys.length !== rowKeys.length
+          || !actualKeys.every((key, index) => key === rowKeys[index])
+          || !entityId
+          || !Number.isSafeInteger(row.expectedRevision) || row.expectedRevision < 0
+          || !row.payload || typeof row.payload !== 'object' || Array.isArray(row.payload)
+          || targets.has(entityId)
+          || !this.pendingTargetsEntity(rpcName, pendingKey, previousParams, 'module', entityId)) {
+          throw this.pendingOperationError();
+        }
+        targets.add(entityId);
+      }
+      return targets;
     }
 
     modulePayload(item) {
@@ -825,7 +967,7 @@
           return result;
         } catch (error) {
           lastError = error;
-          if (this.sessionErrorCode(error)) throw error;
+          if (this.sessionErrorCode(error) || error?.code === 'STALE_SESSION_RESPONSE') throw error;
         }
       }
       throw lastError;
@@ -833,15 +975,19 @@
 
     async saveModule(item) {
       this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      this.assertSessionContext(operationContext, 'save_module');
       const entityId = item && item._v7Id;
       if (!entityId || !Number.isFinite(Number(item && item._v7Revision))) {
         throw new TypeError('V7 module identity/revision is required');
       }
       const pendingKey = `save_module:${entityId}`;
+      const supersededLease = this.getLease('module', entityId);
       const superseded = await this.reconcileSupersededPending(
         'monthly_v7_save_module', pendingKey,
         [{ entityType: 'module', entityId, payload: this.modulePayload(item) }]
       );
+      this.assertSessionContext(operationContext, 'save_module');
       if (superseded) {
         const priorResult = superseded.result;
         if (priorResult && priorResult.ok === true) {
@@ -853,9 +999,8 @@
             row.revision = Number(priorResult.revision);
             row.payload = this.cloneJson(superseded.previousParams.p_payload, {});
           }
-          this.leases.delete(this.leaseKey('module', entityId));
         } else if (priorResult && priorResult.error === 'LEASE_LOST') {
-          this.leases.delete(this.leaseKey('module', entityId));
+          this.forgetCapturedLease(supersededLease);
         } else {
           const code = priorResult && priorResult.error || 'SAVE_FAILED';
           const error = new Error(code);
@@ -874,16 +1019,22 @@
       this.saveDraft('module', entityId, payload, expectedRevision);
       const desiredParams = {
         p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
+        p_user_session_id: operationContext.userSessionId,
+        p_client_session_id: operationContext.clientSessionId,
         p_module_id: entityId,
         p_expected_revision: expectedRevision,
         p_payload: payload
       };
+      let operationLease = null;
+      let replayLease = null;
       const fail = async (result, releaseCurrent = false) => {
         const code = result && result.error || 'SAVE_FAILED';
-        if (releaseCurrent) await this.releaseLease('module', entityId);
-        else if (['LEASE_LOST', 'REVISION_CONFLICT', 'AUTHORITY_CHANGED'].includes(code)) this.leases.delete(this.leaseKey('module', entityId));
+        if (releaseCurrent) {
+          await this.releaseCapturedLease(operationLease || replayLease || supersededLease, operationContext);
+          this.assertSessionContext(operationContext, 'save_module_cleanup');
+        } else if (['LEASE_LOST', 'REVISION_CONFLICT', 'AUTHORITY_CHANGED'].includes(code)) {
+          this.forgetCapturedLease(operationLease);
+        }
         const error = new Error(code);
         error.code = code;
         error.result = result;
@@ -891,8 +1042,11 @@
         throw error;
       };
       const complete = async (result, releaseCurrent = false) => {
-        if (releaseCurrent) await this.releaseLease('module', entityId);
-        else this.leases.delete(this.leaseKey('module', entityId));
+        if (releaseCurrent) {
+          await this.releaseCapturedLease(operationLease || replayLease || supersededLease, operationContext);
+          this.assertSessionContext(operationContext, 'save_module_cleanup');
+        }
+        this.assertSessionContext(operationContext, 'save_module');
         item._v7Revision = Number(result.revision);
         this.watermark = Math.max(this.watermark, Number(result.watermark || 0));
         this.clearDraft('module', entityId);
@@ -900,24 +1054,30 @@
         return result;
       };
 
+      replayLease = this.getLease('module', entityId);
       const replayed = await this.replayPendingBeforeLease('monthly_v7_save_module', pendingKey, desiredParams);
+      this.assertSessionContext(operationContext, 'save_module');
       if (replayed) {
-        if (replayed.ok === true) return complete(replayed, true);
+        if (replayed.ok === true) return complete(replayed, false);
         if (replayed.error !== 'LEASE_LOST') return fail(replayed, true);
-        this.leases.delete(this.leaseKey('module', entityId));
+        this.forgetCapturedLease(replayLease);
       }
 
-      const lease = this.getLease('module', entityId) || await this.claimLease('module', entityId);
+      operationLease = this.getLease('module', entityId) || await this.claimLease('module', entityId);
+      this.assertSessionContext(operationContext, 'save_module');
       const result = await this.executeOperation('monthly_v7_save_module', Object.assign({}, desiredParams, {
-        p_lease_id: lease.leaseId,
-        p_fencing_token: lease.fencingToken
+        p_lease_id: operationLease.leaseId,
+        p_fencing_token: operationLease.fencingToken
       }), pendingKey);
+      this.assertSessionContext(operationContext, 'save_module');
       if (!result || result.ok !== true) return fail(result, false);
       return complete(result, false);
     }
 
     async saveReportMeta(meta) {
       this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      this.assertSessionContext(operationContext, 'save_report_meta');
       const report = this.currentReport();
       if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
       const pendingKey = `save_report_meta:${report.id}`;
@@ -927,10 +1087,12 @@
         period: JSON.parse(JSON.stringify(meta && meta.period || report.period || {})),
         settings: JSON.parse(JSON.stringify(meta && meta.settings || report.settings || {}))
       };
+      const supersededLease = this.getLease('report_meta', report.id);
       const superseded = await this.reconcileSupersededPending(
         'monthly_v7_save_report_meta', pendingKey,
         [{ entityType: 'report_meta', entityId: report.id, payload }]
       );
+      this.assertSessionContext(operationContext, 'save_report_meta');
       if (superseded) {
         const priorResult = superseded.result;
         if (priorResult && priorResult.ok === true) {
@@ -940,9 +1102,9 @@
           report.period = this.cloneJson(superseded.previousParams.p_period, {});
           report.settings = this.cloneJson(superseded.previousParams.p_settings, {});
           this.watermark = Math.max(this.watermark, Number(priorResult.watermark || 0));
-          this.leases.delete(this.leaseKey('report_meta', report.id));
+          this.forgetCapturedLease(supersededLease);
         } else if (priorResult && priorResult.error === 'LEASE_LOST') {
-          this.leases.delete(this.leaseKey('report_meta', report.id));
+          this.forgetCapturedLease(supersededLease);
         } else {
           return this.commandResult(priorResult, 'SAVE_REPORT_META_FAILED');
         }
@@ -950,8 +1112,8 @@
       this.saveDraft('report_meta', report.id, payload, Number(report.revision));
       const desiredParams = {
         p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
+        p_user_session_id: operationContext.userSessionId,
+        p_client_session_id: operationContext.clientSessionId,
         p_report_id: report.id,
         p_expected_revision: Number(report.revision),
         p_title: payload.title,
@@ -959,49 +1121,65 @@
         p_period: payload.period,
         p_settings: payload.settings
       };
+      let replayLease = null;
+      let operationLease = null;
       const complete = async (result, releaseCurrent = false) => {
-        if (releaseCurrent) await this.releaseLease('report_meta', report.id);
-        else this.leases.delete(this.leaseKey('report_meta', report.id));
+        if (releaseCurrent) {
+          await this.releaseCapturedLease(operationLease || replayLease || supersededLease, operationContext);
+          this.assertSessionContext(operationContext, 'save_report_meta_cleanup');
+        } else {
+          this.forgetCapturedLease(operationLease);
+        }
+        this.assertSessionContext(operationContext, 'save_report_meta');
         report.revision = Number(result.revision);
         Object.assign(report, payload);
         this.clearDraft('report_meta', report.id);
         return result;
       };
+      replayLease = this.getLease('report_meta', report.id);
       const replayed = await this.replayPendingBeforeLease('monthly_v7_save_report_meta', pendingKey, desiredParams);
+      this.assertSessionContext(operationContext, 'save_report_meta');
       if (replayed) {
         if (replayed.ok === true) return complete(this.commandResult(replayed, 'SAVE_REPORT_META_FAILED'), true);
         if (replayed.error !== 'LEASE_LOST') {
-          await this.releaseLease('report_meta', report.id);
+          await this.releaseCapturedLease(replayLease, operationContext);
+          this.assertSessionContext(operationContext, 'save_report_meta_cleanup');
           return this.commandResult(replayed, 'SAVE_REPORT_META_FAILED');
         }
-        this.leases.delete(this.leaseKey('report_meta', report.id));
+        this.forgetCapturedLease(replayLease);
       }
-      const lease = this.getLease('report_meta', report.id) || await this.claimLease('report_meta', report.id);
+      operationLease = this.getLease('report_meta', report.id) || await this.claimLease('report_meta', report.id);
+      this.assertSessionContext(operationContext, 'save_report_meta');
       const result = this.commandResult(await this.executeOperation('monthly_v7_save_report_meta', Object.assign({}, desiredParams, {
-        p_lease_id: lease.leaseId,
-        p_fencing_token: lease.fencingToken
+        p_lease_id: operationLease.leaseId,
+        p_fencing_token: operationLease.fencingToken
       }), pendingKey), 'SAVE_REPORT_META_FAILED');
+      this.assertSessionContext(operationContext, 'save_report_meta');
       return complete(result, false);
     }
 
     async createModule(payload) {
       this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      this.assertSessionContext(operationContext, 'create_module');
       const report = this.currentReport();
       if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
-      const lease = this.getLease('report_structure', report.id) || await this.claimLease('report_structure', report.id);
+      const operationLease = this.getLease('report_structure', report.id) || await this.claimLease('report_structure', report.id);
+      this.assertSessionContext(operationContext, 'create_module');
       const cleanPayload = this.modulePayload(payload || {});
       const result = this.commandResult(await this.executeOperation('monthly_v7_create_module', {
         p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
+        p_user_session_id: operationContext.userSessionId,
+        p_client_session_id: operationContext.clientSessionId,
         p_report_id: report.id,
         p_expected_report_revision: Number(report.revision),
-        p_lease_id: lease.leaseId,
-        p_fencing_token: lease.fencingToken,
+        p_lease_id: operationLease.leaseId,
+        p_fencing_token: operationLease.fencingToken,
         p_payload: cleanPayload
       }, `create_module:${report.id}`), 'CREATE_MODULE_FAILED');
+      this.assertSessionContext(operationContext, 'create_module');
       report.revision = Number(result.reportRevision ?? result.report_revision);
-      this.leases.delete(this.leaseKey('report_structure', report.id));
+      this.forgetCapturedLease(operationLease);
       const item = Object.assign({}, cleanPayload, {
         _v7Id: result.entityId || result.entity_id,
         _v7Revision: Number(result.revision)
@@ -1012,28 +1190,34 @@
 
     async reorderModules(items) {
       this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      this.assertSessionContext(operationContext, 'reorder_modules');
       const report = this.currentReport();
       if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
       const order = (items || []).map((item) => item && item._v7Id);
       if (!order.length || order.some((id) => !id)) throw new TypeError('all modules require V7 IDs');
-      const lease = this.getLease('report_structure', report.id) || await this.claimLease('report_structure', report.id);
+      const operationLease = this.getLease('report_structure', report.id) || await this.claimLease('report_structure', report.id);
+      this.assertSessionContext(operationContext, 'reorder_modules');
       const result = this.commandResult(await this.executeOperation('monthly_v7_reorder_modules', {
         p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
+        p_user_session_id: operationContext.userSessionId,
+        p_client_session_id: operationContext.clientSessionId,
         p_report_id: report.id,
         p_expected_report_revision: Number(report.revision),
-        p_lease_id: lease.leaseId,
-        p_fencing_token: lease.fencingToken,
+        p_lease_id: operationLease.leaseId,
+        p_fencing_token: operationLease.fencingToken,
         p_order: order
       }, `reorder_modules:${report.id}`), 'REORDER_MODULES_FAILED');
+      this.assertSessionContext(operationContext, 'reorder_modules');
       report.revision = Number(result.reportRevision ?? result.report_revision);
-      this.leases.delete(this.leaseKey('report_structure', report.id));
+      this.forgetCapturedLease(operationLease);
       return result;
     }
 
     async saveModuleBatch(items) {
       this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      this.assertSessionContext(operationContext, 'save_module_batch');
       const report = this.currentReport();
       if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
       let saveItems = Array.isArray(items) ? items.slice() : [];
@@ -1042,12 +1226,14 @@
         throw new TypeError('batch modules require V7 identities/revisions');
       }
       const pendingKey = `save_module_batch:${report.id}`;
+      const supersededLease = this.getLease('kpi_batch', report.id);
       const superseded = await this.reconcileSupersededPending(
         'monthly_v7_save_module_batch', pendingKey,
         saveItems.map((item) => ({
           entityType: 'module', entityId: item._v7Id, payload: this.modulePayload(item)
         }))
       );
+      this.assertSessionContext(operationContext, 'save_module_batch');
       if (superseded) {
         const priorResult = superseded.result;
         if (priorResult && priorResult.ok === true) {
@@ -1066,7 +1252,6 @@
             }
           }
           this.watermark = Math.max(this.watermark, Number(priorResult.watermark || 0));
-          this.leases.delete(this.leaseKey('kpi_batch', report.id));
           saveItems = saveItems.filter((item) => {
             const confirmed = priorPayloads.get(String(item._v7Id));
             const changed = this.operationCanonical(this.modulePayload(item))
@@ -1076,7 +1261,7 @@
           });
           if (!saveItems.length) return priorResult;
         } else if (priorResult && priorResult.error === 'LEASE_LOST') {
-          this.leases.delete(this.leaseKey('kpi_batch', report.id));
+          this.forgetCapturedLease(supersededLease);
         } else {
           return this.commandResult(priorResult, 'SAVE_MODULE_BATCH_FAILED');
         }
@@ -1089,35 +1274,39 @@
       changes.forEach((row) => this.saveDraft('module', row.moduleId, row.payload, row.expectedRevision));
       const desiredParams = {
         p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
+        p_user_session_id: operationContext.userSessionId,
+        p_client_session_id: operationContext.clientSessionId,
         p_report_id: report.id,
         p_changes: changes
       };
       let result;
-      let replayedTerminal = false;
+      let replayLease = null;
+      let operationLease = null;
       try {
+        replayLease = this.getLease('kpi_batch', report.id);
         const replayed = await this.replayPendingBeforeLease('monthly_v7_save_module_batch', pendingKey, desiredParams);
+        this.assertSessionContext(operationContext, 'save_module_batch');
         if (replayed) {
           if (replayed.ok === true) {
             result = this.commandResult(replayed, 'SAVE_MODULE_BATCH_FAILED');
-            replayedTerminal = true;
           } else if (replayed.error !== 'LEASE_LOST') {
-            replayedTerminal = true;
             result = this.commandResult(replayed, 'SAVE_MODULE_BATCH_FAILED');
           } else {
-            this.leases.delete(this.leaseKey('kpi_batch', report.id));
+            this.forgetCapturedLease(replayLease);
           }
         }
         if (!result) {
-          const lease = this.getLease('kpi_batch', report.id) || await this.claimLease('kpi_batch', report.id);
+          this.assertSessionContext(operationContext, 'save_module_batch');
+          operationLease = this.getLease('kpi_batch', report.id) || await this.claimLease('kpi_batch', report.id);
+          this.assertSessionContext(operationContext, 'save_module_batch');
           result = this.commandResult(await this.executeOperation('monthly_v7_save_module_batch', Object.assign({}, desiredParams, {
-            p_lease_id: lease.leaseId,
-            p_fencing_token: lease.fencingToken
+            p_lease_id: operationLease.leaseId,
+            p_fencing_token: operationLease.fencingToken
           }), pendingKey), 'SAVE_MODULE_BATCH_FAILED');
+          this.assertSessionContext(operationContext, 'save_module_batch');
         }
       } catch (error) {
-        await this.releaseLease('kpi_batch', report.id);
+        await this.releaseCapturedLease(operationLease, operationContext);
         if (['REVISION_CONFLICT', 'LEASE_LOST', 'AUTHORITY_CHANGED'].includes(error.code)
           && typeof this.host.onConflict === 'function') {
           this.host.onConflict({
@@ -1134,17 +1323,16 @@
         if (updates.has(item._v7Id)) item._v7Revision = updates.get(item._v7Id);
         this.clearDraft('module', item._v7Id);
       });
-      if (replayedTerminal) await this.releaseLease('kpi_batch', report.id);
-      else this.leases.delete(this.leaseKey('kpi_batch', report.id));
-      // The batch RPC atomically expires its kpi_batch lease, but each editor may
-      // still hold an independently claimed module lease. Release those server
-      // leases after the committed batch so another editor need not wait for TTL.
-      await Promise.allSettled(changes.map((row) => this.releaseLease('module', row.moduleId)));
+      // Persistence acknowledgement (including same-operation COMMITTED replay)
+      // does not end the aggregate edit session.  The exact captured lease stays
+      // registered until an explicit editor exit, actor switch, or valid logout.
       return result;
     }
 
     async deleteModule(item) {
       this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      this.assertSessionContext(operationContext, 'delete_module');
       const report = this.currentReport();
       const entityId = item && item._v7Id;
       const expectedRevision = Number(item && item._v7Revision);
@@ -1155,11 +1343,13 @@
       try {
         // Structure first gives all structure-changing commands one deterministic lock order.
         structureLease = this.getLease('report_structure', report.id) || await this.claimLease('report_structure', report.id);
+        this.assertSessionContext(operationContext, 'delete_module');
         moduleLease = this.getLease('module', entityId) || await this.claimLease('module', entityId);
+        this.assertSessionContext(operationContext, 'delete_module');
         const result = this.commandResult(await this.executeOperation('monthly_v7_delete_module', {
           p_workspace_key: this.config.workspaceKey,
-          p_user_session_id: this.userSession.id,
-          p_client_session_id: this.clientSessionId,
+          p_user_session_id: operationContext.userSessionId,
+          p_client_session_id: operationContext.clientSessionId,
           p_module_id: entityId,
           p_expected_module_revision: expectedRevision,
           p_expected_report_revision: Number(report.revision),
@@ -1168,16 +1358,19 @@
           p_module_lease_id: moduleLease.leaseId,
           p_module_fencing_token: moduleLease.fencingToken
         }, `delete_module:${entityId}`), 'DELETE_MODULE_FAILED');
+        this.assertSessionContext(operationContext, 'delete_module');
         report.revision = Number(result.reportRevision ?? result.report_revision);
-        this.leases.delete(this.leaseKey('report_structure', report.id));
-        this.leases.delete(this.leaseKey('module', entityId));
+        const structureKey = this.leaseKey('report_structure', report.id);
+        const moduleKey = this.leaseKey('module', entityId);
+        if (this.leases.get(structureKey) === structureLease) this.leases.delete(structureKey);
+        if (this.leases.get(moduleKey) === moduleLease) this.leases.delete(moduleKey);
         this.clearDraft('module', entityId);
         if (typeof this.host.onModuleDeleted === 'function') this.host.onModuleDeleted(entityId);
         return result;
       } catch (error) {
         await Promise.allSettled([
-          this.releaseLease('module', entityId),
-          this.releaseLease('report_structure', report.id)
+          this.releaseCapturedLease(moduleLease, operationContext),
+          this.releaseCapturedLease(structureLease, operationContext)
         ]);
         throw error;
       }
@@ -1222,32 +1415,40 @@
 
     async saveRecord(recordType, record) {
       this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      this.assertSessionContext(operationContext, 'save_record');
       const entityId = record && record._v7Id;
       const expectedRevision = Number(record && record._v7Revision);
       if (!entityId || !Number.isFinite(expectedRevision)) throw new TypeError('V7 record identity/revision is required');
       const entityType = `record:${recordType}`;
       const payload = this.recordPayload(record);
       this.saveDraft(entityType, entityId, payload, expectedRevision);
-      const lease = this.getLease(entityType, entityId) || await this.claimLease(entityType, entityId);
+      const operationLease = this.getLease(entityType, entityId) || await this.claimLease(entityType, entityId);
+      this.assertSessionContext(operationContext, 'save_record');
       let result;
       try {
         result = this.commandResult(await this.executeOperation('monthly_v7_save_record', {
           p_workspace_key: this.config.workspaceKey,
-          p_user_session_id: this.userSession.id,
-          p_client_session_id: this.clientSessionId,
+          p_user_session_id: operationContext.userSessionId,
+          p_client_session_id: operationContext.clientSessionId,
           p_record_id: entityId,
           p_expected_revision: expectedRevision,
-          p_lease_id: lease.leaseId,
-          p_fencing_token: lease.fencingToken,
+          p_lease_id: operationLease.leaseId,
+          p_fencing_token: operationLease.fencingToken,
           p_payload: payload
         }, `save_record:${entityId}`), 'SAVE_RECORD_FAILED');
+        this.assertSessionContext(operationContext, 'save_record');
       } catch (error) {
-        if (['LEASE_LOST', 'REVISION_CONFLICT', 'AUTHORITY_CHANGED'].includes(error.code)) this.leases.delete(this.leaseKey(entityType, entityId));
-        if (typeof this.host.onConflict === 'function') this.host.onConflict({ entityType, entityId, draft: payload, result: error.result });
+        if (['LEASE_LOST', 'REVISION_CONFLICT', 'AUTHORITY_CHANGED'].includes(error.code)) {
+          this.forgetCapturedLease(operationLease);
+        }
+        if (this.isSessionContextCurrent(operationContext) && typeof this.host.onConflict === 'function') {
+          this.host.onConflict({ entityType, entityId, draft: payload, result: error.result });
+        }
         throw error;
       }
       record._v7Revision = Number(result.revision);
-      this.leases.delete(this.leaseKey(entityType, entityId));
+      this.forgetCapturedLease(operationLease);
       this.clearDraft(entityType, entityId);
       if (typeof this.host.onItemSaved === 'function') this.host.onItemSaved({ entityType, entityId, revision: record._v7Revision });
       return result;
@@ -1255,22 +1456,26 @@
 
     async deleteRecord(recordType, record) {
       this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      this.assertSessionContext(operationContext, 'delete_record');
       const entityId = record && record._v7Id;
       const expectedRevision = Number(record && record._v7Revision);
       if (!entityId || !Number.isFinite(expectedRevision)) throw new TypeError('V7 record identity/revision is required');
       const entityType = `record:${recordType}`;
       this.saveDraft(entityType, entityId, { deleteRequested: true, previous: this.recordPayload(record) }, expectedRevision);
-      const lease = this.getLease(entityType, entityId) || await this.claimLease(entityType, entityId);
+      const operationLease = this.getLease(entityType, entityId) || await this.claimLease(entityType, entityId);
+      this.assertSessionContext(operationContext, 'delete_record');
       const result = this.commandResult(await this.executeOperation('monthly_v7_delete_record', {
         p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
+        p_user_session_id: operationContext.userSessionId,
+        p_client_session_id: operationContext.clientSessionId,
         p_record_id: entityId,
         p_expected_revision: expectedRevision,
-        p_lease_id: lease.leaseId,
-        p_fencing_token: lease.fencingToken
+        p_lease_id: operationLease.leaseId,
+        p_fencing_token: operationLease.fencingToken
       }, `delete_record:${entityId}`), 'DELETE_RECORD_FAILED');
-      this.leases.delete(this.leaseKey(entityType, entityId));
+      this.assertSessionContext(operationContext, 'delete_record');
+      this.forgetCapturedLease(operationLease);
       this.clearDraft(entityType, entityId);
       if (typeof this.host.onRecordDeleted === 'function') this.host.onRecordDeleted(recordType, entityId);
       return result;
@@ -1431,31 +1636,35 @@
     }
 
     async logoutUser() {
+      const operationContext = this.captureSessionContext();
       try {
-        if (this.isActive() && this.userSession && this.userSession.id) {
+        if (this.isActive() && operationContext.userSessionId) {
           const result = await this.rpc('monthly_v7_logout_user', {
             p_workspace_key: this.config.workspaceKey,
-            p_site_session_id: this.siteSession ? this.siteSession.id : null,
-            p_user_session_id: this.userSession.id
+            p_site_session_id: operationContext.siteSessionId || null,
+            p_user_session_id: operationContext.userSessionId
           });
+          this.assertSessionContext(operationContext, 'logout_user');
           this.commandResult(result, 'USER_LOGOUT_FAILED');
         }
       } finally {
-        this.clearUserSession('user-logout');
+        if (this.isSessionContextCurrent(operationContext)) this.clearUserSession('user-logout');
       }
     }
 
     async logout() {
+      const operationContext = this.captureSessionContext();
       try {
-        if (this.isActive() && this.siteSession && this.siteSession.id) {
+        if (this.isActive() && operationContext.siteSessionId) {
           await this.rpc('monthly_v7_logout', {
             p_workspace_key: this.config.workspaceKey,
-            p_site_session_id: this.siteSession.id,
-            p_user_session_id: this.userSession ? this.userSession.id : null
+            p_site_session_id: operationContext.siteSessionId,
+            p_user_session_id: operationContext.userSessionId || null
           });
+          this.assertSessionContext(operationContext, 'logout_site');
         }
       } finally {
-        this.clearSessions('site-logout');
+        if (this.isSessionContextCurrent(operationContext)) this.clearSessions('site-logout');
       }
     }
 

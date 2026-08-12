@@ -20,6 +20,16 @@
     return JSON.stringify(value);
   }
 
+  function cloudSaveTime(value = Date.now()) {
+    try {
+      return new Date(value).toLocaleTimeString('zh-Hant', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+      });
+    } catch (_error) {
+      return new Date(value).toISOString().slice(11, 19);
+    }
+  }
+
   class SupabaseV7Transport {
     constructor(supabaseGlobal, options = {}) {
       this.supabaseGlobal = supabaseGlobal;
@@ -207,21 +217,36 @@
 
     async logoutUser() {
       if (!this.client) return;
+      const client = this.client;
+      const operationContext = this.captureOperationContext();
       for (const timer of this.moduleReleaseTimers.values()) root.clearTimeout(timer);
       this.moduleReleaseTimers.clear();
-      const leases = Array.from(this.client.leases.values());
-      await Promise.allSettled(leases.map((lease) => this.client.releaseLease(lease.entityType, lease.entityId)));
-      await this.client.logoutUser();
+      const leases = Array.from(client.leases.values());
+      await Promise.allSettled(leases.map((lease) => client.releaseCapturedLease(lease, operationContext)));
+      this.assertOperationContext(operationContext, 'logout_user_release');
+      await client.logoutUser();
+      // The core logout fences its own RPC await and intentionally invalidates
+      // the captured context on success.  A non-null user here can only be a
+      // successor session, which the old continuation must not decorate/use.
+      if (typeof client.currentUser === 'function' && client.currentUser()) {
+        this.assertOperationContext(operationContext, 'logout_user_complete');
+      }
       this.decorateEditorRows();
     }
 
     async logout() {
       if (!this.client) return;
+      const client = this.client;
+      const operationContext = this.captureOperationContext();
       for (const timer of this.moduleReleaseTimers.values()) root.clearTimeout(timer);
       this.moduleReleaseTimers.clear();
-      const leases = Array.from(this.client.leases.values());
-      await Promise.allSettled(leases.map((lease) => this.client.releaseLease(lease.entityType, lease.entityId)));
-      await this.client.logout();
+      const leases = Array.from(client.leases.values());
+      await Promise.allSettled(leases.map((lease) => client.releaseCapturedLease(lease, operationContext)));
+      this.assertOperationContext(operationContext, 'logout_site_release');
+      await client.logout();
+      if (typeof client.isSiteUnlocked === 'function' && client.isSiteUnlocked()) {
+        this.assertOperationContext(operationContext, 'logout_site_complete');
+      }
       this.decorateEditorRows();
     }
 
@@ -240,8 +265,32 @@
       return this.client.catchUp();
     }
 
-    enqueue(task) {
-      const run = this.persistChain.catch(() => undefined).then(task);
+    captureOperationContext() {
+      return this.client && typeof this.client.captureSessionContext === 'function'
+        ? this.client.captureSessionContext()
+        : null;
+    }
+
+    isOperationContextCurrent(context) {
+      return !context || !this.client || typeof this.client.isSessionContextCurrent !== 'function'
+        || this.client.isSessionContextCurrent(context);
+    }
+
+    assertOperationContext(context, operationName = '') {
+      if (context && this.client && typeof this.client.assertSessionContext === 'function') {
+        this.client.assertSessionContext(context, operationName);
+      }
+      return context;
+    }
+
+    enqueue(task, operationName = 'queued-persist') {
+      const operationContext = this.captureOperationContext();
+      const run = this.persistChain.catch(() => undefined).then(async () => {
+        this.assertOperationContext(operationContext, operationName);
+        const result = await task(operationContext);
+        this.assertOperationContext(operationContext, operationName);
+        return result;
+      });
       this.persistChain = run;
       return run.catch((error) => {
         if (!['REVISION_CONFLICT', 'REVISION_CONFLICT_CANCELLED'].includes(error && error.code) && !error?.silent) {
@@ -252,7 +301,13 @@
     }
 
     baselineModuleMap() {
-      return new Map(((this.client.snapshot && this.client.snapshot.modules) || []).map((row) => [row.id, row]));
+      return new Map(((this.client.snapshot && this.client.snapshot.modules) || []).map((row) => {
+        if (!Object.prototype.hasOwnProperty.call(row, '_serverPayload')) return [row.id, row];
+        return [row.id, Object.assign({}, row, {
+          payload: clone(row._serverPayload),
+          revision: Number(row._serverRevision ?? row.revision)
+        })];
+      }));
     }
 
     syncModuleBaseline(item, confirmedPayload) {
@@ -265,17 +320,21 @@
       }
       row.revision = Number(item._v7Revision);
       row.payload = clone(confirmedPayload === undefined ? this.client.modulePayload(item) : confirmedPayload);
+      delete row._serverPayload;
+      delete row._serverRevision;
     }
 
     hasModuleDraft(entityId) {
       return !!(this.client && entityId && this.client.readDraft('module', entityId));
     }
 
-    async rebaseModulesForConfirmedRetry(items, conflictError) {
+    async rebaseModulesForConfirmedRetry(items, conflictError, operationContext = this.captureOperationContext()) {
+      this.assertOperationContext(operationContext, 'rebase_modules');
       const pending = (items || []).filter((item) => item && item._v7Id);
       const serverEntities = [];
       for (const item of pending) {
         const entity = await this.client.getEntity('module', item._v7Id);
+        this.assertOperationContext(operationContext, 'rebase_modules');
         if (entity.deleted || !Number.isFinite(Number(entity.revision))) {
           const error = new Error('CONFLICT_ENTITY_UNAVAILABLE');
           error.code = 'CONFLICT_ENTITY_UNAVAILABLE';
@@ -293,6 +352,7 @@
           result: conflictError && conflictError.result
         }))
         : false;
+      this.assertOperationContext(operationContext, 'rebase_modules');
       if (!confirmed) {
         this.setStatus('已取消覆蓋；雲端未變更，本機草稿仍完整保留。', 'warn');
         const error = new Error('REVISION_CONFLICT_CANCELLED');
@@ -310,8 +370,10 @@
       return serverEntities;
     }
 
-    async saveChangedModules(changed, options = {}) {
+    async saveChangedModules(changed, options = {}, operationContext = this.captureOperationContext()) {
+      this.assertOperationContext(operationContext, 'save_changed_modules');
       const commit = async () => {
+        this.assertOperationContext(operationContext, 'save_changed_modules');
         const submitted = changed.map((item) => ({
           item,
           payload: clone(this.client.modulePayload(item))
@@ -325,24 +387,33 @@
         try {
           if (!isBatch) await this.client.saveModule(changed[0]);
           else await this.client.saveModuleBatch(changed);
+          this.assertOperationContext(operationContext, 'save_changed_modules');
           cloudConfirmed = true;
           submitted.forEach(({ item, payload }) => this.syncModuleBaseline(item, payload));
         } finally {
-          for (const { item, payload } of submitted) {
-            let liveItem = item;
-            if (typeof this.host.getLocalEntity === 'function') {
-              try { liveItem = await this.host.getLocalEntity('module', item._v7Id) || item; }
-              catch (_error) { liveItem = item; }
-            }
-            const currentPayload = this.client.modulePayload(liveItem);
-            const changedWhileSaving = canonical(currentPayload) !== canonical(payload);
-            if ((!cloudConfirmed && isBatch) || changedWhileSaving) {
-              if (!cloudConfirmed && typeof this.client.saveSupersedingDraft === 'function') {
-                this.client.saveSupersedingDraft(
-                  'module', item._v7Id, currentPayload, Number(item._v7Revision), rpcName, pendingKey
-                );
-              } else {
-                this.client.saveDraft('module', item._v7Id, currentPayload, Number(item._v7Revision));
+          if (this.isOperationContextCurrent(operationContext)) {
+            for (const { item, payload } of submitted) {
+              this.assertOperationContext(operationContext, 'save_changed_modules_cleanup');
+              let liveItem = item;
+              if (typeof this.host.getLocalEntity === 'function') {
+                try {
+                  liveItem = await this.host.getLocalEntity('module', item._v7Id) || item;
+                  this.assertOperationContext(operationContext, 'save_changed_modules_cleanup');
+                } catch (error) {
+                  this.assertOperationContext(operationContext, 'save_changed_modules_cleanup');
+                  liveItem = item;
+                }
+              }
+              const currentPayload = this.client.modulePayload(liveItem);
+              const changedWhileSaving = canonical(currentPayload) !== canonical(payload);
+              if ((!cloudConfirmed && isBatch) || changedWhileSaving) {
+                if (!cloudConfirmed && typeof this.client.saveSupersedingDraft === 'function') {
+                  this.client.saveSupersedingDraft(
+                    'module', item._v7Id, currentPayload, Number(item._v7Revision), rpcName, pendingKey
+                  );
+                } else {
+                  this.client.saveDraft('module', item._v7Id, currentPayload, Number(item._v7Revision));
+                }
               }
             }
           }
@@ -352,7 +423,8 @@
         await commit();
       } catch (error) {
         if (error && error.code === 'REVISION_CONFLICT' && options.resolveRevisionConflict === true) {
-          await this.rebaseModulesForConfirmedRetry(changed, error);
+          await this.rebaseModulesForConfirmedRetry(changed, error, operationContext);
+          this.assertOperationContext(operationContext, 'save_changed_modules');
           await commit();
           return;
         }
@@ -367,13 +439,17 @@
         return { mode: 'v7', localOnly: true };
       }
       const liveItems = Array.isArray(items) ? items : [];
-      return this.enqueue(async () => {
-        if (!this.client.snapshot) await this.client.loadSnapshot();
+      return this.enqueue(async (operationContext) => {
+        if (!this.client.snapshot) {
+          await this.client.loadSnapshot();
+          this.assertOperationContext(operationContext, 'persist_report_data');
+        }
         let baseline = this.baselineModuleMap();
         const liveIds = new Set(liveItems.map((item) => item && item._v7Id).filter(Boolean));
         const deletedRows = Array.from(baseline.values()).filter((row) => !liveIds.has(row.id));
         for (const item of liveItems.filter((entry) => !entry._v7Id)) {
           const created = await this.client.createModule(item);
+          this.assertOperationContext(operationContext, 'persist_report_data');
           item._v7Id = created._v7Id;
           item._v7Revision = created._v7Revision;
           this.syncModuleBaseline(item);
@@ -381,24 +457,49 @@
         for (const row of deletedRows) {
           const item = Object.assign({}, clone(row.payload), { _v7Id: row.id, _v7Revision: Number(row.revision) });
           await this.client.deleteModule(item);
+          this.assertOperationContext(operationContext, 'persist_report_data');
           this.client.snapshot.modules = this.client.snapshot.modules.filter((entry) => entry.id !== row.id);
         }
         baseline = this.baselineModuleMap();
+        const reportId = String((this.currentReport() && this.currentReport().id) || '');
+        const batchPendingKey = reportId ? `save_module_batch:${reportId}` : '';
+        const batchPendingTargets = batchPendingKey
+          ? this.client.pendingOperationTargets('monthly_v7_save_module_batch', batchPendingKey)
+          : new Set();
         const changed = liveItems.filter((item) => {
           const row = baseline.get(item._v7Id);
-          return row && (this.hasModuleDraft(item._v7Id)
-            || canonical(this.client.modulePayload(item)) !== canonical(row.payload));
+          if (!row) return false;
+          const livePayload = this.client.modulePayload(item);
+          let payloadChanged = canonical(livePayload) !== canonical(row.payload);
+          const draft = this.client.readDraft('module', item._v7Id);
+          const draftChanged = !!(draft && canonical(draft.payload) !== canonical(row.payload));
+          if (!payloadChanged && draftChanged) {
+            const entityId = item._v7Id;
+            Object.assign(item, clone(draft.payload), {
+              _v7Id: entityId,
+              _v7Revision: Number(draft.baseRevision ?? item._v7Revision ?? row.revision)
+            });
+            payloadChanged = true;
+          }
+          const hasPending = this.client.hasPendingOperation(`save_module:${item._v7Id}`)
+            || batchPendingTargets.has(String(item._v7Id));
+          if (!payloadChanged && !draftChanged && !hasPending && draft) {
+            this.client.clearDraft('module', item._v7Id);
+          }
+          return payloadChanged || draftChanged || hasPending;
         });
-        if (changed.length > 0) await this.saveChangedModules(changed, options);
+        if (changed.length > 0) await this.saveChangedModules(changed, options, operationContext);
+        this.assertOperationContext(operationContext, 'persist_report_data');
         const liveOrder = liveItems.map((item) => item._v7Id);
         const baseOrder = (this.client.snapshot.modules || []).map((row) => row.id);
         if (liveOrder.length && canonical(liveOrder) !== canonical(baseOrder)) {
           await this.client.reorderModules(liveItems);
+          this.assertOperationContext(operationContext, 'persist_report_data');
           const ranks = new Map(liveOrder.map((id, index) => [id, index]));
           this.client.snapshot.modules.sort((a, b) => ranks.get(a.id) - ranks.get(b.id));
         }
-        this.setStatus(`逐項雲端已保存｜watermark ${this.client.watermark}`, 'ok');
         this.decorateEditorRows();
+        this.scheduleInactiveCleanModuleReleases();
         return { mode: 'v7', saved: true, watermark: this.client.watermark };
       });
     }
@@ -423,18 +524,25 @@
       if (currentMeta && !hasMetaDraft && canonical(nextMeta) === canonical(currentMeta)) {
         return { ok: true, skipped: true, revision: Number(report.revision) };
       }
-      return this.enqueue(async () => {
+      return this.enqueue(async (operationContext) => {
         let cloudConfirmed = false;
         try {
           const result = await this.client.saveReportMeta(nextMeta);
+          this.assertOperationContext(operationContext, 'persist_report_meta');
           cloudConfirmed = true;
-          this.setStatus(`月報資訊已保存｜revision ${result.revision}`, 'ok');
+          this.setStatus(`月報資訊已保存｜${cloudSaveTime()}`, 'ok');
           return result;
         } finally {
-          if (typeof this.host.getLocalEntity === 'function') {
+          if (this.isOperationContextCurrent(operationContext)
+            && typeof this.host.getLocalEntity === 'function') {
             let live = null;
-            try { live = await this.host.getLocalEntity('report_meta', report.id); }
-            catch (_error) { live = null; }
+            try {
+              live = await this.host.getLocalEntity('report_meta', report.id);
+              this.assertOperationContext(operationContext, 'persist_report_meta_cleanup');
+            } catch (error) {
+              this.assertOperationContext(operationContext, 'persist_report_meta_cleanup');
+              live = null;
+            }
             const liveMeta = live && {
               title: String(live.title || ''),
               date: String(live.date || ''),
@@ -454,7 +562,7 @@
             }
           }
         }
-      });
+      }, 'persist-report-meta');
     }
 
     recordGroupsFromSnapshot() {
@@ -484,8 +592,11 @@
         this.setStatus('資料記錄只保存為本機草稿；請先登入。', 'warn');
         return { mode: 'v7', localOnly: true };
       }
-      return this.enqueue(async () => {
-        if (!this.client.snapshot) await this.client.loadSnapshot();
+      return this.enqueue(async (operationContext) => {
+        if (!this.client.snapshot) {
+          await this.client.loadSnapshot();
+          this.assertOperationContext(operationContext, 'persist_records');
+        }
         const groups = records || {};
         const live = [];
         for (const [recordType, rows] of Object.entries(groups)) {
@@ -495,12 +606,14 @@
         const deleted = ((this.client.snapshot && this.client.snapshot.records) || []).filter((row) => !liveIds.has(row.id));
         for (const entry of live.filter(({ row }) => !row._v7Id)) {
           const created = await this.client.createRecord(entry.recordType, entry.row);
+          this.assertOperationContext(operationContext, 'persist_records');
           Object.assign(entry.row, created);
           this.syncRecordBaseline(entry.recordType, entry.row);
         }
         for (const old of deleted) {
           const record = Object.assign({}, clone(old.payload), { _v7Id: old.id, _v7Revision: Number(old.revision) });
           await this.client.deleteRecord(old.recordType, record);
+          this.assertOperationContext(operationContext, 'persist_records');
           this.client.snapshot.records = this.client.snapshot.records.filter((entry) => entry.id !== old.id);
         }
         const baseline = new Map(((this.client.snapshot && this.client.snapshot.records) || []).map((row) => [row.id, row]));
@@ -508,17 +621,21 @@
           const old = baseline.get(entry.row._v7Id);
           if (old && canonical(this.client.recordPayload(entry.row)) !== canonical(old.payload)) {
             await this.client.saveRecord(entry.recordType, entry.row);
+            this.assertOperationContext(operationContext, 'persist_records');
             this.syncRecordBaseline(entry.recordType, entry.row);
           }
         }
-        this.setStatus(`逐筆資料記錄已保存｜watermark ${this.client.watermark}`, 'ok');
+        this.setStatus(`資料記錄已保存｜${cloudSaveTime()}`, 'ok');
         return { mode: 'v7', saved: true, watermark: this.client.watermark };
-      });
+      }, 'persist-records');
     }
 
     async flush(meta) {
+      const operationContext = this.captureOperationContext();
       await this.persistChain.catch(() => undefined);
+      this.assertOperationContext(operationContext, 'flush');
       if (meta && this.isActive() && this.currentUser()) await this.persistReportMeta(meta);
+      this.assertOperationContext(operationContext, 'flush');
       return true;
     }
 
@@ -540,7 +657,9 @@
       const row = root.document.querySelector(`#tableBody tr[data-v7-entity-id="${CSS.escape(String(lease.entityId))}"]`);
       if (!row) return;
       row.dataset.v7LeaseState = 'owned';
-      row.querySelectorAll('[data-v7-editable="1"]').forEach((element) => element.setAttribute('contenteditable', 'true'));
+      row.querySelectorAll('[data-v7-editable="1"]').forEach((element) => {
+        if (element.getAttribute('contenteditable') !== 'true') element.setAttribute('contenteditable', 'true');
+      });
       let badge = row.querySelector('.v7-item-lock-badge');
       if (!badge) {
         badge = root.document.createElement('span');
@@ -553,13 +672,17 @@
 
     decorateEditorRows() {
       if (!this.isActive() || !root.document) return;
+      const formalPrintLocked = root.document.body?.dataset?.v7FormalPrintLock === 'true';
       root.document.querySelectorAll('#tableBody tr[data-v7-entity-id]').forEach((row) => {
         const id = row.dataset.v7EntityId;
         const owned = !!this.client.getLease('module', id);
         row.dataset.v7LeaseState = owned ? 'owned' : 'idle';
         row.querySelectorAll('.editable-div').forEach((element) => {
           element.dataset.v7Editable = '1';
-          element.setAttribute('contenteditable', owned ? 'true' : 'false');
+          const editable = owned && !formalPrintLocked ? 'true' : 'false';
+          if (element.getAttribute('contenteditable') !== editable) {
+            element.setAttribute('contenteditable', editable);
+          }
         });
         let badge = row.querySelector('.v7-item-lock-badge');
         if (!badge) {
@@ -569,6 +692,16 @@
         }
         badge.textContent = owned ? '你正在編輯' : '點一下取得編輯權';
         badge.className = `v7-item-lock-badge no-print text-[10px] font-bold ${owned ? 'text-emerald-700' : 'text-slate-400'}`;
+      });
+    }
+
+    scheduleInactiveCleanModuleReleases() {
+      if (!this.client || !root.document) return;
+      root.document.querySelectorAll('#tableBody tr[data-v7-entity-id]').forEach((row) => {
+        const entityId = String(row.dataset.v7EntityId || '');
+        if (!entityId || !this.client.getLease('module', entityId)) return;
+        if (row.contains(root.document.activeElement)) return;
+        this.scheduleUnchangedModuleRelease(row);
       });
     }
 
@@ -582,29 +715,39 @@
     scheduleUnchangedModuleRelease(row, delayMs = 350) {
       if (!row || !this.client) return;
       const entityId = String(row.dataset.v7EntityId || '');
-      if (!entityId || !this.client.getLease('module', entityId)) return;
+      const operationLease = entityId ? this.client.getLease('module', entityId) : null;
+      const operationContext = operationLease ? this.captureOperationContext() : null;
+      if (!entityId || !operationLease || !operationContext) return;
       this.cancelModuleRelease(entityId);
       const timer = root.setTimeout(async () => {
         this.moduleReleaseTimers.delete(entityId);
-        if (!this.client || !this.client.getLease('module', entityId)) return;
+        if (!this.client || !this.isOperationContextCurrent(operationContext)
+          || this.client.getLease('module', entityId) !== operationLease) return;
         const currentRow = Array.from(root.document.querySelectorAll('#tableBody tr[data-v7-entity-id]'))
           .find((candidate) => String(candidate.dataset.v7EntityId || '') === entityId);
         if (currentRow && currentRow.contains(root.document.activeElement)) return;
         const baseline = this.baselineModuleMap().get(entityId);
         if (!baseline || typeof this.host.getLocalEntity !== 'function') return;
         let local;
-        try { local = await this.host.getLocalEntity('module', entityId); }
-        catch (error) { this.reportError(error); return; }
-        if (!local || (currentRow && currentRow.contains(root.document.activeElement))) return;
+        try {
+          local = await this.host.getLocalEntity('module', entityId);
+          this.assertOperationContext(operationContext, 'release_clean_module');
+        } catch (error) {
+          if (!this.isOperationContextCurrent(operationContext)) return;
+          this.reportError(error);
+          return;
+        }
+        if (!local || this.client.getLease('module', entityId) !== operationLease
+          || (currentRow && currentRow.contains(root.document.activeElement))) return;
         const changed = canonical(this.client.modulePayload(local)) !== canonical(baseline.payload);
         if (changed) return;
-        try { await this.client.releaseLease('module', entityId); }
+        try { await this.client.releaseCapturedLease(operationLease, operationContext); }
         catch {
-          // releaseLease drops the local heartbeat in finally; the server lease
-          // will therefore expire at its existing TTL even if the ack is lost.
+          // releaseCapturedLease drops only the captured local heartbeat in finally;
+          // the server lease will expire at its existing TTL if the ack is lost.
           this.setStatus('項目釋放確認失敗；編輯權將在逾時後自動釋放。', 'warn');
         }
-        this.decorateEditorRows();
+        if (this.isOperationContextCurrent(operationContext)) this.decorateEditorRows();
       }, delayMs);
       this.moduleReleaseTimers.set(entityId, timer);
     }
@@ -622,7 +765,7 @@
           this.toast('已取得此項目編輯權，可開始修改。');
         }).catch((error) => {
           if (error.code === 'LEASE_HELD') {
-            this.setStatus(error.message, 'warn');
+            this.setStatus(error.message, 'warn', { protectForMs: 10000 });
             this.toast(error.message);
           } else {
             this.reportError(error);
@@ -781,8 +924,8 @@
     async updateSitePassword(password) { return this.client.updateSitePassword(password); }
     async createReportSnapshot(kind) { return this.client.createReportSnapshot(kind); }
 
-    setStatus(text, kind) {
-      if (typeof this.host.setStatus === 'function') this.host.setStatus(text, kind);
+    setStatus(text, kind, options) {
+      if (typeof this.host.setStatus === 'function') this.host.setStatus(text, kind, options);
     }
 
     toast(text) {

@@ -45,6 +45,45 @@ test('initialize 僅在 NORMALIZED_ACTIVE 啟用 V7，LEGACY_ACTIVE 保持 V6 wr
   assert.equal(active.isActive(), true);
 });
 
+test('session operation context 綁定 generation、actor 與 session IDs', async () => {
+  const sessions = memoryStorage();
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: {
+      ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' }
+    },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 0,
+      report: { id: 'r1', revision: 1 }, modules: [], records: [], users: []
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: memoryStorage(), idFactory: () => 'tab-context'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  const context = client.captureSessionContext();
+  assert.equal(Object.isFrozen(context), true);
+  assert.deepEqual(context, {
+    generation: client.sessionGeneration,
+    actorUserId: 'u1',
+    userSessionId: 'user-1',
+    siteSessionId: 'site-1',
+    clientSessionId: 'tab-context'
+  });
+  assert.equal(client.isSessionContextCurrent(context), true);
+  client.clearUserSession('test-switch');
+  assert.equal(client.isSessionContextCurrent(context), false);
+  assert.throws(() => client.assertSessionContext(context, 'queued-save'), (error) => {
+    assert.equal(error.code, 'STALE_SESSION_RESPONSE');
+    assert.equal(error.rpcName, 'queued-save');
+    return true;
+  });
+});
+
 test('Supabase RPC 超時會明確失敗而不是讓保存狀態永久等待', async () => {
   const transport = new SupabaseV7Transport(null, { requestTimeoutMs: 25 });
   transport.client = { rpc: () => new Promise(() => {}) };
@@ -373,6 +412,399 @@ test('舊 session 世代晚到的 invalid 回應不得清除重新登入的新 s
   assert.equal(sessionEvents.filter((event) => event.code === 'READ_SESSION_INVALID').length, 0);
 });
 
+test('舊 actor 的晚到保存成功不得清除新 actor 草稿、revision 或 lease', async () => {
+  let resolveSave;
+  let saveCalls = 0;
+  const transport = {
+    rpc(name) {
+      if (name !== 'monthly_v7_save_module') throw new Error(`unexpected ${name}`);
+      saveCalls += 1;
+      return new Promise((resolve) => { resolveSave = resolve; });
+    }
+  };
+  const drafts = memoryStorage();
+  const client = new MonthlyV7Client({ transport, sessionStorage: memoryStorage(), draftStorage: drafts, idFactory: () => 'tab' });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-1' };
+  client.userSession = { id: 'user-session-u1' };
+  client.user = { id: 'u1', username: 'u1' };
+  client.snapshot = { report: { id: 'r1' }, modules: [{ id: 'm1', revision: 1, payload: { title: 'A' } }], records: [] };
+  const item = { _v7Id: 'm1', _v7Revision: 1, title: 'U1 draft' };
+  client.leases.set(client.leaseKey('module', 'm1'), {
+    entityType: 'module', entityId: 'm1', leaseId: 'lease-u1', fencingToken: 1,
+    holderUserId: 'u1', clientSessionId: 'tab'
+  });
+
+  const saving = client.saveModule(item);
+  await new Promise((resolve) => setImmediate(resolve));
+  client.clearUserSession('actor-switch');
+  client.userSession = { id: 'user-session-u2' };
+  client.user = { id: 'u2', username: 'u2' };
+  client.sessionGeneration += 1;
+  client.saveDraft('module', 'm1', { title: 'U2 draft' }, 1);
+  const leaseU2 = {
+    entityType: 'module', entityId: 'm1', leaseId: 'lease-u2', fencingToken: 2,
+    holderUserId: 'u2', clientSessionId: 'tab'
+  };
+  client.leases.set(client.leaseKey('module', 'm1'), leaseU2);
+  resolveSave({ ok: true, entityId: 'm1', revision: 2, watermark: 9 });
+
+  await assert.rejects(saving, (error) => error.code === 'STALE_SESSION_RESPONSE');
+  assert.equal(saveCalls, 1);
+  assert.equal(item._v7Revision, 1);
+  assert.equal(client.readDraft('module', 'm1').payload.title, 'U2 draft');
+  assert.equal(client.getLease('module', 'm1'), leaseU2);
+});
+
+test('舊 actor 的晚到 release 回應不得刪除新 actor 同項 lease', async () => {
+  let resolveRelease;
+  const transport = {
+    rpc(name) {
+      if (name !== 'monthly_v7_release_lease') throw new Error(`unexpected ${name}`);
+      return new Promise((resolve) => { resolveRelease = resolve; });
+    }
+  };
+  const client = new MonthlyV7Client({ transport, sessionStorage: memoryStorage(), draftStorage: memoryStorage(), idFactory: () => 'tab' });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-1' };
+  client.userSession = { id: 'user-session-u1' };
+  client.user = { id: 'u1', username: 'u1' };
+  const leaseU1 = {
+    entityType: 'module', entityId: 'm1', leaseId: 'lease-u1', fencingToken: 1,
+    holderUserId: 'u1', clientSessionId: 'tab'
+  };
+  client.leases.set(client.leaseKey('module', 'm1'), leaseU1);
+
+  const releasing = client.releaseLease('module', 'm1');
+  await new Promise((resolve) => setImmediate(resolve));
+  client.clearUserSession('actor-switch');
+  client.userSession = { id: 'user-session-u2' };
+  client.user = { id: 'u2', username: 'u2' };
+  client.sessionGeneration += 1;
+  const leaseU2 = {
+    entityType: 'module', entityId: 'm1', leaseId: 'lease-u2', fencingToken: 2,
+    holderUserId: 'u2', clientSessionId: 'tab'
+  };
+  client.leases.set(client.leaseKey('module', 'm1'), leaseU2);
+  resolveRelease({ ok: true });
+
+  await assert.rejects(releasing, (error) => error.code === 'STALE_SESSION_RESPONSE');
+  assert.equal(client.getLease('module', 'm1'), leaseU2);
+});
+
+test('舊 actor 的晚到 batch 失敗不得釋放新 actor 的 successor lease', async () => {
+  let rejectBatch;
+  let signalBatchStarted;
+  const batchStarted = new Promise((resolve) => { signalBatchStarted = resolve; });
+  const releaseCalls = [];
+  const client = new MonthlyV7Client({
+    transport: {
+      async rpc(name, params) {
+        if (name === 'monthly_v7_save_module_batch') {
+          signalBatchStarted();
+          return new Promise((_resolve, reject) => { rejectBatch = reject; });
+        }
+        if (name === 'monthly_v7_release_lease') {
+          releaseCalls.push(params);
+          return { ok: true };
+        }
+        throw new Error(`unexpected ${name}`);
+      }
+    },
+    sessionStorage: memoryStorage(), draftStorage: memoryStorage(), idFactory: () => 'tab'
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-1' };
+  client.userSession = { id: 'session-u1' };
+  client.user = { id: 'u1' };
+  client.snapshot = {
+    report: { id: 'r1', revision: 1 },
+    modules: [{ id: 'm1', revision: 1, payload: { title: '原始' } }], records: []
+  };
+  const leaseU1 = {
+    entityType: 'kpi_batch', entityId: 'r1', leaseId: 'batch-u1', fencingToken: 1,
+    holderUserId: 'u1', clientSessionId: 'tab'
+  };
+  client.leases.set(client.leaseKey('kpi_batch', 'r1'), leaseU1);
+  const item = { _v7Id: 'm1', _v7Revision: 1, title: 'U1內容' };
+
+  const saving = client.saveModuleBatch([item]);
+  await batchStarted;
+  client.clearUserSession('actor-switch');
+  client.userSession = { id: 'session-u2' };
+  client.user = { id: 'u2' };
+  client.sessionGeneration += 1;
+  const leaseU2 = {
+    entityType: 'kpi_batch', entityId: 'r1', leaseId: 'batch-u2', fencingToken: 2,
+    holderUserId: 'u2', clientSessionId: 'tab'
+  };
+  client.leases.set(client.leaseKey('kpi_batch', 'r1'), leaseU2);
+  const stale = new Error('STALE_SESSION_RESPONSE');
+  stale.code = 'STALE_SESSION_RESPONSE';
+  rejectBatch(stale);
+
+  await assert.rejects(saving, (error) => error.code === 'STALE_SESSION_RESPONSE');
+  assert.deepEqual(releaseCalls, []);
+  assert.equal(client.getLease('kpi_batch', 'r1'), leaseU2);
+});
+
+test('舊 actor 的晚到 logout finally 不得清除新 actor session', async () => {
+  let resolveLogout;
+  let signalStarted;
+  const started = new Promise((resolve) => { signalStarted = resolve; });
+  const client = new MonthlyV7Client({
+    transport: {
+      rpc(name) {
+        assert.equal(name, 'monthly_v7_logout_user');
+        signalStarted();
+        return new Promise((resolve) => { resolveLogout = resolve; });
+      }
+    },
+    sessionStorage: memoryStorage(), draftStorage: memoryStorage(), idFactory: () => 'tab'
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-1' };
+  client.userSession = { id: 'session-u1' };
+  client.user = { id: 'u1' };
+
+  const loggingOut = client.logoutUser();
+  await started;
+  client.clearUserSession('actor-switch');
+  client.userSession = { id: 'session-u2' };
+  client.user = { id: 'u2' };
+  client.sessionGeneration += 1;
+  resolveLogout({ ok: true, revoked: true });
+
+  await assert.rejects(loggingOut, (error) => error.code === 'STALE_SESSION_RESPONSE');
+  assert.equal(client.currentUser().id, 'u2');
+  assert.equal(client.userSession.id, 'session-u2');
+});
+
+for (const method of ['logoutUser', 'logout']) {
+  test(`adapter ${method} 等待釋放舊 lease 時不得改用新 session 登出或刪 successor`, async () => {
+    const app = new MonthlyV7BrowserApp({ transport: {} });
+    let generation = 1;
+    let actorUserId = 'u1';
+    let userSessionId = 'session-u1';
+    let siteSessionId = 'site-u1';
+    let releaseGate;
+    let signalReleaseStarted;
+    const releaseStarted = new Promise((resolve) => { signalReleaseStarted = resolve; });
+    const leaseU1 = {
+      entityType: 'module', entityId: 'm1', leaseId: 'lease-u1', fencingToken: 1,
+      holderUserId: 'u1', clientSessionId: 'tab'
+    };
+    const leaseU2 = {
+      entityType: 'module', entityId: 'm1', leaseId: 'lease-u2', fencingToken: 2,
+      holderUserId: 'u2', clientSessionId: 'tab'
+    };
+    const leases = new Map([['module:m1', leaseU1]]);
+    const logoutCalls = [];
+    const currentContext = () => Object.freeze({
+      generation, actorUserId, userSessionId, siteSessionId, clientSessionId: 'tab'
+    });
+    const isCurrent = (context) => context.generation === generation
+      && context.actorUserId === actorUserId
+      && context.userSessionId === userSessionId
+      && context.siteSessionId === siteSessionId;
+    app.client = {
+      leases,
+      captureSessionContext: currentContext,
+      isSessionContextCurrent: isCurrent,
+      assertSessionContext(context) {
+        if (!isCurrent(context)) {
+          const error = new Error('STALE_SESSION_RESPONSE');
+          error.code = 'STALE_SESSION_RESPONSE';
+          error.silent = true;
+          throw error;
+        }
+      },
+      async releaseCapturedLease(lease, context) {
+        assert.equal(lease, leaseU1);
+        assert.equal(context.actorUserId, 'u1');
+        signalReleaseStarted();
+        await new Promise((resolve) => { releaseGate = resolve; });
+        if (isCurrent(context) && leases.get('module:m1') === lease) leases.delete('module:m1');
+        return isCurrent(context);
+      },
+      async releaseLease(entityType, entityId) {
+        assert.equal(entityType, 'module');
+        assert.equal(entityId, 'm1');
+        signalReleaseStarted();
+        await new Promise((resolve) => { releaseGate = resolve; });
+        return true;
+      },
+      async logoutUser() { logoutCalls.push({ method: 'logoutUser', context: currentContext() }); },
+      async logout() { logoutCalls.push({ method: 'logout', context: currentContext() }); }
+    };
+    app.decorateEditorRows = () => {};
+
+    const loggingOut = app[method]();
+    await releaseStarted;
+    generation = 2;
+    actorUserId = 'u2';
+    userSessionId = 'session-u2';
+    siteSessionId = 'site-u2';
+    leases.set('module:m1', leaseU2);
+    releaseGate();
+
+    await assert.rejects(loggingOut, (error) => error.code === 'STALE_SESSION_RESPONSE');
+    assert.deepEqual(logoutCalls, []);
+    assert.equal(leases.get('module:m1'), leaseU2);
+  });
+}
+
+test('舊 actor 排定的 clean release timer 不得釋放新 actor successor lease', async () => {
+  const previousDocument = globalThis.document;
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  let generation = 1;
+  let actorUserId = 'u1';
+  const leaseU1 = { entityType: 'module', entityId: 'm1', leaseId: 'lease-u1', fencingToken: 1 };
+  const leaseU2 = { entityType: 'module', entityId: 'm1', leaseId: 'lease-u2', fencingToken: 2 };
+  let currentLease = leaseU1;
+  const releases = [];
+  const row = {
+    dataset: { v7EntityId: 'm1' },
+    contains: () => false
+  };
+  globalThis.document = {
+    activeElement: null,
+    querySelectorAll: () => [row]
+  };
+  app.client = {
+    snapshot: { modules: [{ id: 'm1', revision: 1, payload: { title: 'same' } }] },
+    getLease: () => currentLease,
+    captureSessionContext: () => Object.freeze({ generation, actorUserId, userSessionId: `s-${actorUserId}`, siteSessionId: 'site', clientSessionId: 'tab' }),
+    isSessionContextCurrent: (context) => context.generation === generation && context.actorUserId === actorUserId,
+    modulePayload: (local) => ({ title: local.title }),
+    async releaseLease() { releases.push(currentLease); return true; },
+    async releaseCapturedLease(lease) { releases.push(lease); return true; }
+  };
+  app.host = { async getLocalEntity() { return { _v7Id: 'm1', title: 'same' }; } };
+  app.decorateEditorRows = () => {};
+  app.reportError = () => {};
+  try {
+    app.scheduleUnchangedModuleRelease(row, 0);
+    actorUserId = 'u2';
+    generation = 2;
+    currentLease = leaseU2;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(releases, []);
+  } finally {
+    for (const timer of app.moduleReleaseTimers.values()) clearTimeout(timer);
+    app.moduleReleaseTimers.clear();
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test('單項 module 舊保存失鎖不得刪除同 session 後繼 lease', async () => {
+  let resolveSave;
+  let signalStarted;
+  const started = new Promise((resolve) => { signalStarted = resolve; });
+  const client = new MonthlyV7Client({
+    transport: {
+      rpc(name) {
+        assert.equal(name, 'monthly_v7_save_module');
+        signalStarted();
+        return new Promise((resolve) => { resolveSave = resolve; });
+      }
+    },
+    sessionStorage: memoryStorage(), draftStorage: memoryStorage(),
+    idFactory: () => 'tab', operationIdFactory: () => '00000000-0000-4000-8000-000000000901'
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-1' };
+  client.userSession = { id: 'session-u1' };
+  client.user = { id: 'u1' };
+  const lease1 = { entityType: 'module', entityId: 'm1', leaseId: 'lease-1', fencingToken: 1, holderUserId: 'u1', clientSessionId: 'tab' };
+  const lease2 = { entityType: 'module', entityId: 'm1', leaseId: 'lease-2', fencingToken: 2, holderUserId: 'u1', clientSessionId: 'tab' };
+  client.leases.set(client.leaseKey('module', 'm1'), lease1);
+  const item = { _v7Id: 'm1', _v7Revision: 1, title: '內容' };
+
+  const saving = client.saveModule(item);
+  await started;
+  client.leases.set(client.leaseKey('module', 'm1'), lease2);
+  resolveSave({ ok: false, error: 'LEASE_LOST' });
+
+  await assert.rejects(saving, (error) => error.code === 'LEASE_LOST');
+  assert.equal(client.getLease('module', 'm1'), lease2);
+});
+
+test('metadata 舊保存成功不得刪除同 session 後繼 lease', async () => {
+  let resolveSave;
+  let signalStarted;
+  const started = new Promise((resolve) => { signalStarted = resolve; });
+  const client = new MonthlyV7Client({
+    transport: {
+      rpc(name) {
+        assert.equal(name, 'monthly_v7_save_report_meta');
+        signalStarted();
+        return new Promise((resolve) => { resolveSave = resolve; });
+      }
+    },
+    sessionStorage: memoryStorage(), draftStorage: memoryStorage(),
+    idFactory: () => 'tab', operationIdFactory: () => '00000000-0000-4000-8000-000000000902'
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-1' };
+  client.userSession = { id: 'session-u1' };
+  client.user = { id: 'u1' };
+  client.snapshot = { report: { id: 'r1', revision: 1, title: '舊', period: {}, settings: {} }, modules: [], records: [] };
+  const lease1 = { entityType: 'report_meta', entityId: 'r1', leaseId: 'lease-1', fencingToken: 1, holderUserId: 'u1', clientSessionId: 'tab' };
+  const lease2 = { entityType: 'report_meta', entityId: 'r1', leaseId: 'lease-2', fencingToken: 2, holderUserId: 'u1', clientSessionId: 'tab' };
+  client.leases.set(client.leaseKey('report_meta', 'r1'), lease1);
+
+  const saving = client.saveReportMeta({ title: '新', period: {}, settings: {} });
+  await started;
+  client.leases.set(client.leaseKey('report_meta', 'r1'), lease2);
+  resolveSave({ ok: true, revision: 2, watermark: 2 });
+
+  await saving;
+  assert.equal(client.getLease('report_meta', 'r1'), lease2);
+});
+
+test('record 舊保存衝突不得刪除同 session 後繼 lease', async () => {
+  let resolveSave;
+  let signalStarted;
+  const started = new Promise((resolve) => { signalStarted = resolve; });
+  const client = new MonthlyV7Client({
+    transport: {
+      rpc(name) {
+        assert.equal(name, 'monthly_v7_save_record');
+        signalStarted();
+        return new Promise((resolve) => { resolveSave = resolve; });
+      }
+    },
+    sessionStorage: memoryStorage(), draftStorage: memoryStorage(),
+    idFactory: () => 'tab', operationIdFactory: () => '00000000-0000-4000-8000-000000000903'
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-1' };
+  client.userSession = { id: 'session-u1' };
+  client.user = { id: 'u1' };
+  const type = 'record:inspections';
+  const lease1 = { entityType: type, entityId: 'rec-1', leaseId: 'lease-1', fencingToken: 1, holderUserId: 'u1', clientSessionId: 'tab' };
+  const lease2 = { entityType: type, entityId: 'rec-1', leaseId: 'lease-2', fencingToken: 2, holderUserId: 'u1', clientSessionId: 'tab' };
+  client.leases.set(client.leaseKey(type, 'rec-1'), lease1);
+  const record = { _v7Id: 'rec-1', _v7Revision: 1, port: 'KHH' };
+
+  const saving = client.saveRecord('inspections', record);
+  await started;
+  client.leases.set(client.leaseKey(type, 'rec-1'), lease2);
+  resolveSave({ ok: false, error: 'REVISION_CONFLICT' });
+
+  await assert.rejects(saving, (error) => error.code === 'REVISION_CONFLICT');
+  assert.equal(client.getLease(type, 'rec-1'), lease2);
+});
+
 test('首次 snapshot 載入也會恢復既有 module 草稿與舊 base revision', async () => {
   const drafts = memoryStorage();
   drafts.setItem('monthly_v7_draft:module:m1', JSON.stringify({
@@ -403,7 +835,36 @@ test('首次 snapshot 載入也會恢復既有 module 草稿與舊 base revision
   assert.ok(client.readDraft('module', 'm1'));
 });
 
-test('saveModule 以 lease/fence/CAS 保存，失鎖保留草稿且成功後才清除', async () => {
+test('protected snapshot merge 顯示本機 draft，但保留真正 server payload/revision 作比較基線', async () => {
+  const drafts = memoryStorage();
+  const client = new MonthlyV7Client({
+    transport: fakeTransport({}),
+    sessionStorage: memoryStorage(),
+    draftStorage: drafts,
+    idFactory: () => 'tab'
+  });
+  client.snapshot = {
+    report: { id: 'r1', revision: 1 },
+    modules: [{ id: 'm1', revision: 2, payload: { title: '舊本機基線' } }],
+    records: []
+  };
+  client.saveDraft('module', 'm1', { title: '衝突後保留的本機內容' }, 2);
+
+  const merged = await client.mergeSnapshotWithProtectedLocal({
+    report: { id: 'r1', revision: 1 },
+    modules: [{ id: 'm1', revision: 5, payload: { title: '遠端較新內容' } }],
+    records: []
+  });
+  const row = merged.modules[0];
+  assert.deepEqual(row.payload, { title: '衝突後保留的本機內容' });
+  assert.equal(row.revision, 2);
+  assert.deepEqual(row._serverPayload, { title: '遠端較新內容' });
+  assert.equal(row._serverRevision, 5);
+  assert.equal('_serverPayload' in row.payload, false);
+  assert.equal('_serverRevision' in row.payload, false);
+});
+
+test('saveModule 以 lease/fence/CAS 保存，失鎖保留草稿且成功後保留目前編輯 lease', async () => {
   const drafts = memoryStorage();
   let saveAttempt = 0;
   const transport = fakeTransport({
@@ -445,6 +906,7 @@ test('saveModule 以 lease/fence/CAS 保存，失鎖保留草稿且成功後才�
   const saveCall = transport.calls.filter((call) => call.name === 'monthly_v7_save_module').at(-1);
   assert.equal(saveCall.params.p_expected_revision, 7);
   assert.equal(saveCall.params.p_fencing_token, 4);
+  assert.equal(client.getLease('module', 'm1')?.leaseId, 'lease-1');
 });
 
 test('catchUp 逐項重讀變更，正在編輯或有草稿的 entity 不被遠端覆蓋', async () => {
@@ -489,7 +951,7 @@ test('catchUp 逐項重讀變更，正在編輯或有草稿的 entity 不被遠�
   assert.equal(client.watermark, 12);
 });
 
-test('saveModuleBatch 成功後逐筆釋放原先持有的 module lease', async () => {
+test('saveModuleBatch 成功後保留原先持有的 module lease', async () => {
   const transport = fakeTransport({
     monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
@@ -535,9 +997,10 @@ test('saveModuleBatch 成功後逐筆釋放原先持有的 module lease', async 
   ]);
 
   const releases = transport.calls.filter((call) => call.name === 'monthly_v7_release_lease');
-  assert.deepEqual(releases.map((call) => `${call.params.p_entity_type}:${call.params.p_entity_id}`).sort(), ['module:m1', 'module:m2']);
-  assert.equal(client.getLease('module', 'm1'), null);
-  assert.equal(client.getLease('module', 'm2'), null);
+  assert.deepEqual(releases, []);
+  assert.equal(client.getLease('kpi_batch', 'r1')?.leaseId, 'lease-kpi_batch-r1');
+  assert.equal(client.getLease('module', 'm1')?.leaseId, 'lease-module-m1');
+  assert.equal(client.getLease('module', 'm2')?.leaseId, 'lease-module-m2');
 });
 
 test('saveModuleBatch 有 pending 時先重播舊 operation，不先 claim 目前 batch lease', async () => {
@@ -567,6 +1030,11 @@ test('saveModuleBatch 有 pending 時先重播舊 operation，不先 claim 目�
   await client.initialize({ workspaceKey: 'workspace-test' });
   await client.openSite('gate');
   await client.login('owner', 'pass');
+  const currentBatchLease = client.normalizeLease({
+    entity_type: 'kpi_batch', entity_id: 'r1', lease_id: 'batch-current', fencing_token: 9,
+    holder_user_id: 'u1', client_session_id: 'tab-current'
+  });
+  client.leases.set(client.leaseKey('kpi_batch', 'r1'), currentBatchLease);
   const items = [
     { _v7Id: 'm1', _v7Revision: 1, title: 'A新' },
     { _v7Id: 'm2', _v7Revision: 1, title: 'B新' }
@@ -587,6 +1055,8 @@ test('saveModuleBatch 有 pending 時先重播舊 operation，不先 claim 目�
   assert.deepEqual(transport.calls.map((call) => call.name), ['monthly_v7_save_module_batch']);
   assert.deepEqual(items.map((item) => item._v7Revision), [2, 2]);
   assert.equal(drafts.getItem('monthly_v7_pending:save_module_batch:r1'), null);
+  assert.equal(client.getLease('kpi_batch', 'r1'), currentBatchLease);
+  assert.equal(transport.calls.some((call) => call.name === 'monthly_v7_release_lease'), false);
 });
 
 test('saveModuleBatch 舊 operation 回 LEASE_LOST 後才 claim 並只送一個新 operation', async () => {
@@ -726,7 +1196,7 @@ test('saveModule 有 pending 時先重播舊 operation，另一人持有目前 l
   assert.equal(drafts.getItem('monthly_v7_draft:module:m1'), null);
 });
 
-test('saveModule 舊 operation 回傳 COMMITTED 時釋放已存在的目前 lease', async () => {
+test('saveModule 舊 operation 回傳 COMMITTED 時保留已存在的同 actor lease', async () => {
   const drafts = memoryStorage();
   const transport = fakeTransport({
     monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
@@ -766,9 +1236,8 @@ test('saveModule 舊 operation 回傳 COMMITTED 時釋放已存在的目前 leas
 
   await client.saveModule({ _v7Id: 'm1', _v7Revision: 1, title: payload.title });
 
-  assert.deepEqual(transport.calls.map((call) => call.name), ['monthly_v7_save_module', 'monthly_v7_release_lease']);
-  assert.equal(transport.calls[1].params.p_lease_id, 'lease-current');
-  assert.equal(client.getLease('module', 'm1'), null);
+  assert.deepEqual(transport.calls.map((call) => call.name), ['monthly_v7_save_module']);
+  assert.equal(client.getLease('module', 'm1')?.leaseId, 'lease-current');
 });
 
 test('相同保存內容只在 session 更新時沿用 pending operation ID 並以目前憑證重送', async () => {
@@ -1656,6 +2125,115 @@ test('full snapshot catch-up 逐項合併並保留 lease/draft 本機內容', as
   assert.equal(remoteConflicts.length, 1);
 });
 
+test('adapter 排隊中的舊身份保存不得在切換後以新身份送出', async () => {
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  let actor = { id: 'u1' };
+  let generation = 1;
+  let releaseQueue;
+  const queueGate = new Promise((resolve) => { releaseQueue = resolve; });
+  const saves = [];
+  app.status = { mode: 'v7' };
+  app.persistChain = queueGate;
+  app.reportError = () => {};
+  app.decorateEditorRows = () => {};
+  app.scheduleInactiveCleanModuleReleases = () => {};
+  app.client = {
+    snapshot: {
+      report: { id: 'report-1', revision: 1 },
+      modules: [{ id: 'm1', revision: 1, payload: { title: '原始內容' } }]
+    },
+    isActive: () => true,
+    currentUser: () => actor,
+    currentReport: () => ({ id: 'report-1', revision: 1 }),
+    captureSessionContext: () => ({ generation, actorUserId: actor && actor.id }),
+    assertSessionContext(context) {
+      if (!actor || context.generation !== generation || context.actorUserId !== actor.id) {
+        const error = new Error('STALE_SESSION_RESPONSE');
+        error.code = 'STALE_SESSION_RESPONSE';
+        error.silent = true;
+        throw error;
+      }
+    },
+    isSessionContextCurrent: (context) => !!actor
+      && context.generation === generation && context.actorUserId === actor.id,
+    modulePayload(item) { return { title: item.title }; },
+    pendingOperationTargets: () => new Set(),
+    hasPendingOperation: () => false,
+    readDraft: () => null,
+    clearDraft: () => {},
+    async saveModule(item) { saves.push({ actor: actor.id, title: item.title }); },
+    async reorderModules() {}
+  };
+  const queued = app.persistReportData([{ _v7Id: 'm1', _v7Revision: 1, title: 'U1_QUEUED_CONTENT' }]);
+
+  actor = { id: 'u2' };
+  generation = 2;
+  releaseQueue();
+
+  await assert.rejects(queued, (error) => error.code === 'STALE_SESSION_RESPONSE');
+  assert.deepEqual(saves, []);
+});
+
+test('adapter 舊身份晚到 finally 不得讀取新 DOM 或改寫新身份 superseding draft', async () => {
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  let actor = { id: 'u1' };
+  let generation = 1;
+  let rejectSave;
+  let signalStarted;
+  const started = new Promise((resolve) => { signalStarted = resolve; });
+  let draftEnvelope = {
+    entityType: 'module', entityId: 'm1', baseRevision: 9,
+    payload: { title: 'U2 NEW DOM' },
+    supersedesOperation: { rpcName: 'monthly_v7_save_module', pendingKey: 'save_module:m1', signature: 'u2-marker' }
+  };
+  const originalEnvelope = JSON.stringify(draftEnvelope);
+  let domReads = 0;
+  app.host = {
+    async getLocalEntity() {
+      domReads += 1;
+      return { _v7Id: 'm1', _v7Revision: 9, title: 'U2 NEW DOM' };
+    }
+  };
+  app.client = {
+    snapshot: { modules: [{ id: 'm1', revision: 1, payload: { title: '原始' } }] },
+    captureSessionContext: () => Object.freeze({ generation, actorUserId: actor.id, userSessionId: `s-${actor.id}`, siteSessionId: 'site', clientSessionId: 'tab' }),
+    isSessionContextCurrent: (context) => context.generation === generation && context.actorUserId === actor.id,
+    assertSessionContext(context) {
+      if (!this.isSessionContextCurrent(context)) {
+        const error = new Error('STALE_SESSION_RESPONSE');
+        error.code = 'STALE_SESSION_RESPONSE';
+        error.silent = true;
+        throw error;
+      }
+    },
+    modulePayload(item) { return { title: item.title }; },
+    async saveModule() {
+      signalStarted();
+      await new Promise((_resolve, reject) => { rejectSave = reject; });
+    },
+    saveSupersedingDraft(entityType, entityId, payload, baseRevision, rpcName, pendingKey) {
+      draftEnvelope = { entityType, entityId, payload, baseRevision, rpcName, pendingKey };
+    },
+    saveDraft(entityType, entityId, payload, baseRevision) {
+      draftEnvelope = { entityType, entityId, payload, baseRevision };
+    }
+  };
+  const item = { _v7Id: 'm1', _v7Revision: 1, title: 'U1 SUBMITTED' };
+
+  const saving = app.saveChangedModules([item]);
+  await started;
+  actor = { id: 'u2' };
+  generation = 2;
+  const stale = new Error('STALE_SESSION_RESPONSE');
+  stale.code = 'STALE_SESSION_RESPONSE';
+  stale.silent = true;
+  rejectSave(stale);
+
+  await assert.rejects(saving, (error) => error.code === 'STALE_SESSION_RESPONSE');
+  assert.equal(domReads, 0);
+  assert.equal(JSON.stringify(draftEnvelope), originalEnvelope);
+});
+
 test('module 保存等待期間的新輸入不得被誤標為已確認 baseline，且必須重建草稿', async () => {
   let releaseSave;
   let sentPayload;
@@ -1857,6 +2435,113 @@ test('有明確 superseding marker 時先以原 operation 對帳 A，再以新 o
   assert.equal(item._v7Revision, 3);
   assert.equal(drafts.getItem(`monthly_v7_pending:${pendingKey}`), null);
   assert.equal(client.readDraft('module', 'm1'), null);
+});
+
+test('pending ownership 只把目前身份或損壞 envelope 視為本次待對帳', () => {
+  const drafts = memoryStorage();
+  const client = new MonthlyV7Client({
+    transport: fakeTransport({}),
+    sessionStorage: memoryStorage(),
+    draftStorage: drafts,
+    idFactory: () => 'tab-current'
+  });
+  client.user = { id: 'u-current', username: 'owner' };
+  client.userSession = { id: 'session-current' };
+  const signature = JSON.stringify({ p_report_id: 'report-1' });
+  drafts.setItem('monthly_v7_pending:save_report_meta:report-1', JSON.stringify({
+    operationId: '00000000-0000-4000-8000-000000000901',
+    signature,
+    createdAt: '2026-08-12T00:00:00.000Z',
+    actorUserId: 'u-current'
+  }));
+  drafts.setItem('monthly_v7_pending:save_module:m-foreign', JSON.stringify({
+    operationId: '00000000-0000-4000-8000-000000000902',
+    signature,
+    createdAt: '2026-08-12T00:00:00.000Z',
+    actorUserId: 'u-foreign'
+  }));
+  drafts.setItem('monthly_v7_pending:save_module:m-invalid', '{broken');
+
+  assert.equal(client.hasCurrentActorPendingOperation('save_report_meta:report-1'), true);
+  assert.equal(client.hasCurrentActorPendingOperation('save_module:m-foreign'), false);
+  assert.equal(client.hasCurrentActorPendingOperation('save_module:m-invalid'), true);
+  assert.equal(client.hasCurrentActorPendingOperation('save_module:missing'), false);
+});
+
+test('部分 module 的 batch pending 只把原 batch 涵蓋項目列為待重試', async () => {
+  const drafts = memoryStorage();
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: {
+      ok: true, user_session_id: 'user-current', user: { id: 'u1', username: 'owner', role: 'owner' }
+    },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 1,
+      report: { id: 'report-1', legacyFileId: 'x', title: '月報', period: {}, revision: 4 },
+      modules: [
+        { id: 'm1', revision: 1, payload: { title: '原始一' } },
+        { id: 'm2', revision: 1, payload: { title: '原始二' } },
+        { id: 'm3', revision: 1, payload: { title: '原始三' } }
+      ], records: [], users: []
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts, idFactory: () => 'tab-current'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  const pendingKey = 'save_module_batch:report-1';
+  const oldParams = {
+    p_workspace_key: 'workspace-test', p_user_session_id: 'user-old', p_client_session_id: 'tab-old',
+    p_report_id: 'report-1',
+    p_changes: [
+      { moduleId: 'm1', expectedRevision: 1, payload: { title: '送出一 A' } },
+      { moduleId: 'm2', expectedRevision: 1, payload: { title: '送出二 A' } }
+    ],
+    p_lease_id: 'lease-old', p_fencing_token: 3
+  };
+  drafts.setItem(`monthly_v7_pending:${pendingKey}`, JSON.stringify({
+    operationId: '00000000-0000-4000-8000-000000000887',
+    signature: JSON.stringify(oldParams),
+    createdAt: '2026-08-11T00:00:00.000Z', actorUserId: 'u1'
+  }));
+
+  assert.deepEqual(
+    Array.from(client.pendingOperationTargets('monthly_v7_save_module_batch', pendingKey)).sort(),
+    ['m1', 'm2']
+  );
+  assert.equal(client.pendingOperationTargets('monthly_v7_save_module_batch', pendingKey).has('m3'), false);
+});
+
+test('adapter 遇到部分 batch pending 時不把未變更 module 納入重試', async () => {
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  const baseline = [
+    { id: 'm1', revision: 1, payload: { title: '原始一' } },
+    { id: 'm2', revision: 1, payload: { title: '原始二' } },
+    { id: 'm3', revision: 1, payload: { title: '原始三' } }
+  ];
+  let submittedIds = [];
+  app.status = { mode: 'v7' };
+  app.client = {
+    snapshot: { report: { id: 'report-1', revision: 1 }, modules: baseline },
+    isActive: () => true,
+    currentUser: () => ({ id: 'u1' }),
+    currentReport: () => ({ id: 'report-1', revision: 1 }),
+    modulePayload(item) { return { title: item.title }; },
+    pendingOperationTargets: () => new Set(['m1', 'm2']),
+    hasPendingOperation: () => false,
+    readDraft: () => null,
+    clearDraft: () => {},
+    async saveModuleBatch(items) { submittedIds = items.map((item) => item._v7Id); },
+    async saveModule() { throw new Error('single save should not be used'); }
+  };
+  const live = baseline.map((row) => ({ _v7Id: row.id, _v7Revision: row.revision, title: row.payload.title }));
+
+  await app.persistReportData(live);
+
+  assert.deepEqual(submittedIds, ['m1', 'm2']);
 });
 
 test('batch superseding drafts 先整批對帳 A，再以新 operation 整批保存 B', async () => {

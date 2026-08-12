@@ -137,9 +137,19 @@ function rpc(name, p) {
       command: 'save_module', entityId: p.p_module_id, expectedRevision: Number(p.p_expected_revision),
       leaseId: p.p_lease_id, fencingToken: Number(p.p_fencing_token), payload: p.p_payload
     });
-    const replay = replayOperation(p.p_operation_id, user.id, requestHash);
-    if (replay) return replay;
     const key = `module:${p.p_module_id}`;
+    const replay = replayOperation(p.p_operation_id, user.id, requestHash);
+    if (replay) {
+      const replayLease = state.leases.get(key);
+      if (replay.ok === true && replayLease
+        && replayLease.leaseId === p.p_lease_id
+        && replayLease.fencingToken === Number(p.p_fencing_token)
+        && replayLease.clientSessionId === p.p_client_session_id
+        && replayLease.holderUserId === user.id) {
+        replayLease.expiresAt = now() + 90000;
+      }
+      return replay;
+    }
     const lease = state.leases.get(key);
     const module = state.modules.find((entry) => entry.id === p.p_module_id);
     if (!lease || lease.expiresAt <= now() || lease.leaseId !== p.p_lease_id || lease.fencingToken !== Number(p.p_fencing_token)
@@ -151,7 +161,7 @@ function rpc(name, p) {
     }
     module.payload = clone(p.p_payload);
     module.revision += 1;
-    lease.expiresAt = now() - 1;
+    lease.expiresAt = now() + 90000;
     event('module', module.id, module.revision, p.p_operation_id);
     const result = { ok: true, entityId: module.id, revision: module.revision, watermark: state.sequence };
     return storeOperation(p.p_operation_id, user.id, requestHash, result);
@@ -256,6 +266,12 @@ const server = http.createServer((req, res) => {
     module.payload = Object.assign({}, module.payload, { title: '遠端較新內容' });
     module.revision += 1;
     event('module', module.id, module.revision, randomUUID());
+    res.writeHead(204); return res.end();
+  }
+  if (url.pathname === '/__fake_malicious_module_title' && req.method === 'POST') {
+    state.modules[0].payload = Object.assign({}, state.modules[0].payload, {
+      title: '<b data-safe-title="1">安全粗體</b><img src="/missing-title-image" onerror="window.__v7TitleXssExecuted=(window.__v7TitleXssExecuted||0)+1"><script>window.__v7TitleXssExecuted=(window.__v7TitleXssExecuted||0)+1<\/script>'
+    });
     res.writeHead(204); return res.end();
   }
   if (url.pathname === '/__fake_drop_first_module_lease' && req.method === 'POST') {

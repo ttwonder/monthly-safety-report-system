@@ -251,11 +251,37 @@ test('V7 module lease 支援不同項目並行、同項排他、冪等重送與 
     ));
     assert.equal(saveA.ok, true);
     assert.equal(saveA.revision, itemA.revision + 1);
+    const retainedLease = (await db.query(`
+      select lease_id, fencing_token, expires_at > now() as active,
+        extract(epoch from (expires_at - now()))::int as remaining_seconds
+      from public.monthly_v7_entity_leases
+      where entity_type = 'module' and entity_id = $1
+    `, [itemA.id])).rows[0];
+    assert.equal(retainedLease.lease_id, leaseA.lease_id);
+    assert.equal(retainedLease.fencing_token, leaseA.fencing_token);
+    assert.equal(retainedLease.active, true);
+    assert.ok(retainedLease.remaining_seconds >= 80, `remaining_seconds=${retainedLease.remaining_seconds}`);
+
+    await db.query(`
+      update public.monthly_v7_entity_leases
+      set expires_at = now() + interval '5 seconds'
+      where entity_type = 'module' and entity_id = $1
+    `, [itemA.id]);
     const replayA = rpcResult(await db.query(
       'select public.monthly_v7_save_module($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) as result',
       ['workspace-test', a.login.user_session_id, a.clientSessionId, opA, itemA.id, itemA.revision, leaseA.lease_id, leaseA.fencing_token, JSON.stringify({ ...itemA.payload, title: 'A 已更新' })]
     ));
     assert.deepEqual(replayA, saveA);
+    const replayRetainedLease = (await db.query(`
+      select lease_id, fencing_token,
+        extract(epoch from (expires_at - now()))::int as remaining_seconds
+      from public.monthly_v7_entity_leases
+      where entity_type = 'module' and entity_id = $1
+    `, [itemA.id])).rows[0];
+    assert.equal(replayRetainedLease.lease_id, leaseA.lease_id);
+    assert.equal(replayRetainedLease.fencing_token, leaseA.fencing_token);
+    assert.ok(replayRetainedLease.remaining_seconds >= 80,
+      `COMMITTED replay remaining_seconds=${replayRetainedLease.remaining_seconds}`);
 
     await setAuthUid(db, b.uid);
     const saveB = rpcResult(await db.query(
@@ -286,6 +312,137 @@ test('V7 module lease 支援不同項目並行、同項排他、冪等重送與 
     ]);
     const operations = await db.query(`select count(*)::int as count from public.monthly_v7_operations where status='COMMITTED'`);
     assert.equal(operations.rows[0].count, 2);
+  } finally {
+    await db.close();
+  }
+});
+
+test('V7 batch 不得繞過其他使用者仍有效的 module lease', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await db.exec(`update public.monthly_v7_workspaces set authority_state='NORMALIZED_ACTIVE', minimum_client_version=7`);
+    const a = await openAndLogin(db, '11111111-1111-4111-8111-111111111111', 'owner', 'owner-pass', 'tab-batch-leaf-a');
+    const b = await openAndLogin(db, '22222222-2222-4222-8222-222222222222', 'operator', 'operator-pass', 'tab-batch-leaf-b');
+    const item = (await db.query(`select id, revision, payload from public.monthly_v7_report_items order by sort_rank limit 1`)).rows[0];
+    const report = (await db.query(`select id from public.monthly_v7_reports where deleted_at is null limit 1`)).rows[0];
+
+    await setAuthUid(db, a.uid);
+    const moduleLeaseA = rpcResult(await db.query(
+      'select public.monthly_v7_claim_lease($1,$2,$3,$4,$5,$6) as result',
+      ['workspace-test', a.login.user_session_id, a.clientSessionId, 'module', item.id, 90]
+    ));
+    assert.equal(moduleLeaseA.ok, true);
+
+    await setAuthUid(db, b.uid);
+    const batchLeaseB = rpcResult(await db.query(
+      'select public.monthly_v7_claim_lease($1,$2,$3,$4,$5,$6) as result',
+      ['workspace-test', b.login.user_session_id, b.clientSessionId, 'kpi_batch', report.id, 90]
+    ));
+    assert.equal(batchLeaseB.ok, true);
+    const eventsBefore = (await db.query(`select count(*)::int as count from public.monthly_v7_entity_events`)).rows[0].count;
+    const batch = rpcResult(await db.query(
+      'select public.monthly_v7_save_module_batch($1,$2,$3,$4,$5,$6,$7,$8::jsonb) as result',
+      ['workspace-test', b.login.user_session_id, b.clientSessionId, randomUUID(), report.id,
+        batchLeaseB.lease_id, batchLeaseB.fencing_token, JSON.stringify([{
+          moduleId: item.id,
+          expectedRevision: item.revision,
+          payload: { ...item.payload, title: 'B 不得覆寫 A 正在編輯的項目' }
+        }])]
+    ));
+
+    assert.equal(batch.ok, false);
+    assert.equal(batch.error, 'LEASE_HELD');
+    assert.equal(batch.entityId, item.id);
+    const after = (await db.query(`select revision, payload from public.monthly_v7_report_items where id=$1`, [item.id])).rows[0];
+    assert.equal(after.revision, item.revision);
+    assert.deepEqual(after.payload, item.payload);
+    const eventsAfter = (await db.query(`select count(*)::int as count from public.monthly_v7_entity_events`)).rows[0].count;
+    assert.equal(eventsAfter, eventsBefore);
+    const retained = (await db.query(`
+      select lease_id, holder_user_session_id, expires_at > now() as active
+      from public.monthly_v7_entity_leases
+      where entity_type='module' and entity_id=$1
+    `, [item.id])).rows[0];
+    assert.equal(retained.lease_id, moduleLeaseA.lease_id);
+    assert.equal(retained.holder_user_session_id, a.login.user_session_id);
+    assert.equal(retained.active, true);
+
+    const releasedBatchB = rpcResult(await db.query(
+      'select public.monthly_v7_release_lease($1,$2,$3,$4,$5,$6,$7) as result',
+      ['workspace-test', b.login.user_session_id, b.clientSessionId, 'kpi_batch', report.id,
+        batchLeaseB.lease_id, batchLeaseB.fencing_token]
+    ));
+    assert.equal(releasedBatchB.ok, true);
+
+    await setAuthUid(db, a.uid);
+    const batchLeaseA = rpcResult(await db.query(
+      'select public.monthly_v7_claim_lease($1,$2,$3,$4,$5,$6) as result',
+      ['workspace-test', a.login.user_session_id, a.clientSessionId, 'kpi_batch', report.id, 90]
+    ));
+    assert.equal(batchLeaseA.ok, true);
+    await db.query(`
+      update public.monthly_v7_entity_leases
+      set expires_at = now() + interval '5 seconds'
+      where (entity_type='module' and entity_id=$1)
+         or (entity_type='kpi_batch' and entity_id=$2)
+    `, [item.id, report.id]);
+    const ownBatchOperationId = randomUUID();
+    const ownBatchChanges = [{
+      moduleId: item.id,
+      expectedRevision: item.revision,
+      payload: { ...item.payload, title: 'A 自己的背景 batch 可保存' }
+    }];
+    const ownBatch = rpcResult(await db.query(
+      'select public.monthly_v7_save_module_batch($1,$2,$3,$4,$5,$6,$7,$8::jsonb) as result',
+      ['workspace-test', a.login.user_session_id, a.clientSessionId, ownBatchOperationId, report.id,
+        batchLeaseA.lease_id, batchLeaseA.fencing_token, JSON.stringify(ownBatchChanges)]
+    ));
+    assert.equal(ownBatch.ok, true);
+    assert.equal(ownBatch.updated[0].revision, item.revision + 1);
+    const ownRetained = (await db.query(`
+      select entity_type, lease_id, holder_user_session_id, expires_at > now() as active,
+        extract(epoch from (expires_at - now()))::int as remaining_seconds
+      from public.monthly_v7_entity_leases
+      where (entity_type='module' and entity_id=$1)
+         or (entity_type='kpi_batch' and entity_id=$2)
+      order by entity_type
+    `, [item.id, report.id])).rows;
+    const retainedBatch = ownRetained.find((row) => row.entity_type === 'kpi_batch');
+    const retainedLeaf = ownRetained.find((row) => row.entity_type === 'module');
+    assert.equal(retainedBatch.lease_id, batchLeaseA.lease_id);
+    assert.equal(retainedBatch.holder_user_session_id, a.login.user_session_id);
+    assert.equal(retainedBatch.active, true);
+    assert.ok(retainedBatch.remaining_seconds >= 80,
+      `batch remaining_seconds=${retainedBatch.remaining_seconds}`);
+    assert.equal(retainedLeaf.lease_id, moduleLeaseA.lease_id);
+    assert.equal(retainedLeaf.holder_user_session_id, a.login.user_session_id);
+    assert.equal(retainedLeaf.active, true);
+    assert.ok(retainedLeaf.remaining_seconds >= 80,
+      `leaf remaining_seconds=${retainedLeaf.remaining_seconds}`);
+
+    await db.query(`
+      update public.monthly_v7_entity_leases
+      set expires_at = now() + interval '5 seconds'
+      where (entity_type='module' and entity_id=$1)
+         or (entity_type='kpi_batch' and entity_id=$2)
+    `, [item.id, report.id]);
+    const ownBatchReplay = rpcResult(await db.query(
+      'select public.monthly_v7_save_module_batch($1,$2,$3,$4,$5,$6,$7,$8::jsonb) as result',
+      ['workspace-test', a.login.user_session_id, a.clientSessionId, ownBatchOperationId, report.id,
+        batchLeaseA.lease_id, batchLeaseA.fencing_token, JSON.stringify(ownBatchChanges)]
+    ));
+    assert.deepEqual(ownBatchReplay, ownBatch);
+    const replayRetained = (await db.query(`
+      select entity_type, extract(epoch from (expires_at - now()))::int as remaining_seconds
+      from public.monthly_v7_entity_leases
+      where (entity_type='module' and entity_id=$1)
+         or (entity_type='kpi_batch' and entity_id=$2)
+      order by entity_type
+    `, [item.id, report.id])).rows;
+    assert.equal(replayRetained.length, 2);
+    replayRetained.forEach((row) => assert.ok(row.remaining_seconds >= 80,
+      `${row.entity_type} COMMITTED replay remaining_seconds=${row.remaining_seconds}`));
   } finally {
     await db.close();
   }

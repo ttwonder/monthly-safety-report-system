@@ -1187,6 +1187,19 @@ begin
     return jsonb_build_object('ok', false, 'error', 'ENTITY_NOT_FOUND');
   end if;
 
+  -- Module claims and aggregate batch writes share this leaf-row lock.  It closes
+  -- the no-lease-row race where a batch could validate absence immediately before
+  -- another session inserted a module lease.
+  if p_entity_type = 'module' then
+    perform 1
+    from public.monthly_v7_report_items i
+    where i.id = p_entity_id and i.deleted_at is null
+    for update;
+    if not found then
+      return jsonb_build_object('ok', false, 'error', 'ENTITY_NOT_FOUND');
+    end if;
+  end if;
+
   insert into public.monthly_v7_entity_leases(
     workspace_id, entity_type, entity_id, holder_user_id, holder_user_session_id,
     client_session_id, expires_at
@@ -1569,7 +1582,21 @@ begin
      or operation_row.request_hash <> request_hash then
     return jsonb_build_object('ok', false, 'error', 'IDEMPOTENCY_MISMATCH');
   end if;
-  if operation_row.status in ('COMMITTED','REJECTED') then
+  if operation_row.status = 'COMMITTED' then
+    -- Lost-ACK replay confirms the same committed save; keep the exact editing
+    -- lease alive without ever touching a successor lease/fencing token.
+    update public.monthly_v7_entity_leases
+    set heartbeat_at = now(), expires_at = now() + interval '90 seconds'
+    where workspace_id = workspace_row.id
+      and entity_type = 'module'
+      and entity_id = p_module_id
+      and lease_id = p_lease_id
+      and fencing_token = p_fencing_token
+      and holder_user_id = user_row.id
+      and holder_user_session_id = p_user_session_id
+      and client_session_id = btrim(p_client_session_id);
+    return operation_row.result;
+  elsif operation_row.status = 'REJECTED' then
     return operation_row.result;
   end if;
 
@@ -1635,10 +1662,18 @@ begin
     workspace_id, entity_type, entity_id, entity_revision, action
   ) values (workspace_row.id, 'module', item_row.id, next_revision, 'update');
 
-  -- 釋放持有權但保留 row 與 fencing counter，下一位接管時 token 必須單調增加。
+  -- 保存只確認資料持久化，不代表使用者已結束編輯；保留相同 lease/fencing，
+  -- 並由既有 30 秒 heartbeat 或明確離開流程續租／釋放。
   update public.monthly_v7_entity_leases
-  set heartbeat_at = now(), expires_at = now()
-  where workspace_id = workspace_row.id and entity_type = 'module' and entity_id = item_row.id;
+  set heartbeat_at = now(), expires_at = now() + interval '90 seconds'
+  where workspace_id = workspace_row.id
+    and entity_type = 'module'
+    and entity_id = item_row.id
+    and lease_id = p_lease_id
+    and fencing_token = p_fencing_token
+    and holder_user_id = user_row.id
+    and holder_user_session_id = p_user_session_id
+    and client_session_id = btrim(p_client_session_id);
 
   response := jsonb_build_object(
     'ok', true,
@@ -2087,7 +2122,28 @@ begin
   if operation_row.workspace_id<>workspace_row.id or operation_row.actor_user_id<>user_row.id or operation_row.request_hash<>request_hash then
     return jsonb_build_object('ok',false,'error','IDEMPOTENCY_MISMATCH');
   end if;
-  if operation_row.status in ('COMMITTED','REJECTED') then return operation_row.result; end if;
+  if operation_row.status = 'COMMITTED' then
+    -- The aggregate edit session and any target leaf edit sessions owned by the
+    -- same actor/session/client survive a lost ACK.  Exact identity predicates
+    -- prevent extending a successor lease.
+    update public.monthly_v7_entity_leases l
+    set heartbeat_at=now(), expires_at=now()+interval '90 seconds'
+    where l.workspace_id=workspace_row.id and (
+      (l.entity_type='kpi_batch' and l.entity_id=p_report_id
+       and l.lease_id=p_lease_id and l.fencing_token=p_fencing_token)
+      or
+      (l.entity_type='module' and exists (
+        select 1 from jsonb_array_elements(p_changes)c(value)
+        where (c.value->>'moduleId')::uuid=l.entity_id
+      ))
+    )
+      and l.holder_user_id=user_row.id
+      and l.holder_user_session_id=p_user_session_id
+      and l.client_session_id=btrim(p_client_session_id);
+    return operation_row.result;
+  elsif operation_row.status = 'REJECTED' then
+    return operation_row.result;
+  end if;
   select * into lease_row from public.monthly_v7_entity_leases
     where workspace_id=workspace_row.id and entity_type='kpi_batch' and entity_id=p_report_id for update;
   if not found or lease_row.expires_at<=now() or lease_row.lease_id<>p_lease_id
@@ -2105,7 +2161,10 @@ begin
     update public.monthly_v7_operations set status='REJECTED',result=response,completed_at=now() where operation_id=p_operation_id;
     return response;
   end if;
-  -- 先按 UUID 固定順序鎖定所有 row；完成全體 revision 驗證前不做任何更新。
+  -- Lock every target leaf first, in UUID order.  Module lease claims take the
+  -- same row lock, so after this point an absent lease cannot appear until this
+  -- transaction finishes.  Validate every revision and every foreign active leaf
+  -- lease before the first write: one conflict rejects the whole batch.
   perform 1
   from public.monthly_v7_report_items i
   join jsonb_array_elements(p_changes)c(value) on i.id=(c.value->>'moduleId')::uuid
@@ -2131,6 +2190,21 @@ begin
     if item_row.revision<>expected then
       response:=jsonb_build_object('ok',false,'error','REVISION_CONFLICT','entityId',item_row.id,'currentRevision',item_row.revision); exit;
     end if;
+    select * into lease_row
+    from public.monthly_v7_entity_leases
+    where workspace_id=workspace_row.id and entity_type='module' and entity_id=item_row.id
+    for update;
+    if found and lease_row.expires_at>now() and not (
+      lease_row.holder_user_id=user_row.id
+      and lease_row.holder_user_session_id=p_user_session_id
+      and lease_row.client_session_id=btrim(p_client_session_id)
+    ) then
+      response:=jsonb_build_object(
+        'ok',false,'error','LEASE_HELD','entityId',item_row.id,
+        'holder_user_id',lease_row.holder_user_id,'expires_at',lease_row.expires_at
+      );
+      exit;
+    end if;
   end loop;
   if response is not null then
     update public.monthly_v7_operations set status='REJECTED',result=response,completed_at=now() where operation_id=p_operation_id;
@@ -2148,8 +2222,22 @@ begin
     values(workspace_row.id,'module',item_row.id,next_revision,'batch_update');
     updated_rows:=updated_rows||jsonb_build_array(jsonb_build_object('entityId',item_row.id,'revision',next_revision));
   end loop;
-  update public.monthly_v7_entity_leases set heartbeat_at=now(),expires_at=now()
-    where workspace_id=workspace_row.id and entity_type='kpi_batch' and entity_id=p_report_id;
+  -- Saving confirms persistence; it does not end either the aggregate editor or
+  -- target module editors already owned by this exact actor/session/client.
+  update public.monthly_v7_entity_leases l
+  set heartbeat_at=now(), expires_at=now()+interval '90 seconds'
+  where l.workspace_id=workspace_row.id and (
+    (l.entity_type='kpi_batch' and l.entity_id=p_report_id
+     and l.lease_id=p_lease_id and l.fencing_token=p_fencing_token)
+    or
+    (l.entity_type='module' and exists (
+      select 1 from jsonb_array_elements(p_changes)c(value)
+      where (c.value->>'moduleId')::uuid=l.entity_id
+    ))
+  )
+    and l.holder_user_id=user_row.id
+    and l.holder_user_session_id=p_user_session_id
+    and l.client_session_id=btrim(p_client_session_id);
   response:=jsonb_build_object('ok',true,'entityType','kpi_batch','entityId',p_report_id,'updated',updated_rows,'operationId',p_operation_id);
   update public.monthly_v7_operations set status='COMMITTED',result=response,completed_at=now() where operation_id=p_operation_id;
   return response;

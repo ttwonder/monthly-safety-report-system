@@ -283,6 +283,45 @@
         const chartInstances = {}; // 儲存所有的圖表實例
         const colorPalette = ['#4f46e5', '#10b981', '#f43f5e', '#f59e0b', '#8b5cf6']; // 藍, 綠, 紅, 橘, 紫
 
+        function sanitizeModuleTitleHtml(html) {
+            const template = document.createElement('template');
+            template.innerHTML = String(html || '');
+            const allowedTags = new Set(['B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'BR', 'SPAN', 'FONT', 'SUB', 'SUP', 'DIV', 'P']);
+            const blockedTags = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'IMG', 'SVG', 'MATH', 'VIDEO', 'AUDIO', 'SOURCE', 'LINK', 'META', 'BASE', 'FORM', 'INPUT', 'BUTTON', 'SELECT', 'TEXTAREA']);
+            const allowedStyles = new Set(['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style', 'text-decoration', 'text-decoration-line', 'text-decoration-color', 'vertical-align']);
+            const forbiddenCss = /(?:url\s*\(|expression\s*\(|javascript\s*:|data\s*:|@import|-moz-binding|behavior\s*:)/i;
+            const cssValueAllowed = (property, value) => {
+                const normalized = String(value || '').trim();
+                if (!normalized || forbiddenCss.test(normalized)) return false;
+                return !window.CSS?.supports || window.CSS.supports(property, normalized);
+            };
+            const clean = (element) => {
+                Array.from(element.children).forEach(clean);
+                const tag = element.tagName;
+                if (blockedTags.has(tag)) { element.remove(); return; }
+                if (!allowedTags.has(tag)) {
+                    element.replaceWith(...Array.from(element.childNodes));
+                    return;
+                }
+                const safeStyles = [];
+                for (let i = 0; i < element.style.length; i += 1) {
+                    const property = String(element.style.item(i) || '').toLowerCase();
+                    const value = element.style.getPropertyValue(property);
+                    if (allowedStyles.has(property) && cssValueAllowed(property, value)) safeStyles.push(`${property}: ${value}`);
+                }
+                const fontColor = tag === 'FONT' ? String(element.getAttribute('color') || '').trim() : '';
+                const fontFace = tag === 'FONT' ? String(element.getAttribute('face') || '').trim() : '';
+                const fontSize = tag === 'FONT' ? String(element.getAttribute('size') || '').trim() : '';
+                Array.from(element.attributes).forEach(attribute => element.removeAttribute(attribute.name));
+                if (safeStyles.length) element.setAttribute('style', safeStyles.join('; '));
+                if (tag === 'FONT' && fontColor && cssValueAllowed('color', fontColor)) element.setAttribute('color', fontColor);
+                if (tag === 'FONT' && /^[\p{L}\p{N} _,'".-]{1,120}$/u.test(fontFace)) element.setAttribute('face', fontFace);
+                if (tag === 'FONT' && /^[1-7]$/.test(fontSize)) element.setAttribute('size', fontSize);
+            };
+            Array.from(template.content.children).forEach(clean);
+            return template.innerHTML;
+        }
+
         function sanitizeTrendChartHtml(html) {
             if (!html || !String(html).includes('trend-chart-container')) return html;
             const template = document.createElement('template');
@@ -311,8 +350,9 @@
         function sanitizeReportDataForStorage(data) {
             if (!Array.isArray(data)) return data;
             data.forEach(item => {
-                if (!item || !Array.isArray(item.columns)) return;
-                item.columns = item.columns.map(col => sanitizeTrendChartHtml(col || ''));
+                if (!item) return;
+                item.title = sanitizeModuleTitleHtml(item.title || '');
+                if (Array.isArray(item.columns)) item.columns = item.columns.map(col => sanitizeTrendChartHtml(col || ''));
             });
             return data;
         }
@@ -1979,7 +2019,7 @@
                 
                 <!-- 右上：全局操作按鈕 -->
                 <div class="toolbar-group toolbar-global-group flex items-center gap-1.5">
-                    <button onclick="manualSave()" class="toolbar-btn !border-blue-500 !bg-blue-50 !text-blue-700 hover:!bg-blue-100 font-bold shadow-sm" title="將變更寫入本地儲存"><i class="fas fa-save mr-1"></i>保存</button>
+                    <button onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="manualSave()" class="toolbar-btn !border-blue-500 !bg-blue-50 !text-blue-700 hover:!bg-blue-100 font-bold shadow-sm" title="將變更寫入本地儲存"><i class="fas fa-save mr-1"></i>保存</button>
                     <input type="file" id="excelUpload" class="hidden" accept=".xlsx, .xls" onchange="importExcel(event)">
                     <button onclick="document.getElementById('excelUpload').click()" class="toolbar-btn !border-green-300 !text-green-700 hover:!bg-green-50" title="支援還原隱藏版式資料"><i class="fas fa-file-import mr-1"></i>匯入Excel</button>
                     <button onclick="exportExcel()" class="toolbar-btn !border-green-300 !text-green-700 hover:!bg-green-50" title="匯出帶有隱藏版式資料的 Excel"><i class="fas fa-file-excel mr-1"></i>匯出Excel</button>
@@ -2194,8 +2234,8 @@
 
     <script src="./vendor/supabase-2.112.2.js"></script>
     <script src="./monthly-collaboration-core.js"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.8"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.8"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.9"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.9"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont() {
@@ -2425,17 +2465,24 @@
                     timestamp: explicitTimestamp || Date.now() 
                 });
                 transaction.oncomplete = async () => {
-                    if (!V4_CLOUD_APPLYING && typeof v4QueueAutoSave === 'function') v4QueueAutoSave('月報編輯');
-                    if (window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING) {
+                    let cloudTargetGeneration = null;
+                    if (!V4_CLOUD_APPLYING && typeof v4QueueAutoSave === 'function') {
+                        cloudTargetGeneration = v4QueueAutoSave('月報編輯', { v7CloudDirty: true });
+                    }
+                    if (window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING && options.deferCloud !== true) {
                         try {
                             const cloud = await window.MonthlyV7App.persistReportData(reportData, {
                                 resolveRevisionConflict: options.resolveRevisionConflict === true
                             });
+                            if (cloud?.saved === true) {
+                                await window.MonthlyV7App.flush(v7CurrentReportMeta());
+                                v7AcknowledgeCloudSave(cloudTargetGeneration);
+                            }
                             resolve({ localSaved: true, cloudSaved: cloud?.saved === true, cloud });
                         } catch (error) {
                             resolve({ localSaved: true, cloudSaved: false, error });
                         }
-                    } else resolve({ localSaved: true, cloudSaved: false });
+                    } else resolve({ localSaved: true, cloudSaved: false, deferredCloud: options.deferCloud === true });
                 };
                 transaction.onerror = (e) => reject(e);
             });
@@ -2452,16 +2499,20 @@
             });
         }
 
-        async function manualSave(showMsg = true) {
+        async function manualSave(showMsg = true, options = {}) {
+            if (showMsg && window.MonthlyV7App?.isActive?.()) {
+                return v5SaveChangesToCloud();
+            }
             if (showMsg && document.activeElement && typeof document.activeElement.blur === 'function' && document.activeElement.classList.contains('editable-div')) {
                 document.activeElement.blur();
             }
             return new Promise((resolve) => {
                 setTimeout(async () => {
                     const saved = await saveToDB(reportData, Date.now(), {
-                        resolveRevisionConflict: showMsg === true
+                        resolveRevisionConflict: showMsg === true,
+                        deferCloud: options.deferCloud === true
                     });
-                    if (!saved?.error && window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING && v5CurrentUser()) {
+                    if (!saved?.error && options.deferCloud !== true && window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING && v5CurrentUser()) {
                         try { await window.MonthlyV7App.persistReportMeta(v7CurrentReportMeta()); }
                         catch (error) { saved.error = saved.error || error; }
                     }
@@ -2491,6 +2542,7 @@
 
         function normalizeData(dataArray) {
             return dataArray.map(item => {
+                item.title = sanitizeModuleTitleHtml(item.title || '');
                 if (item.content !== undefined) { item.columns = [item.content]; delete item.content; }
                 if (!item.columns) item.columns = [''];
                 if (!item.colLayout) item.colLayout = item.colCount ? Array(item.colCount).fill('1').join(':') : '1';
@@ -2788,6 +2840,8 @@
             tbody.innerHTML = '';
             
             reportData.forEach((item, index) => {
+                const titleHtml = sanitizeModuleTitleHtml(item.title || '');
+                if (item.title !== titleHtml) item.title = titleHtml;
                 const tr = document.createElement('tr');
                 tr.className = 'module-card-row';
                 tr.dataset.index = index;
@@ -2843,7 +2897,7 @@
                     </td>
                     <td class="module-title-cell">
                         <span class="module-field-label module-title-label">報告條目：</span>
-                        <div class="module-title-editor font-bold text-indigo-800 editable-div" contenteditable="true" onblur="updateData(${index}, 'title', this.innerHTML)">${item.title}</div>
+                        <div class="module-title-editor font-bold text-indigo-800 editable-div" contenteditable="true" onblur="updateData(${index}, 'title', this.innerHTML)">${titleHtml}</div>
                     </td>
                     <td class="module-content-cell">
                         ${columnsHtml}
@@ -2945,12 +2999,22 @@
             const active = document.activeElement && document.body.contains(document.activeElement) ? document.activeElement : null;
             const target = (element && element.getBoundingClientRect) ? element : (active && active.getBoundingClientRect ? active : null);
             const rect = target ? target.getBoundingClientRect() : null;
+            let selectionRange = null;
+            try {
+                const selection = window.getSelection();
+                const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+                const container = range?.commonAncestorContainer?.nodeType === Node.TEXT_NODE
+                    ? range.commonAncestorContainer.parentNode
+                    : range?.commonAncestorContainer;
+                if (range && active && container && active.contains(container)) selectionRange = range.cloneRange();
+            } catch {}
             return {
                 x: window.scrollX,
                 y: window.scrollY,
                 active,
                 target,
-                targetTop: rect ? rect.top : null
+                targetTop: rect ? rect.top : null,
+                selectionRange
             };
         }
 
@@ -2960,6 +3024,11 @@
                 try {
                     if (state.active && document.body.contains(state.active) && typeof state.active.focus === 'function') {
                         state.active.focus({ preventScroll: true });
+                        if (state.selectionRange) {
+                            const selection = window.getSelection();
+                            selection.removeAllRanges();
+                            selection.addRange(state.selectionRange);
+                        }
                     }
                 } catch {}
                 if (state.target && document.body.contains(state.target) && Number.isFinite(state.targetTop)) {
@@ -3721,19 +3790,19 @@
                         if (td && td.cellIndex === 1) await updateData(index, 'title', editableDiv.innerHTML);
                         else if (td && td.cellIndex === 2) await updateColumnData(index, editableDiv.dataset.colIndex || 0, editableDiv.innerHTML);
                     } else {
-                        // 例如主標題：保存但不 blur，不打斷正在輸入的 caret / scroll
-                        await manualSave(false);
+                        // 例如主標題：只保存本機草稿，不 blur、不打斷正在輸入的 caret / scroll
+                        await manualSave(false, { deferCloud: true });
                     }
                 } else {
-                    // 日期、區間、工具欄等：保存但不讓頁面重回頂端
-                    await manualSave(false);
+                    // 日期、區間、工具欄等：只保存本機草稿，交由分鐘級排程上雲
+                    await manualSave(false, { deferCloud: true });
                 }
             } finally {
                 restoreEditorViewportState(viewportState);
             }
         }
 
-        async function updateColumnData(index, colIndex, value) { reportData[index].columns[colIndex] = sanitizeTrendChartHtml(value); await saveToDB(reportData); }
+        async function updateColumnData(index, colIndex, value) { reportData[index].columns[colIndex] = sanitizeTrendChartHtml(value); await saveToDB(reportData, null, { deferCloud: true }); }
         async function updateColLayout(index, layout) {
             reportData[index].colLayout = layout;
             const count = layout.split(':').length;
@@ -3821,7 +3890,10 @@
                 alert('刪除失敗，項目仍保留：' + error.message);
             } finally { V4_CLOUD_APPLYING = false; }
         }
-        async function updateData(index, field, value) { reportData[index][field] = value; await saveToDB(reportData); }
+        async function updateData(index, field, value) {
+            reportData[index][field] = field === 'title' ? sanitizeModuleTitleHtml(value) : value;
+            await saveToDB(reportData, null, { deferCloud: true });
+        }
 
         function buildIconGrid() {
             const grid = document.getElementById('iconGrid');
@@ -4137,7 +4209,7 @@
 
         function v1PlainText(html) {
             const tmp = document.createElement('div');
-            tmp.innerHTML = html || '';
+            tmp.innerHTML = sanitizeModuleTitleHtml(html || '');
             return (tmp.textContent || '').trim();
         }
 
@@ -4370,7 +4442,7 @@
                                     <div class="v1-module-row">
                                         <input type="checkbox" data-v1-module-index="${index}" ${item.selectedForPdf !== false ? 'checked' : ''} onchange="toggleV1Module(${index}, this.checked)" title="加入 PDF">
                                         <div>
-                                            <div class="v1-module-title"><i class="${item.icon || 'fas fa-angle-right'} mr-1" style="color:${item.iconColor || '#4f46e5'}"></i>${item.title || '未命名模塊'}</div>
+                                            <div class="v1-module-title"><i class="${item.icon || 'fas fa-angle-right'} mr-1" style="color:${item.iconColor || '#4f46e5'}"></i>${sanitizeModuleTitleHtml(item.title || '未命名模塊')}</div>
                                             <div class="v1-module-meta">PDF 順序：${item.pdfOrder || index + 1}　｜　${item.selectedForPdf !== false ? '已加入 PDF' : '不輸出'}</div>
                                         </div>
                                         <button class="v1-small-btn" onclick="focusV1ModuleInEditor(${index})">編輯</button>
@@ -4405,7 +4477,7 @@
                                     <label class="v1-check-item">
                                         <input type="checkbox" data-v1-pdf-index="${index}" ${item.selectedForPdf !== false ? 'checked' : ''} onchange="toggleV1Module(${index}, this.checked)">
                                         <div>
-                                            <div class="v1-module-title">${item.pdfOrder || index + 1}. ${item.title || '未命名模塊'}</div>
+                                            <div class="v1-module-title">${item.pdfOrder || index + 1}. ${sanitizeModuleTitleHtml(item.title || '未命名模塊')}</div>
                                             <div class="v1-module-meta">
                                                 ${v1GetCategory(item).label}
                                                 <button type="button" class="v1-small-btn ml-1" onclick="event.preventDefault(); moveV1PdfOrder(${index}, -1)">上移</button>
@@ -4676,6 +4748,7 @@
 
         function v7FormalSnapshotIntentPayload(value, legacyId) {
             const payload = JSON.parse(JSON.stringify(value || {}));
+            payload.title = sanitizeModuleTitleHtml(payload.title || '');
             if (payload.content !== undefined) {
                 payload.columns = [payload.content];
                 delete payload.content;
@@ -4724,7 +4797,10 @@
             let formal = null;
             for (let attempt = 0; attempt < 2; attempt += 1) {
                 formal = await window.MonthlyV7App.createReportSnapshot(kind);
-                if (v7FormalSnapshotCoversFloor(formal, floor)) return formal;
+                if (v7FormalSnapshotCoversFloor(formal, floor)) {
+                    V7_CRITICAL_STATUS_UNTIL = 0;
+                    return formal;
+                }
             }
             const error = new Error('STALE_SNAPSHOT_AFTER_SAVE');
             error.code = 'STALE_SNAPSHOT_AFTER_SAVE';
@@ -4768,7 +4844,7 @@
             const index = Number(row?.dataset?.index);
             if (!editable || !Number.isInteger(index) || !reportData[index]) return;
             if (editable.classList.contains('module-title-editor')) {
-                reportData[index].title = editable.innerHTML;
+                reportData[index].title = sanitizeModuleTitleHtml(editable.innerHTML);
                 return;
             }
             const colIndex = Number(editable.dataset.colIndex);
@@ -4800,7 +4876,7 @@
                 const candidate = JSON.parse(JSON.stringify(existingDraft?.payload || item));
                 let visibleChange = false;
                 const title = row.querySelector('.module-title-editor');
-                const titleValue = title?.innerHTML ?? '';
+                const titleValue = sanitizeModuleTitleHtml(title?.innerHTML ?? '');
                 const useVisibleTitle = title && (
                     visibleIsNewerThanDraft(title, existingDraft)
                     || (!existingDraft && titleValue !== String(baseline.title || ''))
@@ -4827,10 +4903,11 @@
                     ? JSON.stringify(candidate) !== JSON.stringify(existingDraft.payload)
                     : visibleChange || modelDiffersFromBaseline;
                 if (!draftChanged) return;
-                reportData[index] = Object.assign({}, candidate, {
+                Object.assign(item, candidate, {
                     _v7Id: item._v7Id,
                     _v7Revision: item._v7Revision
                 });
+                reportData[index] = item;
                 client.saveDraft(
                     'module',
                     item._v7Id,
@@ -4905,6 +4982,10 @@
             }
             v7SyncFocusedEditorToModel(focused);
             if (focused && typeof focused.blur === 'function') focused.blur();
+            document.querySelectorAll('[contenteditable="true"]').forEach(element => {
+                element.dataset.v7FormalPrintRestore = 'true';
+                element.setAttribute('contenteditable', 'false');
+            });
             syncV1PdfSelectionFromDom();
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             return token;
@@ -4915,6 +4996,11 @@
             v7FormalPrintLockToken = null;
             delete document.body.dataset.v7FormalPrintLock;
             document.getElementById('v7FormalPrintLockOverlay')?.remove();
+            document.querySelectorAll('[data-v7-formal-print-restore="true"]').forEach(element => {
+                delete element.dataset.v7FormalPrintRestore;
+                element.setAttribute('contenteditable', 'true');
+            });
+            window.MonthlyV7App?.decorateEditorRows?.();
         }
 
         const V7_FORMAL_PDF_STAGE_LABELS = Object.freeze({
@@ -4955,6 +5041,7 @@
 
         function v7ReportFormalPdfFailure(error) {
             const message = v7FormalPdfFailureMessage(error);
+            V7_CRITICAL_STATUS_UNTIL = Date.now() + 30000;
             v4SetCloudRuntimeStatus(message, 'error');
             alert('建立正式 PDF 快照失敗：' + message);
         }
@@ -5231,7 +5318,7 @@
                         <div class="v1-category-card">
                             <div class="v1-category-title mb-2">備份 / 版本操作</div>
                             <div class="v1-action-row">
-                                <button class="v1-small-btn v1-primary-btn" onclick="manualSave()"><i class="fas fa-save mr-1"></i>保存目前月報</button>
+                                <button class="v1-small-btn v1-primary-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="manualSave()"><i class="fas fa-save mr-1"></i>保存目前月報</button>
                                 <button class="v1-small-btn" onclick="v1CreateReportCopy()"><i class="fas fa-copy mr-1"></i>建立副本</button>
                                 <button class="v1-small-btn" onclick="v4ExportLocalBundleJson()"><i class="fas fa-file-export mr-1"></i>匯出完整 JSON</button>
                                 <button class="v1-small-btn" onclick="exportExcel()"><i class="fas fa-file-excel mr-1"></i>匯出 Excel</button>
@@ -5862,6 +5949,12 @@
         let V4_CLOUD_APPLYING = false;
         let V4_CLOUD_SAVING = false;
         let V4_AUTO_SAVE_TIMER = null;
+        let V7_CLOUD_SAVE_PROMISE = null;
+        let V7_CLOUD_DIRTY_GENERATION = 0;
+        let V7_CLOUD_SAVED_GENERATION = 0;
+        let V7_LAST_CLOUD_SAVED_AT = 0;
+        let V7_CRITICAL_STATUS_UNTIL = 0;
+        let V7_TRANSIENT_STATUS_UNTIL = 0;
         let V4_STARTUP_SYNC_DONE = false;
         let V4_SYNC_INTERVAL_ID = null;
         let V6_ACTIVE_TAB = 'editor';
@@ -5909,9 +6002,49 @@
             }
         }
 
-        function v4SetCloudRuntimeStatus(text, kind = 'muted') {
+        function v7CurrentReportHasPendingSaveOperation() {
+            const app = window.MonthlyV7App;
+            const client = app?.client;
+            const reportId = String(client?.currentReport?.()?.id || '');
+            if (!reportId || !client?.currentUser?.()) return false;
+            const hasPending = (key) => typeof client.hasCurrentActorPendingOperation === 'function'
+                ? client.hasCurrentActorPendingOperation(key)
+                : client.hasPendingOperation?.(key) === true;
+            const moduleIds = new Set([
+                ...reportData.map(item => String(item?._v7Id || '')).filter(Boolean),
+                ...(client.snapshot?.modules || []).map(item => String(item?.id || '')).filter(Boolean)
+            ]);
+            const keys = [
+                `save_report_meta:${reportId}`,
+                `save_module_batch:${reportId}`,
+                `create_module:${reportId}`,
+                `reorder_modules:${reportId}`,
+                ...Array.from(moduleIds).flatMap(id => [`save_module:${id}`, `delete_module:${id}`])
+            ];
+            return keys.some(hasPending);
+        }
+
+        function v7HasUnresolvedFormalSnapshotOperation() {
+            const client = window.MonthlyV7App?.client;
+            const reportId = String(client?.currentReport?.()?.id || '');
+            return !!(reportId && client?.hasPendingOperation?.(`create_snapshot:${reportId}:pdf`));
+        }
+
+        function v4SetCloudRuntimeStatus(text, kind = 'muted', options = {}) {
+            const now = Date.now();
+            const protectForMs = Math.max(0, Number(options.protectForMs) || 0);
+            const criticalStatusProtected = now < V7_CRITICAL_STATUS_UNTIL
+                || now < V7_TRANSIENT_STATUS_UNTIL
+                || v7HasUnresolvedFormalSnapshotOperation();
+            const pendingFailureProtected = V4_CLOUD_STATUS_KIND === 'error'
+                && v7CurrentReportHasPendingSaveOperation();
+            if (criticalStatusProtected && kind !== 'error' && options.allowCriticalOverride !== true) return false;
+            if (pendingFailureProtected && kind !== 'error' && options.allowPendingFailureOverride !== true) return false;
             V4_CLOUD_STATUS_TEXT = text || '';
             V4_CLOUD_STATUS_KIND = kind;
+            if (protectForMs > 0) {
+                V7_TRANSIENT_STATUS_UNTIL = Math.max(V7_TRANSIENT_STATUS_UNTIL, now + protectForMs);
+            }
             const el = document.getElementById('v4-cloud-runtime-status');
             if (el) {
                 el.textContent = V4_CLOUD_STATUS_TEXT;
@@ -5919,6 +6052,85 @@
                 if (kind === 'ok') el.className = 'text-emerald-700 font-bold';
                 if (kind === 'warn') el.className = 'text-amber-700 font-bold';
                 if (kind === 'error') el.className = 'text-rose-700 font-bold';
+            }
+            return true;
+        }
+
+        function v7CloudAutoSaveIntervalMs() {
+            const configured = Number(window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS);
+            return Number.isFinite(configured) && configured >= 250 ? configured : 60000;
+        }
+
+        function v7FormatCloudSaveTime(value = Date.now()) {
+            try {
+                return new Date(value).toLocaleTimeString('zh-Hant', {
+                    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+                });
+            } catch {
+                return new Date(value).toISOString().slice(11, 19);
+            }
+        }
+
+        function v7HasUnsyncedCloudChanges() {
+            return V7_CLOUD_DIRTY_GENERATION > V7_CLOUD_SAVED_GENERATION
+                || v7CurrentReportHasPendingSaveOperation();
+        }
+
+        function v7ClearCloudAutoSaveTimer() {
+            clearTimeout(V4_AUTO_SAVE_TIMER);
+            V4_AUTO_SAVE_TIMER = null;
+        }
+
+        function v7ScheduleCloudAutoSave(delayMs = v7CloudAutoSaveIntervalMs()) {
+            if (V4_CLOUD_APPLYING || V4_AUTO_SAVE_TIMER || !v7HasUnsyncedCloudChanges()) return;
+            if (!window.MonthlyV7App?.isActive?.() || !v5CurrentUser()) return;
+            V4_AUTO_SAVE_TIMER = setTimeout(async () => {
+                V4_AUTO_SAVE_TIMER = null;
+                if (!v7HasUnsyncedCloudChanges() || !v5CurrentUser()) return;
+                await v4UploadToCloud({ silent: true, reason: '每分鐘自動保存', flushLatest: false });
+                if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
+            }, Math.max(250, Number(delayMs) || v7CloudAutoSaveIntervalMs()));
+        }
+
+        function v7MarkCloudDirty(reason = '修改') {
+            V7_CLOUD_DIRTY_GENERATION += 1;
+            if (typeof v7PreserveVisibleEditorDrafts === 'function') v7PreserveVisibleEditorDrafts();
+            if (!v5CurrentUser()) {
+                v4SetCloudRuntimeStatus(`${reason}已保存為本機草稿；請登入後提交。`, 'warn');
+                return V7_CLOUD_DIRTY_GENERATION;
+            }
+            const previousCloudSave = V7_LAST_CLOUD_SAVED_AT
+                ? `；上次雲端保存 ${v7FormatCloudSaveTime(V7_LAST_CLOUD_SAVED_AT)}`
+                : '';
+            v4SetCloudRuntimeStatus(`${reason}已保存為本機草稿${previousCloudSave}；將於一分鐘內自動上傳。`, 'muted');
+            v7ScheduleCloudAutoSave();
+            return V7_CLOUD_DIRTY_GENERATION;
+        }
+
+        function v7AcknowledgeCloudSave(targetGeneration, savedAt = Date.now()) {
+            V7_CLOUD_SAVED_GENERATION = Math.max(
+                V7_CLOUD_SAVED_GENERATION,
+                Number.isFinite(Number(targetGeneration)) ? Number(targetGeneration) : V7_CLOUD_DIRTY_GENERATION
+            );
+            V7_LAST_CLOUD_SAVED_AT = new Date(savedAt).toISOString();
+            const time = v7FormatCloudSaveTime(savedAt);
+            if (v7HasUnresolvedFormalSnapshotOperation()) {
+                if (!v7HasUnsyncedCloudChanges()) v7ClearCloudAutoSaveTimer();
+                else v7ScheduleCloudAutoSave();
+                v4SetCloudRuntimeStatus(
+                    `月報資料已保存｜${time}；正式 PDF 快照結果尚未確認，請重新建立正式 PDF 完成對帳。`,
+                    'warn',
+                    { allowCriticalOverride: true }
+                );
+                return;
+            }
+            V7_CRITICAL_STATUS_UNTIL = 0;
+            if (v7HasUnsyncedCloudChanges()) {
+                v4SetCloudRuntimeStatus(`雲端已保存｜${time}；仍有新變更待保存。`, 'warn');
+                v7ScheduleCloudAutoSave();
+            } else {
+                v7ClearCloudAutoSaveTimer();
+                v4SetCloudRuntimeStatus(`雲端已保存｜${time}`, 'ok');
             }
         }
 
@@ -6072,28 +6284,60 @@
             const silent = options.silent === true;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!v5RequireLogin('請先登入後再保存修改。')) return false;
-                if (V4_CLOUD_SAVING) return false;
+                const flushLatest = options.flushLatest === true;
+                if (V7_CLOUD_SAVE_PROMISE) {
+                    const inFlightResult = await V7_CLOUD_SAVE_PROMISE;
+                    if (inFlightResult && flushLatest && options.followUp !== false && v7HasUnsyncedCloudChanges()) {
+                        return v4UploadToCloud(Object.assign({}, options, { followUp: false }));
+                    }
+                    return inFlightResult;
+                }
+                const targetGeneration = V7_CLOUD_DIRTY_GENERATION;
                 V4_CLOUD_SAVING = true;
-                try {
-                    v4SetCloudRuntimeStatus('正在逐項保存到雲端...', 'muted');
-                    await window.MonthlyV7App.persistReportData(reportData, {
-                        resolveRevisionConflict: !silent
-                    });
-                    await window.MonthlyV7App.flush(v7CurrentReportMeta());
-                    v4SetCloudRuntimeStatus(`逐項雲端保存完成｜watermark ${window.MonthlyV7App.client?.watermark || 0}`, 'ok');
-                    if (!silent) showToast('逐項雲端保存完成');
-                    renderV4CloudPane();
-                    return true;
-                } catch (error) {
-                    if (error?.code === 'REVISION_CONFLICT_CANCELLED') {
-                        v4SetCloudRuntimeStatus('已取消覆蓋；雲端未變更，本機草稿仍完整保留。', 'warn');
-                        if (!silent) showToast('已取消覆蓋；本機草稿仍保留。');
+                const savePromise = (async () => {
+                    try {
+                        v4SetCloudRuntimeStatus('正在保存到雲端...', 'muted', { allowPendingFailureOverride: true });
+                        await window.MonthlyV7App.persistReportData(reportData, {
+                            resolveRevisionConflict: !silent
+                        });
+                        await window.MonthlyV7App.flush(v7CurrentReportMeta());
+                        v7AcknowledgeCloudSave(targetGeneration);
+                        if (!silent) {
+                            const time = v7FormatCloudSaveTime(V7_LAST_CLOUD_SAVED_AT || Date.now());
+                            showToast(v7HasUnresolvedFormalSnapshotOperation()
+                                ? `月報資料已保存｜${time}；正式 PDF 快照結果尚未確認`
+                                : `雲端已保存｜${time}`);
+                        }
+                        renderV4CloudPane();
+                        return true;
+                    } catch (error) {
+                        if (error?.code === 'REVISION_CONFLICT_CANCELLED') {
+                            v4SetCloudRuntimeStatus('已取消覆蓋；雲端未變更，本機草稿仍完整保留。', 'warn');
+                            if (!silent) showToast('已取消覆蓋；本機草稿仍保留。');
+                            return false;
+                        }
+                        if (error?.code === 'REVISION_CONFLICT') {
+                            v4SetCloudRuntimeStatus('項目保存衝突：REVISION_CONFLICT。本機草稿已保留；請按「保存修改」確認處理。', 'error');
+                        } else {
+                            v4SetCloudRuntimeStatus('雲端保存失敗：' + error.message + '（本機草稿已保留）', 'error');
+                        }
+                        if (!silent) alert('保存失敗，本機草稿已保留：' + error.message);
                         return false;
                     }
-                    v4SetCloudRuntimeStatus('逐項保存失敗：' + error.message + '（本機草稿已保留）', 'error');
-                    if (!silent) alert('保存失敗，本機草稿已保留：' + error.message);
-                    return false;
-                } finally { V4_CLOUD_SAVING = false; }
+                })();
+                V7_CLOUD_SAVE_PROMISE = savePromise;
+                let result = false;
+                try {
+                    result = await savePromise;
+                } finally {
+                    if (V7_CLOUD_SAVE_PROMISE === savePromise) V7_CLOUD_SAVE_PROMISE = null;
+                    V4_CLOUD_SAVING = false;
+                    if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
+                }
+                if (result && flushLatest && options.followUp !== false && v7HasUnsyncedCloudChanges()) {
+                    return v4UploadToCloud(Object.assign({}, options, { followUp: false }));
+                }
+                return result;
             }
             if (V4_CLOUD_SAVING) return false;
             try {
@@ -6113,7 +6357,7 @@
                     return false;
                 }
                 v6SaveCloudMetaToConfig(config, data || {});
-                v4SetCloudRuntimeStatus(`雲端已保存：${v4FmtTime(config.lastSyncAt)}｜版本 ${config.cloudRevision || '—'}`, 'ok');
+                v4SetCloudRuntimeStatus(`雲端已保存｜${v7FormatCloudSaveTime(config.lastSyncAt)}`, 'ok');
                 if (!silent) showToast('已安全保存到 Supabase 雲端');
                 renderV4CloudPane();
                 renderV5SessionBar();
@@ -6169,12 +6413,12 @@
         }
 
 
-        function v4QueueAutoSave(reason = '修改') {
-            if (V4_CLOUD_APPLYING || V4_CLOUD_SAVING) return;
+        function v4QueueAutoSave(reason = '修改', options = {}) {
+            if (V4_CLOUD_APPLYING) return null;
             if (window.MonthlyV7App?.isActive?.()) {
-                v4SetCloudRuntimeStatus(v5CurrentUser() ? `${reason}正在按項目提交；失敗時會保留本機草稿。` : `${reason}已保存為本機草稿；請登入後提交。`, v5CurrentUser() ? 'muted' : 'warn');
-                return;
+                return options.v7CloudDirty === true ? v7MarkCloudDirty(reason) : null;
             }
+            if (V4_CLOUD_SAVING) return null;
             clearTimeout(V4_AUTO_SAVE_TIMER);
             V4_AUTO_SAVE_TIMER = null;
             const config = v4GetCloudConfig();
@@ -6203,14 +6447,10 @@
             const silent = options.silent !== false;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!window.MonthlyV7App.isSiteUnlocked()) return false;
-                if (!options.force && v4IsUserEditingDraft()) {
-                    v4SetCloudRuntimeStatus('正在輸入本機草稿，已延後逐項同步。', 'warn');
-                    return false;
-                }
                 try {
                     if (v5CurrentUser()) await window.MonthlyV7App.syncLatest();
                     else await window.MonthlyV7App.loadSnapshot();
-                    v4SetCloudRuntimeStatus(`逐項資料已同步｜watermark ${window.MonthlyV7App.client?.watermark || 0}`, 'ok');
+                    v4SetCloudRuntimeStatus(`雲端資料已同步｜${v7FormatCloudSaveTime()}`, 'ok');
                     if (!silent) showToast('已同步最新逐項資料');
                     return true;
                 } catch (error) {
@@ -6244,7 +6484,7 @@
                 }
                 await v4ApplyCloudBundle(data.payload, '雲端最新', { silent: true });
                 v6SaveCloudMetaToConfig(config, data);
-                v4SetCloudRuntimeStatus(`已自動同步雲端：${v4FmtTime(config.lastSyncAt)}｜版本 ${config.cloudRevision || '—'}`, 'ok');
+                v4SetCloudRuntimeStatus(`雲端已自動同步｜${v7FormatCloudSaveTime(config.lastSyncAt)}`, 'ok');
                 renderV4CloudPane();
                 renderV5SessionBar();
                 if (!silent) showToast('已同步最新資料');
@@ -6260,7 +6500,7 @@
         async function v4CheckCloudRevision(options = {}) {
             const silent = options.silent !== false;
             if (window.MonthlyV7App?.isActive?.()) {
-                if (!v5CurrentUser() || v4IsUserEditingDraft()) return false;
+                if (!v5CurrentUser()) return false;
                 try { await window.MonthlyV7App.syncLatest(); if (!silent) v4SetCloudRuntimeStatus('逐項變更檢查完成。', 'ok'); return true; }
                 catch (error) { if (!silent) v4SetCloudRuntimeStatus('逐項檢查失敗：' + error.message, 'error'); return false; }
             }
@@ -6442,14 +6682,15 @@
 
         function v4SetupAutoRefresh() {
             if (V4_SYNC_INTERVAL_ID) return;
+            const v7Active = window.MonthlyV7App?.isActive?.() === true;
             const checkIfSafe = () => {
-                if (document.hidden || V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return;
-                // 推薦模式：背景只檢查版本，不自動套用雲端資料，避免刷新頁面和跳走光標。
+                if (document.hidden || V4_CLOUD_SAVING || V4_CLOUD_APPLYING) return;
+                if (!v7Active && V4_AUTO_SAVE_TIMER) return;
                 v4CheckCloudRevision({ silent: true });
             };
             window.addEventListener('focus', checkIfSafe);
             document.addEventListener('visibilitychange', () => { if (!document.hidden) checkIfSafe(); });
-            V4_SYNC_INTERVAL_ID = setInterval(checkIfSafe, 300000);
+            V4_SYNC_INTERVAL_ID = setInterval(checkIfSafe, v7Active ? 7000 : 300000);
         }
 
         function v4ExportLocalBundleJson() {
@@ -6510,7 +6751,7 @@
                         </section>
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
-                            <div class="text-xs text-slate-500 mb-2">V7 會在每個項目修改後逐項提交；「保存修改」可重新 flush 未完成草稿。同步只重讀變動項目，有草稿的項目不會被遠端覆蓋。</div>
+                            <div class="text-xs text-slate-500 mb-2">V7 會先保存本機草稿，並將有變更的項目每分鐘合併上傳；「保存修改」會立即提交最新草稿。同步只重讀變動項目，有草稿的項目不會被遠端覆蓋。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn v1-primary-btn" onclick="v4UploadToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>上傳本機到雲端</button>
                                 <button class="v1-small-btn" onclick="v4DownloadFromCloud()"><i class="fas fa-cloud-arrow-down mr-1"></i>下載雲端覆蓋本機</button>
@@ -6990,10 +7231,21 @@
         }
         async function v5SaveChangesToCloud() {
             if (!v5RequireLogin('請先登入後再保存修改。')) return;
-            clearTimeout(V4_AUTO_SAVE_TIMER);
-            V4_AUTO_SAVE_TIMER = null;
-            await v4UploadToCloud({ silent: false, reason: '手動保存' });
-            renderV5SessionBar();
+            const editorState = window.MonthlyV7App?.isActive?.()
+                ? captureEditorViewportState(document.activeElement)
+                : null;
+            try {
+                if (editorState?.active?.classList?.contains('editable-div')) {
+                    v7SyncFocusedEditorToModel(editorState.active);
+                    await saveToDB(reportData, null, { deferCloud: true });
+                }
+                v7ClearCloudAutoSaveTimer();
+                const saved = await v4UploadToCloud({ silent: false, reason: '手動保存', flushLatest: true });
+                renderV5SessionBar();
+                return saved;
+            } finally {
+                restoreEditorViewportState(editorState);
+            }
         }
 
         function renderV5SessionBar() {
@@ -7006,7 +7258,7 @@
                 <div class="v5-session-bar">
                     <span class="v5-role-pill"><i class="fas fa-user-shield"></i>${v2RecordText(user.displayName || user.username)}｜${v5RoleLabel(user.role)}</span>
                     <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
-                    <button class="v5-sync-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改</button>
+                    <button class="v5-sync-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改</button>
                     <button class="v5-sync-btn" onclick="v5Logout()">登出</button>
                     <span class="text-[11px] text-slate-500">server session｜分頁獨立</span>
                     ${v4CloudStatusHtml()}
@@ -7104,10 +7356,10 @@
                         ${supabaseConfigHtml}
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
-                            <div class="text-xs text-slate-500 mb-2">V7 會在每個項目修改後逐項提交；「保存修改」可重新 flush 未完成草稿。同步只重讀變動項目，有草稿的項目不會被遠端覆蓋。</div>
+                            <div class="text-xs text-slate-500 mb-2">V7 會先保存本機草稿，並將有變更的項目每分鐘合併上傳；「保存修改」會立即提交最新草稿。同步只重讀變動項目，有草稿的項目不會被遠端覆蓋。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn" onclick="v5SyncLatest()"><i class="fas fa-cloud-arrow-down mr-1"></i>同步最新 / 下載雲端</button>
-                                <button class="v1-small-btn v1-primary-btn" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改 / 上傳雲端</button>
+                                <button class="v1-small-btn v1-primary-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改 / 上傳雲端</button>
                             </div>
                             <div class="text-sm text-slate-600 leading-6"><div><b>最近同步：</b>${v4FmtTime(c.lastSyncAt)}</div><div><b>authority：</b>${window.MonthlyV7App?.status?.authorityState || 'LEGACY_ACTIVE'}</div><div><b>change watermark：</b>${window.MonthlyV7App?.client?.watermark || c.cloudRevision || '尚未同步'}</div><div><b>目前身份：</b>${v2RecordText(v5CurrentUser()?.displayName || '未登入')}</div></div>
                             <div class="v1-action-row mt-2"><button class="v1-small-btn" onclick="v4ExportLocalBundleJson()"><i class="fas fa-file-export mr-1"></i>匯出完整 JSON 備份</button><button class="v1-small-btn" onclick="document.getElementById('v4-bundle-import').click()"><i class="fas fa-file-import mr-1"></i>匯入完整 JSON 備份</button><input id="v4-bundle-import" type="file" accept=".json" class="hidden" onchange="v4ImportLocalBundleJson(event)"></div>
@@ -7194,7 +7446,7 @@
                 const row = Array.from(document.querySelectorAll('#tableBody tr[data-v7-entity-id]')).find(node => String(node.dataset.v7EntityId || '') === id);
                 if (row) {
                     const title = row.querySelector('td:nth-child(2) .editable-div');
-                    if (title) local.title = title.innerHTML;
+                    if (title) local.title = sanitizeModuleTitleHtml(title.innerHTML);
                     const columns = Array.from(row.querySelectorAll('[data-col-index]'));
                     if (columns.length) {
                         local.columns = Array.isArray(local.columns) ? local.columns.slice() : [];
@@ -7230,8 +7482,20 @@
             getLocalEntity: v7GetLocalEntity,
             applyBundle: async (bundle, snapshot) => {
                 await v4ApplyCloudBundle(bundle, 'V7 逐項雲端', { silent: true });
-                // 現有 UI 會補 moduleCategory/pdfOrder 等穩定預設；立即校準 baseline，避免把正規化誤判成多人變更。
-                reportData.forEach(item => window.MonthlyV7App?.syncModuleBaseline?.(item));
+                // 現有 UI 會補 moduleCategory/pdfOrder 等穩定預設；普通 row 可直接校準。
+                // 若此 row 正在保護本機草稿，只對真正 server payload 補相同預設，禁止用 draft 覆蓋 authority baseline。
+                reportData.forEach((item, index) => {
+                    const snapshotRow = window.MonthlyV7App?.client?.snapshot?.modules?.find(row => row.id === item?._v7Id);
+                    if (snapshotRow && Object.prototype.hasOwnProperty.call(snapshotRow, '_serverPayload')) {
+                        const serverPayload = snapshotRow._serverPayload || (snapshotRow._serverPayload = {});
+                        if (serverPayload.id != null) serverPayload.id = String(serverPayload.id);
+                        if (typeof serverPayload.selectedForPdf === 'undefined') serverPayload.selectedForPdf = true;
+                        if (typeof serverPayload.pdfOrder === 'undefined') serverPayload.pdfOrder = index + 1;
+                        if (!serverPayload.moduleCategory) serverPayload.moduleCategory = v1GetCategory(serverPayload).id;
+                    } else {
+                        window.MonthlyV7App?.syncModuleBaseline?.(item);
+                    }
+                });
                 const restoredDraftCount = reportData.filter(item => item?._v7Id
                     && window.MonthlyV7App?.client?.readDraft?.('module', item._v7Id)).length;
                 const config = v4GetCloudConfig();
@@ -7241,7 +7505,7 @@
                 if (restoredDraftCount > 0) {
                     v4SetCloudRuntimeStatus(`已恢復 ${restoredDraftCount} 個未提交本機草稿；請按「保存修改」完成雲端提交。`, 'warn');
                 } else {
-                    v4SetCloudRuntimeStatus(`V7 逐項資料已載入｜watermark ${config.cloudRevision}`, 'ok');
+                    v4SetCloudRuntimeStatus(`V7 雲端資料已載入｜${v7FormatCloudSaveTime()}`, 'ok');
                 }
             },
             applyEntity: v7ApplyRemoteEntity,
