@@ -40,18 +40,180 @@
     return JSON.parse(JSON.stringify(value));
   }
 
+  function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+    if (value && typeof value === 'object') {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  function cleanLegacyModulePayload(value) {
+    const payload = jsonClone(value, {});
+    delete payload._v7Id;
+    delete payload._v7Revision;
+    delete payload._serverPayload;
+    delete payload._serverRevision;
+    delete payload._displaySortRank;
+    return payload;
+  }
+
+  function legacyIdentity(value) {
+    if (value == null) return '';
+    return String(value).trim();
+  }
+
+  function reconcileLegacyLocalModules(serverModules, localModules, options = {}) {
+    const serverRows = jsonClone(Array.isArray(serverModules) ? serverModules : [], []);
+    const localRows = jsonClone(Array.isArray(localModules) ? localModules : [], []);
+    const parseTimestamp = (value) => {
+      const parsed = typeof value === 'number' ? value : Date.parse(String(value || ''));
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    };
+    const localTimestamp = parseTimestamp(options.localTimestamp);
+    const serverByLegacyId = new Map();
+    const duplicateServerIds = new Set();
+    const createdServerByPayloadId = new Map();
+    const duplicateCreatedPayloadIds = new Set();
+    for (const row of serverRows) {
+      const legacyItemId = legacyIdentity(row && (row.legacyItemId == null ? row.payload && row.payload.id : row.legacyItemId));
+      if (legacyItemId) {
+        if (serverByLegacyId.has(legacyItemId)) duplicateServerIds.add(legacyItemId);
+        else serverByLegacyId.set(legacyItemId, row);
+      }
+      // monthly_v7_create_module intentionally assigns legacy_item_id=v7:<uuid>,
+      // while preserving the original local id inside payload.id.  If create
+      // committed but a later save/reorder step failed, this unique fallback
+      // reconnects the recovery row to that committed module instead of creating
+      // a duplicate on retry.  Migrated rows never use this fallback.
+      if (legacyIdentity(row && row.legacyItemId).startsWith('v7:')) {
+        const payloadId = legacyIdentity(row && row.payload && row.payload.id);
+        if (payloadId) {
+          if (createdServerByPayloadId.has(payloadId)) duplicateCreatedPayloadIds.add(payloadId);
+          else createdServerByPayloadId.set(payloadId, row);
+        }
+      }
+    }
+    for (const id of duplicateServerIds) serverByLegacyId.delete(id);
+    for (const id of duplicateCreatedPayloadIds) createdServerByPayloadId.delete(id);
+
+    const authorityRows = serverRows.slice().sort((left, right) => (
+      Number(left.sortRank || 0) - Number(right.sortRank || 0)
+      || String(left.id || '').localeCompare(String(right.id || ''))
+    ));
+    const authorityRanks = new Map(authorityRows.map((row, index) => [String(row.id), index + 1]));
+    for (const row of serverRows) row._displaySortRank = authorityRanks.get(String(row.id));
+
+    const localIdCounts = new Map();
+    for (const row of localRows) {
+      const id = legacyIdentity(row && row.id);
+      if (id) localIdCounts.set(id, Number(localIdCounts.get(id) || 0) + 1);
+    }
+
+    const recovered = [];
+    // Kept for wire compatibility. Ambiguous legacy-only rows are never live write
+    // intents; they are preserved solely in the durable recovery copy/quarantine.
+    const localOnlyModules = [];
+    const quarantinedModules = [];
+    const matchedServerIds = new Set();
+    const matchedRows = [];
+    localRows.forEach((localRow, index) => {
+      const legacyItemId = legacyIdentity(localRow && localRow.id);
+      const serverRow = legacyItemId && localIdCounts.get(legacyItemId) === 1
+        ? (serverByLegacyId.get(legacyItemId) || createdServerByPayloadId.get(legacyItemId))
+        : null;
+      const payload = cleanLegacyModulePayload(localRow);
+      const displaySortRank = index + 1;
+      if (!serverRow || matchedServerIds.has(String(serverRow.id))) {
+        quarantinedModules.push({
+          legacyItemId,
+          payload,
+          _displaySortRank: displaySortRank,
+          reason: 'LOCAL_ONLY_AMBIGUOUS'
+        });
+        return;
+      }
+      const entityId = String(serverRow.id);
+      matchedServerIds.add(entityId);
+      const serverTimestamp = parseTimestamp(serverRow.updatedAt || serverRow.updated_at);
+      const freshnessProven = localTimestamp !== null
+        && serverTimestamp !== null
+        && localTimestamp > serverTimestamp;
+      matchedRows.push({ serverRow, displaySortRank, freshnessProven });
+      const serverPayload = cleanLegacyModulePayload(serverRow.payload);
+      if (canonicalJson(payload) !== canonicalJson(serverPayload)) {
+        if (freshnessProven) {
+          recovered.push({
+            entityId,
+            legacyItemId,
+            baseRevision: Number(serverRow.revision || 0),
+            payload
+          });
+        } else {
+          quarantinedModules.push({
+            entityId,
+            legacyItemId,
+            payload,
+            _displaySortRank: displaySortRank,
+            reason: localTimestamp === null || serverTimestamp === null
+              ? 'FRESHNESS_EVIDENCE_MISSING'
+              : 'LOCAL_NOT_NEWER'
+          });
+        }
+      }
+    });
+
+    // Module order is one report-structure intent. Recover it only when every
+    // authority row has one corresponding local row and every comparison proves
+    // the local source is newer; partial freshness must not create mixed ordering.
+    const canRecoverOrder = matchedRows.length === serverRows.length
+      && matchedRows.every((entry) => entry.freshnessProven);
+    if (canRecoverOrder) {
+      for (const entry of matchedRows) entry.serverRow._displaySortRank = entry.displaySortRank;
+    }
+    const authorityOrder = authorityRows.map((row) => String(row.id));
+    const displayOrder = serverRows
+      .slice()
+      .sort((left, right) => Number(left._displaySortRank || 0) - Number(right._displaySortRank || 0))
+      .map((row) => String(row.id));
+    const orderChanged = canRecoverOrder && canonicalJson(authorityOrder) !== canonicalJson(displayOrder);
+    return { serverRows, recovered, localOnlyModules, quarantinedModules, orderChanged };
+  }
+
   function legacyBundleFromSnapshot(snapshot) {
     if (!snapshot || !snapshot.report) throw new TypeError('snapshot report is required');
     const report = snapshot.report;
-    const modules = (Array.isArray(snapshot.modules) ? snapshot.modules : [])
-      .slice()
-      .sort((a, b) => Number(a.sortRank || 0) - Number(b.sortRank || 0))
-      .map((row) => ({
-        ...jsonClone(row.payload, {}),
-        id: row.legacyItemId == null ? row.id : row.legacyItemId,
-        _v7Id: String(row.id),
-        _v7Revision: Number(row.revision || 0)
-      }));
+    const moduleRows = (Array.isArray(snapshot.modules) ? snapshot.modules : []).map((row) => ({
+      kind: 'server',
+      sortRank: Number(row._displaySortRank ?? row.sortRank ?? 0),
+      row
+    }));
+    moduleRows.push(...(Array.isArray(snapshot.localOnlyModules) ? snapshot.localOnlyModules : []).map((row) => ({
+      kind: 'local',
+      sortRank: Number(row._displaySortRank || 0),
+      row
+    })));
+    const modules = moduleRows
+      .sort((a, b) => a.sortRank - b.sortRank)
+      .map((entry) => {
+        if (entry.kind !== 'server') return cleanLegacyModulePayload(entry.row && entry.row.payload);
+        const payload = jsonClone(entry.row.payload, {});
+        const legacyItemId = legacyIdentity(entry.row.legacyItemId);
+        // Server-created rows use legacy_item_id=v7:<uuid> for uniqueness, but
+        // payload.id remains the user's stable visible item number. Keep that
+        // visible ID while _v7Id continues to carry normalized authority.
+        const visibleId = legacyItemId.startsWith('v7:') && legacyIdentity(payload.id)
+          ? payload.id
+          : (entry.row.legacyItemId == null
+            ? (payload.id == null ? entry.row.id : payload.id)
+            : entry.row.legacyItemId);
+        return {
+          ...payload,
+          id: visibleId,
+          _v7Id: String(entry.row.id),
+          _v7Revision: Number(entry.row.revision || 0)
+        };
+      });
     const records = { inspections: [], deficiencies: [], detentions: [], actions: [], trainings: [] };
     for (const row of Array.isArray(snapshot.records) ? snapshot.records : []) {
       if (!Object.prototype.hasOwnProperty.call(records, row.recordType)) continue;
@@ -113,5 +275,12 @@
     });
   }
 
-  return Object.freeze({ entityKey, orderedTargets, leaseCanWrite, legacyBundleFromSnapshot, reduceChangeEvents });
+  return Object.freeze({
+    entityKey,
+    orderedTargets,
+    leaseCanWrite,
+    reconcileLegacyLocalModules,
+    legacyBundleFromSnapshot,
+    reduceChangeEvents
+  });
 });

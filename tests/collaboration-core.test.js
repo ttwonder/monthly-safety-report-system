@@ -62,6 +62,122 @@ test('legacyBundleFromSnapshot 保留逐項身分並排除瀏覽器不應讀取�
   assert.equal(JSON.stringify(bundle).includes('DO_NOT_LEAK'), false);
 });
 
+test('首次 normalized 載入按 legacy ID 對回本機內容與原項次，不以陣列位置搬動內容', () => {
+  const reconciled = core.reconcileLegacyLocalModules([
+    { id: 'v7-b', legacyItemId: '2', sortRank: 1, revision: 4, updatedAt: '2026-08-10T00:00:00Z', payload: { id: 2, title: '雲端二', columns: ['雲端二'] } },
+    { id: 'v7-a', legacyItemId: '1', sortRank: 2, revision: 7, updatedAt: '2026-08-10T00:00:00Z', payload: { id: 1, title: '雲端一', columns: ['雲端一'] } }
+  ], [
+    { id: 1, title: '本機一', columns: ['使用者編輯一'] },
+    { id: 2, title: '本機二', columns: ['使用者編輯二'] }
+  ], { localTimestamp: Date.parse('2026-08-11T00:00:00Z') });
+
+  assert.deepEqual(reconciled.serverRows.map((row) => row.id), ['v7-b', 'v7-a']);
+  assert.deepEqual(reconciled.serverRows.map((row) => row._displaySortRank), [2, 1]);
+  assert.equal(reconciled.orderChanged, true);
+  assert.deepEqual(reconciled.recovered.map((row) => ({
+    entityId: row.entityId,
+    legacyItemId: row.legacyItemId,
+    baseRevision: row.baseRevision,
+    content: row.payload.columns[0]
+  })), [
+    { entityId: 'v7-a', legacyItemId: '1', baseRevision: 7, content: '使用者編輯一' },
+    { entityId: 'v7-b', legacyItemId: '2', baseRevision: 4, content: '使用者編輯二' }
+  ]);
+  const bundle = core.legacyBundleFromSnapshot({
+    report: { id: 'r1', legacyFileId: 'legacy', revision: 1 },
+    modules: reconciled.serverRows.map((row) => {
+      const recovery = reconciled.recovered.find((entry) => entry.entityId === row.id);
+      return recovery ? { ...row, payload: recovery.payload } : row;
+    }),
+    localOnlyModules: reconciled.localOnlyModules,
+    records: [], users: []
+  });
+  assert.deepEqual(bundle.report.modules.map((row) => [String(row.id), row.columns[0]]), [
+    ['1', '使用者編輯一'],
+    ['2', '使用者編輯二']
+  ]);
+});
+
+test('本機獨有項目只進隔離候選，不注入 live bundle 或通用保存意圖', () => {
+  const reconciled = core.reconcileLegacyLocalModules([
+    { id: 'v7-a', legacyItemId: '1', sortRank: 1, revision: 2, updatedAt: '2026-08-10T00:00:00Z', payload: { id: 1, title: '既有' } }
+  ], [
+    { id: 1, title: '既有' },
+    { id: 999, title: '本機新增', columns: ['不能遺失'] }
+  ], { localTimestamp: Date.parse('2026-08-11T00:00:00Z') });
+  assert.equal(reconciled.localOnlyModules.length, 0);
+  assert.equal(reconciled.quarantinedModules.length, 1);
+  assert.equal(reconciled.quarantinedModules[0].payload.title, '本機新增');
+  assert.equal(reconciled.quarantinedModules[0].reason, 'LOCAL_ONLY_AMBIGUOUS');
+  const bundle = core.legacyBundleFromSnapshot({
+    report: { id: 'r1', legacyFileId: 'legacy', revision: 1 },
+    modules: reconciled.serverRows,
+    localOnlyModules: reconciled.localOnlyModules,
+    records: [], users: []
+  });
+  assert.deepEqual(bundle.report.modules.map((row) => String(row.id)), ['1']);
+});
+
+test('較舊、相等或缺少時間證據的 legacy 差異一律隔離且保留 server 內容與順序', () => {
+  for (const localTimestamp of [
+    Date.parse('2026-08-09T00:00:00Z'),
+    Date.parse('2026-08-10T00:00:00Z'),
+    0
+  ]) {
+    const reconciled = core.reconcileLegacyLocalModules([
+      { id: 'v7-b', legacyItemId: '2', sortRank: 1, revision: 4, updatedAt: '2026-08-10T00:00:00Z', payload: { id: 2, title: '雲端二', columns: ['雲端二'] } },
+      { id: 'v7-a', legacyItemId: '1', sortRank: 2, revision: 7, updatedAt: '2026-08-10T00:00:00Z', payload: { id: 1, title: '雲端一', columns: ['雲端一'] } }
+    ], [
+      { id: 1, title: '舊本機一', columns: ['不可覆蓋一'] },
+      { id: 2, title: '舊本機二', columns: ['不可覆蓋二'] }
+    ], { localTimestamp });
+
+    assert.equal(reconciled.recovered.length, 0);
+    assert.equal(reconciled.localOnlyModules.length, 0);
+    assert.equal(reconciled.quarantinedModules.length, 2);
+    assert.equal(reconciled.orderChanged, false);
+    assert.deepEqual(reconciled.serverRows.map((row) => [row.id, row._displaySortRank, row.payload.columns[0]]), [
+      ['v7-b', 1, '雲端二'], ['v7-a', 2, '雲端一']
+    ]);
+  }
+});
+
+test('新建 module 已提交但後續流程失敗時，以唯一 payload.id 對回原本 legacy 項目避免重複建立', () => {
+  const reconciled = core.reconcileLegacyLocalModules([
+    {
+      id: 'server-created-uuid', legacyItemId: 'v7:server-created-uuid', sortRank: 1, revision: 1,
+      payload: { id: 999, title: '本機新增', columns: ['已成功建立'] }
+    }
+  ], [
+    { id: 999, title: '本機新增', columns: ['已成功建立'] }
+  ], { localTimestamp: Date.parse('2026-08-11T00:00:00Z') });
+
+  assert.equal(reconciled.localOnlyModules.length, 0);
+  assert.equal(reconciled.serverRows[0]._displaySortRank, 1);
+  assert.equal(reconciled.recovered.length, 0);
+  const bundle = core.legacyBundleFromSnapshot({
+    report: { id: 'r1', legacyFileId: 'legacy', revision: 2 },
+    modules: reconciled.serverRows,
+    records: [], users: []
+  });
+  assert.equal(String(bundle.report.modules[0].id), '999');
+  assert.equal(bundle.report.modules[0]._v7Id, 'server-created-uuid');
+});
+
+test('payload.id fallback 有歧義時 fail closed，保留本機項目而不任意掛到 server module', () => {
+  const reconciled = core.reconcileLegacyLocalModules([
+    { id: 'server-a', legacyItemId: 'v7:server-a', sortRank: 1, revision: 1, payload: { id: 999, title: 'A' } },
+    { id: 'server-b', legacyItemId: 'v7:server-b', sortRank: 2, revision: 1, payload: { id: 999, title: 'B' } }
+  ], [
+    { id: 999, title: '本機項目' }
+  ], { localTimestamp: Date.parse('2026-08-11T00:00:00Z') });
+
+  assert.equal(reconciled.localOnlyModules.length, 0);
+  assert.equal(reconciled.quarantinedModules.length, 1);
+  assert.equal(reconciled.quarantinedModules[0].payload.title, '本機項目');
+  assert.equal(reconciled.recovered.length, 0);
+});
+
 test('reduceChangeEvents 依 sequence 去重排序並前進 watermark', () => {
   const result = core.reduceChangeEvents(10, [
     { sequence: 12, entityType: 'module', entityId: 'm2' },

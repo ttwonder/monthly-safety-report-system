@@ -2,7 +2,7 @@
 
 const { test, expect } = require('@playwright/test');
 
-async function enterAndLogin(page, username, password) {
+async function enterAndLogin(page, username, password, expectedModuleCount = 2) {
   await page.addInitScript(() => {
     const guardKey = '__monthly_pw_first_boot_intercepted';
     if (sessionStorage.getItem(guardKey)) return;
@@ -66,7 +66,7 @@ async function enterAndLogin(page, username, password) {
   await expect.poll(() => page.evaluate(() => window.__monthlyPwLoginState?.status), { timeout: 30000 }).toMatch(/^(done|error)$/);
   expect(await page.evaluate(() => window.__monthlyPwLoginState)).toEqual({ status: 'done', error: '' });
   await expect(page.locator('#v5TopStatus')).toContainText(username === 'owner' ? 'Owner A' : 'Operator B');
-  await expect(page.locator('#tableBody tr')).toHaveCount(2);
+  await expect(page.locator('#tableBody tr')).toHaveCount(expectedModuleCount);
 }
 
 async function settleLayout(page) {
@@ -271,6 +271,8 @@ test('登出帳號保留 site session 並立即移除 Owner 身份，不退回�
   await expect(page.locator('#siteAccessGate')).toBeHidden();
   await expect(page.locator('#v5-login-username')).toBeVisible();
   await expect(page.locator('#v5TopStatus')).toContainText('帳號已登出；網站仍已解鎖。');
+  await expect(page.locator('#v5TopStatus')).toContainText('未登入');
+  await expect(page.locator('#v5TopStatus')).not.toContainText('尚未建立 owner');
   await expect(page.locator('#v5TopStatus')).not.toContainText('伺服器撤銷未確認');
   await expect(page.locator('#v5TopStatus')).not.toContainText('Owner A');
   const state = await page.evaluate(() => ({
@@ -287,6 +289,298 @@ test('登出帳號保留 site session 並立即移除 Owner 身份，不退回�
   expect(state.storedSiteSession).not.toBeNull();
   expect(state.storedUserSession).toBeNull();
   expect(state.storedUserProjection).toBeNull();
+});
+
+test('登入帳密通過但 snapshot 連續逾時時回到未登入，禁止背景保存且不誤報密碼錯誤', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.getByRole('button', { name: '登出', exact: true }).click();
+  await page.evaluate(() => { window.MonthlyV7App.transport.requestTimeoutMs = 35; });
+  await request.post('/__fake_hang_rpc?name=monthly_v7_get_snapshot&count=2');
+
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+
+  await expect.poll(() => dialogs.length, { timeout: 5000 }).toBeGreaterThan(0);
+  await expect(page.locator('#v5TopStatus')).toContainText('帳號驗證已通過，但雲端資料載入失敗');
+  await expect(page.locator('#v5TopStatus')).toContainText('本機草稿已保留');
+  await expect(page.locator('#v5TopStatus')).toContainText('未登入');
+  expect(dialogs.some((message) => message.includes('用戶名或密碼不正確'))).toBe(false);
+  expect(await page.evaluate(() => ({
+    currentUser: window.MonthlyV7App.currentUser(),
+    writeReady: window.MonthlyV7App.isWriteReady(),
+    userSession: window.MonthlyV7App.client.userSession,
+    storedUserSession: sessionStorage.getItem('monthly_v7_user_session'),
+    autoSaveScheduled: V4_AUTO_SAVE_TIMER !== null,
+    saveInFlight: V7_CLOUD_SAVE_PROMISE !== null
+  }))).toEqual({
+    currentUser: null,
+    writeReady: false,
+    userSession: null,
+    storedUserSession: null,
+    autoSaveScheduled: false,
+    saveInFlight: false
+  });
+});
+
+test('首次 normalized 僅恢復可信較新的既有項目，本機獨有項隔離且 lost-ACK 重載後不重建', async ({ page, request }) => {
+  test.setTimeout(150000);
+  await request.post('/__fake_reverse_module_order');
+  await page.addInitScript(() => {
+    let capturedOnload = null;
+    Object.defineProperty(window, 'onload', {
+      configurable: true,
+      get: () => null,
+      set: (handler) => {
+        capturedOnload = handler;
+        window.__legacyCapturedOnload = handler;
+      }
+    });
+    localStorage.setItem('safety_report_file_id', 'browser-report');
+    const request = indexedDB.open('SafetyMeetingDB', 1);
+    window.__legacySeed = new Promise((resolve, reject) => {
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains('reportStore')) db.createObjectStore('reportStore', { keyPath: 'id' });
+      };
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const tx = request.result.transaction(['reportStore'], 'readwrite');
+        tx.objectStore('reportStore').put({
+          id: 'browser-report',
+          data: [
+            { id: 101, title: '本機原項次 A', columns: ['本機編輯 A'], colLayout: '1' },
+            { id: 102, title: '本機原項次 B', columns: ['本機編輯 B'], colLayout: '1' },
+            { id: 999, title: '本機新增 C', columns: ['本機新增內容 C'], colLayout: '1' }
+          ],
+          title: '本機切換前月報', date: '2026-08-09',
+          period: { startM: '8', startD: '1', endM: '8', endD: '31' },
+          timestamp: Date.parse('2026-08-11T00:00:00.000Z')
+        });
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.evaluate(async () => {
+    await window.__legacySeed;
+    const boot = window.__legacyCapturedOnload;
+    if (typeof boot !== 'function') throw new Error('PRODUCTION_ONLOAD_NOT_CAPTURED');
+    window.onload = null;
+    window.__legacyCapturedOnload = null;
+    await boot.call(window);
+  });
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+
+  await expect.poll(() => page.evaluate(() => reportData.map((row) => [String(row.id), row.columns?.[0]])), { timeout: 30000 })
+    .toEqual([['101', '本機編輯 A'], ['102', '本機編輯 B']]);
+  await expect(page.locator('#v5TopStatus')).toContainText('恢復切換前原項次');
+  await expect(page.locator('#v5TopStatus')).toContainText('已隔離');
+  await expect(page.locator('#v5TopStatus')).toContainText('禁止背景');
+
+  const before = await (await request.get('/__fake_state')).json();
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+  await page.evaluate(() => {
+    V7_CLOUD_DIRTY_GENERATION += 1;
+    v7ScheduleCloudAutoSave(10);
+  });
+  await page.waitForTimeout(150);
+  const after = await (await request.get('/__fake_state')).json();
+  expect(after.modules).toEqual(before.modules);
+  expect(await page.evaluate(async () => ({
+    recovery: await loadFromDB(v7LegacyRecoveryId(window.MonthlyV7App.client.snapshot)),
+    autoSaveScheduled: V4_AUTO_SAVE_TIMER !== null,
+    order: reportData.map((row) => String(row.id))
+  }))).toMatchObject({
+    recovery: { v7Recovery: true, recoverySourceId: 'browser-report' },
+    autoSaveScheduled: false,
+    order: ['101', '102']
+  });
+
+  await page.evaluate(() => { window.MonthlyV7App.transport.requestTimeoutMs = 35; });
+  await request.post('/__fake_hang_rpc?name=monthly_v7_reorder_modules&count=always');
+  await page.locator('#v5TopStatus button[onclick="v5SaveChangesToCloud()"] >> visible=true').click();
+  await expect(page.locator('#v5TopStatus')).toContainText('RPC_TIMEOUT', { timeout: 30000 });
+  const partiallyCommitted = await (await request.get('/__fake_state')).json();
+  expect(partiallyCommitted.modules.map((row) => [String(row.payload.id), row.payload.columns?.[0]])).toEqual([
+    ['102', '本機編輯 B'],
+    ['101', '本機編輯 A']
+  ]);
+  expect(partiallyCommitted.modules.filter((row) => String(row.payload.id) === '999')).toHaveLength(0);
+  expect(await page.evaluate(async () => ({
+    recovery: await loadFromDB(v7LegacyRecoveryId(window.MonthlyV7App.client.currentReport()?.id)),
+    recoveryFlag: window.MonthlyV7App.client.snapshot?.legacyLocalRecovery || null
+  }))).toMatchObject({ recovery: { v7Recovery: true }, recoveryFlag: { orderChanged: true } });
+
+  await request.post('/__fake_hang_rpc?name=monthly_v7_reorder_modules&count=0');
+  const reopened = page;
+  const reloadCapturedProductionBoot = async () => {
+    await reopened.reload({ waitUntil: 'domcontentloaded' });
+    await reopened.evaluate(async () => {
+      const boot = window.__legacyCapturedOnload;
+      if (typeof boot !== 'function') throw new Error('PRODUCTION_ONLOAD_NOT_CAPTURED_AFTER_RELOAD');
+      window.onload = null;
+      window.__legacyCapturedOnload = null;
+      await boot.call(window);
+    });
+  };
+  await reloadCapturedProductionBoot();
+  if (await reopened.locator('#siteAccessGate').isVisible()) {
+    await reopened.locator('#site-access-password').fill('gate-pass');
+    await reopened.getByRole('button', { name: '進入系統' }).click();
+  }
+  await expect(reopened.locator('#siteAccessGate')).toBeHidden();
+  await expect.poll(() => reopened.evaluate(() => reportData.map((row) => [
+    String(row.id), row.columns?.[0], Boolean(row._v7Id)
+  ])), { timeout: 30000 }).toEqual([
+    ['101', '本機編輯 A', true],
+    ['102', '本機編輯 B', true]
+  ]);
+  const beforeRetry = await (await request.get('/__fake_state')).json();
+  expect(beforeRetry.modules).toHaveLength(2);
+
+  if (!(await reopened.locator('#v5TopStatus').innerText()).includes('Owner A')) {
+    await reopened.locator('#v5-login-username').fill('owner');
+    await reopened.locator('#v5-login-password').fill('owner-pass');
+    await reopened.getByRole('button', { name: '登入', exact: true }).click();
+  }
+  await expect(reopened.locator('#v5TopStatus')).toContainText('Owner A');
+  await reopened.locator('#v5TopStatus button[onclick="v5SaveChangesToCloud()"] >> visible=true').click();
+  await expect(reopened.locator('#v5TopStatus')).toContainText('已隔離', { timeout: 30000 });
+  await expect(reopened.locator('#v5TopStatus')).toContainText('不會上傳或重建');
+  const committed = await (await request.get('/__fake_state')).json();
+  expect(committed.modules.map((row) => [String(row.payload.id), row.payload.columns?.[0]])).toEqual([
+    ['101', '本機編輯 A'],
+    ['102', '本機編輯 B']
+  ]);
+  expect(committed.modules.filter((row) => String(row.payload.id) === '999')).toHaveLength(0);
+  const retainedRecovery = await reopened.evaluate(async () => ({
+    recovery: await loadFromDB(v7LegacyRecoveryId(window.MonthlyV7App.client.currentReport()?.id)),
+    recoveryFlag: window.MonthlyV7App.client.snapshot?.legacyLocalRecovery || null,
+    order: reportData.map((row) => String(row.id))
+  }));
+  expect(retainedRecovery).toMatchObject({
+    recovery: { v7Recovery: true, recoverySourceId: 'browser-report' },
+    recoveryFlag: { hasAcceptedRecovery: false },
+    order: ['101', '102']
+  });
+  expect(retainedRecovery.recoveryFlag.quarantinedCount).toBeGreaterThanOrEqual(1);
+
+  await reloadCapturedProductionBoot();
+  await expect(reopened.locator('#siteAccessGate')).toBeHidden();
+  await expect.poll(() => reopened.evaluate(() => reportData.map((row) => [String(row.id), row.columns?.[0]])), { timeout: 30000 })
+    .toEqual([
+      ['101', '本機編輯 A'],
+      ['102', '本機編輯 B']
+    ]);
+  const reloadedRecovery = await reopened.evaluate(async () => ({
+    recovery: await loadFromDB(v7LegacyRecoveryId(window.MonthlyV7App.client.currentReport()?.id)),
+    recoveryFlag: window.MonthlyV7App.client.snapshot?.legacyLocalRecovery || null
+  }));
+  expect(reloadedRecovery).toMatchObject({
+    recovery: { v7Recovery: true, recoverySourceId: 'browser-report' },
+    recoveryFlag: { hasAcceptedRecovery: false }
+  });
+  expect(reloadedRecovery.recoveryFlag.quarantinedCount).toBeGreaterThanOrEqual(1);
+});
+
+test('較舊 legacy 快取即使人工按保存也不覆蓋雲端或重建已不存在項目', async ({ page, request }) => {
+  test.setTimeout(90000);
+  await page.addInitScript(() => {
+    let capturedOnload = null;
+    Object.defineProperty(window, 'onload', {
+      configurable: true,
+      get: () => null,
+      set: (handler) => {
+        capturedOnload = handler;
+        window.__legacyCapturedOnload = handler;
+      }
+    });
+    localStorage.setItem('safety_report_file_id', 'browser-report');
+    const request = indexedDB.open('SafetyMeetingDB', 1);
+    window.__legacySeed = new Promise((resolve, reject) => {
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains('reportStore')) db.createObjectStore('reportStore', { keyPath: 'id' });
+      };
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const tx = request.result.transaction(['reportStore'], 'readwrite');
+        tx.objectStore('reportStore').put({
+          id: 'browser-report',
+          data: [
+            { id: 101, title: '過時 A', columns: ['不可覆蓋 A'], colLayout: '1' },
+            { id: 102, title: '過時 B', columns: ['不可覆蓋 B'], colLayout: '1' },
+            { id: 999, title: '已刪除舊項目', columns: ['不可重建'], colLayout: '1' }
+          ],
+          title: '過時月報標題', date: '2026-08-01', period: {},
+          timestamp: Date.parse('2026-08-09T00:00:00.000Z')
+        });
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.evaluate(async () => {
+    await window.__legacySeed;
+    const boot = window.__legacyCapturedOnload;
+    if (typeof boot !== 'function') throw new Error('PRODUCTION_ONLOAD_NOT_CAPTURED');
+    window.onload = null;
+    window.__legacyCapturedOnload = null;
+    await boot.call(window);
+  });
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await expect.poll(() => page.evaluate(() => reportData.map((row) => [String(row.id), row.columns?.[0]])))
+    .toEqual([['101', 'A 內容'], ['102', 'B 內容']]);
+  await expect(page.locator('#v5TopStatus')).toContainText('已隔離');
+  expect(await page.evaluate(() => ({
+    accepted: window.MonthlyV7App.client.snapshot.legacyLocalRecovery.hasAcceptedRecovery,
+    draftCount: reportData.filter((row) => window.MonthlyV7App.client.readDraft('module', row._v7Id)).length
+  }))).toEqual({ accepted: false, draftCount: 0 });
+
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+  const before = await (await request.get('/__fake_state')).json();
+  await page.locator('#v5TopStatus button[onclick="v5SaveChangesToCloud()"] >> visible=true').click();
+  await expect(page.locator('#v5TopStatus')).toContainText('不會上傳或重建', { timeout: 30000 });
+  const after = await (await request.get('/__fake_state')).json();
+
+  expect(after.modules).toEqual(before.modules);
+  expect({
+    title: after.report.title,
+    date: after.report.date,
+    period: after.report.period
+  }).toEqual({
+    title: before.report.title,
+    date: before.report.date,
+    period: before.report.period
+  });
+  expect(after.report.title).not.toBe('過時月報標題');
+  expect(after.report.date).not.toBe('2026-08-01');
+  expect(after.modules.filter((row) => String(row.payload.id) === '999')).toHaveLength(0);
+  expect(await page.evaluate(async () => ({
+    recovery: await loadFromDB(v7LegacyRecoveryId(window.MonthlyV7App.client.currentReport()?.id)),
+    live: reportData.map((row) => [String(row.id), row.columns?.[0]])
+  }))).toMatchObject({
+    recovery: { v7Recovery: true, recoverySourceId: 'browser-report' },
+    live: [['101', 'A 內容'], ['102', 'B 內容']]
+  });
 });
 
 test('READ_SESSION_INVALID 立即收斂為未登入、保留 site 與本機草稿', async ({ page, request }) => {
@@ -1272,7 +1566,7 @@ test('revision conflict 保留本機草稿，重載後由使用者確認才以�
     };
   });
   expect(redundantDraftComparison.live).toEqual(redundantDraftComparison.baseline);
-  expect(redundantDraftComparison.draft).toEqual(redundantDraftComparison.baseline);
+  expect(redundantDraftComparison.draft).toBeNull();
   await expect.poll(() => page.locator('#v4-cloud-runtime-status').textContent()).toMatch(/已恢復 1 個未提交本機草稿|項目保存衝突：REVISION_CONFLICT/);
 
   let cancellationPrompt = '';

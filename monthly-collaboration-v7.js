@@ -36,8 +36,8 @@
       this.client = null;
       this.configKey = '';
       this.channels = new Set();
-      const configuredTimeout = Number(options.requestTimeoutMs ?? root.MONTHLY_V7_RPC_TIMEOUT_MS ?? 10000);
-      this.requestTimeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 10000;
+      const configuredTimeout = Number(options.requestTimeoutMs ?? root.MONTHLY_V7_RPC_TIMEOUT_MS ?? 30000);
+      this.requestTimeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 30000;
     }
 
     async withTimeout(promise, operationName) {
@@ -145,6 +145,15 @@
 
     clientHost() {
       return {
+        getLocalEntity: async (...args) => typeof this.host.getLocalEntity === 'function'
+          ? this.host.getLocalEntity(...args)
+          : null,
+        getLegacyLocalState: async (...args) => typeof this.host.getLegacyLocalState === 'function'
+          ? this.host.getLegacyLocalState(...args)
+          : null,
+        clearLegacyRecovery: async (...args) => typeof this.host.clearLegacyRecovery === 'function'
+          ? this.host.clearLegacyRecovery(...args)
+          : false,
         applyBundle: async (bundle, snapshot) => {
           if (typeof this.host.applyBundle === 'function') await this.host.applyBundle(bundle, snapshot);
         },
@@ -199,6 +208,12 @@
 
     isActive() { return !!(this.client && this.client.isActive()); }
     isSiteUnlocked() { return !!(this.client && this.client.isSiteUnlocked()); }
+    isWriteReady() {
+      if (!this.client) return false;
+      return typeof this.client.isWriteReady === 'function'
+        ? !!this.client.isWriteReady()
+        : !!this.client.currentUser?.();
+    }
     currentUser() { return this.client ? this.client.currentUser() : null; }
     currentReport() { return this.client ? this.client.currentReport() : null; }
 
@@ -434,17 +449,53 @@
 
     async persistReportData(items, options = {}) {
       if (!this.isActive()) return { mode: 'legacy' };
-      if (!this.currentUser()) {
+      if (!this.isWriteReady()) {
         this.setStatus('本機草稿已保存；請登入後再提交逐項變更。', 'warn');
         return { mode: 'v7', localOnly: true };
       }
       const liveItems = Array.isArray(items) ? items : [];
+      if (this.client.snapshot?.legacyLocalRecovery && options.confirmLegacyRecovery !== true) {
+        const baseline = this.baselineModuleMap();
+        for (const item of liveItems) {
+          const entityId = String(item?._v7Id || '');
+          const row = baseline.get(entityId);
+          if (!entityId || !row) continue;
+          const payload = this.client.modulePayload(item);
+          const existing = this.client.readDraft('module', entityId);
+          if (!existing && canonical(payload) === canonical(row.payload)) continue;
+          this.client.saveDraft(
+            'module', entityId, payload,
+            Number(existing?.baseRevision ?? item._v7Revision ?? row.revision ?? 0),
+            existing?.supersedesOperation
+              ? { supersedesOperation: existing.supersedesOperation }
+              : {}
+          );
+        }
+        const accepted = this.client.snapshot.legacyLocalRecovery.hasAcceptedRecovery === true;
+        this.setStatus(accepted
+          ? '已依可信證據救回切換前內容；禁止背景自動提交，請人工確認後按「保存修改」。'
+          : '切換前本機候選缺少可信 freshness 證據，已隔離且不會由一般保存上傳或重建。', 'warn');
+        return { mode: 'v7', localOnly: true, recoveryPending: true };
+      }
       return this.enqueue(async (operationContext) => {
         if (!this.client.snapshot) {
           await this.client.loadSnapshot();
           this.assertOperationContext(operationContext, 'persist_report_data');
         }
         let baseline = this.baselineModuleMap();
+        const createReplay = typeof this.client.reconcilePendingCreateModule === 'function'
+          ? await this.client.reconcilePendingCreateModule(liveItems)
+          : null;
+        this.assertOperationContext(operationContext, 'persist_report_data');
+        if (createReplay && createReplay.ok !== true && createReplay.error !== 'LEASE_LOST') {
+          this.client.commandResult(createReplay, 'CREATE_MODULE_FAILED');
+        }
+        if (createReplay && createReplay.ok === true) {
+          const reconciledItem = liveItems.find((item) => String(item?._v7Id || '')
+            === String(createReplay.entityId || createReplay.entity_id || ''));
+          if (reconciledItem) this.syncModuleBaseline(reconciledItem);
+          baseline = this.baselineModuleMap();
+        }
         const liveIds = new Set(liveItems.map((item) => item && item._v7Id).filter(Boolean));
         const deletedRows = Array.from(baseline.values()).filter((row) => !liveIds.has(row.id));
         for (const item of liveItems.filter((entry) => !entry._v7Id)) {
@@ -506,7 +557,7 @@
 
     async persistReportMeta(meta) {
       if (!this.isActive()) return { mode: 'legacy' };
-      if (!this.currentUser()) return { mode: 'v7', localOnly: true };
+      if (!this.isWriteReady()) return { mode: 'v7', localOnly: true };
       const report = this.currentReport();
       const nextMeta = {
         title: String(meta && meta.title || report && report.title || ''),
@@ -588,7 +639,7 @@
 
     async persistRecords(records) {
       if (!this.isActive()) return { mode: 'legacy' };
-      if (!this.currentUser()) {
+      if (!this.isWriteReady()) {
         this.setStatus('資料記錄只保存為本機草稿；請先登入。', 'warn');
         return { mode: 'v7', localOnly: true };
       }

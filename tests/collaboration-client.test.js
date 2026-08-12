@@ -84,6 +84,37 @@ test('session operation context 綁定 generation、actor 與 session IDs', asyn
   });
 });
 
+test('Browser adapter 轉交本機實體與 legacy 救援 hooks 給核心 client', async () => {
+  const calls = [];
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  app.setHost({
+    async getLocalEntity(...args) {
+      calls.push(['local', ...args]);
+      return { id: args[1], title: '本機內容' };
+    },
+    async getLegacyLocalState(snapshot) {
+      calls.push(['legacy', snapshot.report.id]);
+      return { fileId: 'legacy-report', modules: [{ id: 101 }] };
+    },
+    async clearLegacyRecovery(reportId) {
+      calls.push(['clear', reportId]);
+      return true;
+    }
+  });
+
+  const host = app.clientHost();
+  assert.deepEqual(await host.getLocalEntity('module', 'm1'), { id: 'm1', title: '本機內容' });
+  assert.deepEqual(await host.getLegacyLocalState({ report: { id: 'r1' } }), {
+    fileId: 'legacy-report', modules: [{ id: 101 }]
+  });
+  assert.equal(await host.clearLegacyRecovery('r1'), true);
+  assert.deepEqual(calls, [
+    ['local', 'module', 'm1'],
+    ['legacy', 'r1'],
+    ['clear', 'r1']
+  ]);
+});
+
 test('Supabase RPC 超時會明確失敗而不是讓保存狀態永久等待', async () => {
   const transport = new SupabaseV7Transport(null, { requestTimeoutMs: 25 });
   transport.client = { rpc: () => new Promise(() => {}) };
@@ -136,6 +167,349 @@ test('site/user session 綁定分頁 ID，登入後套用不含 hash 的 normali
   const loginCall = transport.calls.find((call) => call.name === 'monthly_v7_login_user');
   assert.equal(siteCall.params.p_client_session_id, 'tab-session-1');
   assert.equal(loginCall.params.p_client_session_id, 'tab-session-1');
+});
+
+test('登入 RPC 成功但 snapshot 失敗時不得留下半登入身份或啟用雲端寫入', async () => {
+  const sessions = memoryStorage();
+  const snapshotError = new Error('RPC_TIMEOUT');
+  snapshotError.code = 'RPC_TIMEOUT';
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: {
+      ok: true, user_session_id: 'user-session-1',
+      user: { id: 'u1', username: 'owner', displayName: 'Owner', role: 'owner' }
+    },
+    monthly_v7_get_snapshot: () => { throw snapshotError; }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: memoryStorage(), idFactory: () => 'tab-login-failure'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+
+  await assert.rejects(client.login('owner', 'owner-pass'), (error) => {
+    assert.equal(error.code, 'RPC_TIMEOUT');
+    assert.equal(error.loginStage, 'snapshot');
+    assert.equal(error.credentialsAccepted, true);
+    return true;
+  });
+  assert.equal(client.currentUser(), null);
+  assert.equal(client.isWriteReady(), false);
+  assert.equal(client.userSession, null);
+  assert.equal(sessions.getItem('monthly_v7_user_session'), null);
+  assert.equal(sessions.getItem('monthly_v7_user_projection'), null);
+});
+
+test('恢復的舊 session 在 snapshot 驗證完成前不得被視為已登入', async () => {
+  const sessions = memoryStorage();
+  sessions.setItem('monthly_v7_site_session', JSON.stringify({ id: 'site-old' }));
+  sessions.setItem('monthly_v7_user_session', JSON.stringify({ id: 'user-old' }));
+  sessions.setItem('monthly_v7_user_projection', JSON.stringify({ id: 'u1', username: 'owner', role: 'owner' }));
+  const client = new MonthlyV7Client({
+    transport: fakeTransport({
+      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 }
+    }),
+    sessionStorage: sessions,
+    draftStorage: memoryStorage()
+  });
+
+  await client.initialize({ workspaceKey: 'workspace-test' });
+
+  assert.equal(client.currentUser(), null);
+  assert.equal(client.isWriteReady(), false);
+  assert.equal(client.userSession.id, 'user-old');
+});
+
+test('首次 V7 只恢復來源一致且較新的既有項目，本機獨有項隔離且登入後仍不進 live bundle', async () => {
+  const drafts = memoryStorage();
+  const bundles = [];
+  const sourceTimestamp = Date.parse('2026-08-11T00:00:00.000Z');
+  const snapshot = {
+    ok: true, workspaceId: 'w1', authorityState: 'NORMALIZED_ACTIVE', authorityEpoch: 2,
+    watermark: 9,
+    report: { id: 'r1', legacyFileId: 'legacy-report', title: '月報', period: {}, revision: 2 },
+    modules: [
+      { id: 'm2', legacyItemId: '2', sortRank: 1, revision: 2, updatedAt: '2026-08-10T00:00:00.000Z', payload: { id: 2, title: '雲端二', columns: ['雲端二'] } },
+      { id: 'm1', legacyItemId: '1', sortRank: 2, revision: 3, updatedAt: '2026-08-10T00:00:00.000Z', payload: { id: 1, title: '雲端一', columns: ['雲端一'] } }
+    ],
+    records: [], users: [{ id: 'u1', username: 'owner', role: 'owner' }]
+  };
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: () => JSON.parse(JSON.stringify(snapshot))
+  });
+  const client = new MonthlyV7Client({
+    transport,
+    sessionStorage: memoryStorage(),
+    draftStorage: drafts,
+    host: {
+      getLegacyLocalState: async () => ({
+        fileId: 'legacy-report', recoverySourceId: 'legacy-report', timestamp: sourceTimestamp,
+        modules: [
+          { id: 1, title: '本機一', columns: ['本機內容一'] },
+          { id: 2, title: '本機二', columns: ['本機內容二'] },
+          { id: 999, title: '本機新增', columns: ['不能遺失'] }
+        ]
+      }),
+      applyBundle: async (bundle) => bundles.push(bundle)
+    }
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.loadSnapshot();
+  assert.equal(client.snapshot.workspace.id, 'w1');
+  assert.deepEqual(bundles.at(-1).report.modules.map((row) => [String(row.id), row.columns[0]]), [
+    ['1', '本機內容一'], ['2', '本機內容二']
+  ]);
+  assert.equal(client.snapshot.legacyLocalRecovery.quarantinedCount, 1);
+  assert.equal(client.snapshot.legacyLocalRecovery.hasAcceptedRecovery, true);
+  assert.deepEqual(client.snapshot.localOnlyModules, []);
+
+  await client.login('owner', 'owner-pass');
+
+  assert.deepEqual(bundles.at(-1).report.modules.map((row) => [String(row.id), row.columns[0]]), [
+    ['1', '本機內容一'], ['2', '本機內容二']
+  ]);
+  assert.equal(client.currentUser().role, 'owner');
+  assert.ok(drafts.getItem('monthly_v7_draft:module:m1'));
+  assert.ok(drafts.getItem('monthly_v7_draft:module:m2'));
+});
+
+test('救援待確認期間的後續既有項目編輯在 full snapshot 後仍保留且零寫入', async () => {
+  const drafts = memoryStorage();
+  const bundles = [];
+  let liveItem = null;
+  const snapshot = {
+    ok: true, workspaceId: 'w1', authorityState: 'NORMALIZED_ACTIVE', authorityEpoch: 2,
+    watermark: 9,
+    report: { id: 'r1', legacyFileId: 'legacy-report', title: '月報', period: {}, revision: 2 },
+    modules: [{
+      id: 'm1', legacyItemId: '1', sortRank: 1, revision: 3,
+      updatedAt: '2026-08-10T00:00:00.000Z',
+      payload: { id: 1, title: '雲端一', columns: ['雲端內容一'] }
+    }],
+    records: [], users: [{ id: 'u1', username: 'owner', role: 'owner' }]
+  };
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: () => JSON.parse(JSON.stringify(snapshot))
+  });
+  const app = new MonthlyV7BrowserApp({ transport });
+  await app.initialize({ workspaceKey: 'workspace-test' }, {
+    getLegacyLocalState: async () => ({
+      fileId: 'legacy-report', recoverySourceId: 'legacy-report',
+      timestamp: Date.parse('2026-08-11T00:00:00.000Z'),
+      modules: [{ id: 1, title: '初始救援一', columns: ['初始救援內容一'] }]
+    }),
+    getLocalEntity: async (entityType, entityId) => (
+      entityType === 'module' && entityId === 'm1' && liveItem
+        ? JSON.parse(JSON.stringify(liveItem))
+        : null
+    ),
+    applyBundle: async (bundle) => bundles.push(JSON.parse(JSON.stringify(bundle)))
+  });
+  app.client.draftStorage = drafts;
+  await app.openSite('gate');
+  await app.client.login('owner', 'owner-pass');
+
+  liveItem = JSON.parse(JSON.stringify(bundles.at(-1).report.modules[0]));
+  liveItem.title = '救援後最新編輯';
+  liveItem.columns = ['救援後最新內容'];
+  const pending = await app.persistReportData([liveItem], { confirmLegacyRecovery: false });
+
+  assert.equal(pending.recoveryPending, true);
+  assert.equal(transport.calls.some((call) => call.name === 'monthly_v7_save_module'), false);
+  assert.equal(app.client.readDraft('module', 'm1').payload.title, '救援後最新編輯');
+  await app.client.loadSnapshot();
+  assert.equal(bundles.at(-1).report.modules[0].title, '救援後最新編輯');
+  assert.equal(bundles.at(-1).report.modules[0].columns[0], '救援後最新內容');
+  assert.equal(transport.calls.some((call) => call.name === 'monthly_v7_save_module'), false);
+});
+
+test('legacy 來源不符或本機時間不晚於 authority 時只隔離，不建立 draft 或改變 live 內容', async () => {
+  for (const legacyLocal of [
+    {
+      fileId: 'legacy-report', recoverySourceId: 'other-source',
+      timestamp: Date.parse('2026-08-12T00:00:00.000Z'),
+      modules: [{ id: 1, title: '來源不符內容', columns: ['不可套用'] }]
+    },
+    {
+      fileId: 'legacy-report', recoverySourceId: 'legacy-report',
+      timestamp: Date.parse('2026-08-09T00:00:00.000Z'),
+      modules: [{ id: 1, title: '較舊內容', columns: ['不可套用'] }]
+    }
+  ]) {
+    const drafts = memoryStorage();
+    let bundle;
+    const client = new MonthlyV7Client({
+      transport: fakeTransport({
+        monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+        monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+        monthly_v7_get_snapshot: {
+          ok: true, watermark: 1,
+          report: { id: 'r1', legacyFileId: 'legacy-report', title: '雲端月報', period: {}, revision: 1 },
+          modules: [{
+            id: 'm1', legacyItemId: '1', sortRank: 1, revision: 4,
+            updatedAt: '2026-08-10T00:00:00.000Z',
+            payload: { id: 1, title: '雲端權威', columns: ['雲端內容'] }
+          }],
+          records: [], users: []
+        }
+      }),
+      sessionStorage: memoryStorage(), draftStorage: drafts,
+      host: {
+        getLegacyLocalState: async () => legacyLocal,
+        applyBundle: async (value) => { bundle = value; }
+      }
+    });
+    await client.initialize({ workspaceKey: 'workspace-test' });
+    await client.openSite('gate');
+    await client.loadSnapshot();
+
+    assert.equal(bundle.report.modules[0].title, '雲端權威');
+    assert.equal(bundle.report.modules[0].columns[0], '雲端內容');
+    assert.equal(client.readDraft('module', 'm1'), null);
+    assert.deepEqual(client.snapshot.localOnlyModules, []);
+    assert.equal(client.snapshot.legacyLocalRecovery.hasAcceptedRecovery, false);
+    assert.ok(client.snapshot.legacyLocalRecovery.quarantinedCount >= 1);
+  }
+});
+
+test('snapshot 只以同 actor 的有效 V7 reorder pending 恢復顯示順序', async () => {
+  const drafts = memoryStorage();
+  const operationId = '00000000-0000-4000-8000-000000000810';
+  drafts.setItem('monthly_v7_pending:reorder_modules:r1', JSON.stringify({
+    operationId,
+    signature: JSON.stringify({
+      p_workspace_key: 'workspace-test', p_user_session_id: 'user-old', p_client_session_id: 'tab-old',
+      p_report_id: 'r1', p_expected_report_revision: 3,
+      p_lease_id: 'lease-old', p_fencing_token: 4,
+      p_module_order: ['m2', 'm1']
+    }),
+    createdAt: '2026-08-12T00:00:00.000Z', actorUserId: 'u1'
+  }));
+  let bundle;
+  const client = new MonthlyV7Client({
+    transport: fakeTransport({
+      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+      monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+      monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+      monthly_v7_get_snapshot: {
+        ok: true, watermark: 1,
+        report: { id: 'r1', legacyFileId: 'legacy-report', title: '月報', revision: 3, period: {} },
+        modules: [
+          { id: 'm1', legacyItemId: '1', sortRank: 1, revision: 1, payload: { id: 1, title: 'A' } },
+          { id: 'm2', legacyItemId: '2', sortRank: 2, revision: 1, payload: { id: 2, title: 'B' } }
+        ],
+        records: [], users: [{ id: 'u1', username: 'owner', role: 'owner' }]
+      }
+    }),
+    sessionStorage: memoryStorage(), draftStorage: drafts,
+    host: { applyBundle: async (value) => { bundle = value; } }
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  assert.deepEqual(bundle.report.modules.map((row) => row._v7Id), ['m2', 'm1']);
+  assert.ok(drafts.getItem('monthly_v7_pending:reorder_modules:r1'));
+});
+
+test('連續登入時舊 attempt 的 snapshot 晚失敗不得清除後繼成功 session', async () => {
+  const sessions = memoryStorage();
+  let resolveSnapshotA;
+  let rejectSnapshotA;
+  let snapshotCalls = 0;
+  const snapshotA = new Promise((resolve, reject) => {
+    resolveSnapshotA = resolve;
+    rejectSnapshotA = reject;
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: (params) => ({
+      ok: true,
+      user_session_id: params.p_username === 'a' ? 'session-a' : 'session-b',
+      user: { id: params.p_username === 'a' ? 'u-a' : 'u-b', username: params.p_username, role: 'owner' }
+    }),
+    monthly_v7_get_snapshot: () => {
+      snapshotCalls += 1;
+      if (snapshotCalls === 1) return snapshotA;
+      return {
+        ok: true, watermark: 2,
+        report: { id: 'r1', revision: 2 }, modules: [], records: [], users: []
+      };
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: memoryStorage(), idFactory: () => 'tab-login-race'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+
+  const loginA = client.login('a', 'pass');
+  await new Promise((resolve) => setImmediate(resolve));
+  const loginB = client.login('b', 'pass');
+  const userB = await loginB;
+  rejectSnapshotA(Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' }));
+  await assert.rejects(loginA, (error) => error.code === 'STALE_LOGIN_ATTEMPT' || error.code === 'RPC_TIMEOUT');
+
+  assert.equal(userB.username, 'b');
+  assert.equal(client.currentUser().username, 'b');
+  assert.equal(client.userSession.id, 'session-b');
+  assert.equal(client.isWriteReady(), true);
+  assert.equal(JSON.parse(sessions.getItem('monthly_v7_user_session')).id, 'session-b');
+  assert.equal(JSON.parse(sessions.getItem('monthly_v7_user_projection')).username, 'b');
+  resolveSnapshotA?.({ ok: true });
+});
+
+test('連續登入時舊 attempt 即使 snapshot 先成功也不得覆蓋後發登入', async () => {
+  let resolveSnapshotA;
+  let resolveSnapshotB;
+  let snapshotCalls = 0;
+  const snapshotA = new Promise((resolve) => { resolveSnapshotA = resolve; });
+  const snapshotB = new Promise((resolve) => { resolveSnapshotB = resolve; });
+  const snapshot = (revision) => ({
+    ok: true, watermark: revision,
+    report: { id: 'r1', revision }, modules: [], records: [], users: []
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: (params) => ({
+      ok: true,
+      user_session_id: params.p_username === 'a' ? 'session-a' : 'session-b',
+      user: { id: params.p_username === 'a' ? 'u-a' : 'u-b', username: params.p_username, role: 'owner' }
+    }),
+    monthly_v7_get_snapshot: () => {
+      snapshotCalls += 1;
+      return snapshotCalls === 1 ? snapshotA : snapshotB;
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: memoryStorage(), idFactory: () => 'tab-login-race-2'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+
+  const loginA = client.login('a', 'pass');
+  await new Promise((resolve) => setImmediate(resolve));
+  const loginB = client.login('b', 'pass');
+  resolveSnapshotA(snapshot(1));
+  await assert.rejects(loginA, (error) => error.code === 'STALE_LOGIN_ATTEMPT');
+  resolveSnapshotB(snapshot(2));
+  const userB = await loginB;
+
+  assert.equal(userB.username, 'b');
+  assert.equal(client.currentUser().username, 'b');
+  assert.equal(client.userSession.id, 'session-b');
+  assert.equal(client.currentReport().revision, 2);
+  assert.equal(client.isWriteReady(), true);
 });
 
 test('claimLease 被占用時帶出持鎖者顯示名稱，不暴露 LEASE_HELD 技術碼', async () => {
@@ -246,7 +620,8 @@ test('openSite 建立新 site session 前清除舊 user session 與身份投影'
   });
   const client = new MonthlyV7Client({ transport, sessionStorage: sessions, draftStorage: memoryStorage() });
   await client.initialize({ workspaceKey: 'workspace-test' });
-  assert.equal(client.currentUser().username, 'owner');
+  assert.equal(client.currentUser(), null);
+  assert.equal(client.isWriteReady(), false);
 
   await client.openSite('new-gate-password');
 
@@ -823,7 +1198,13 @@ test('首次 snapshot 載入也會恢復既有 module 草稿與舊 base revision
     }
   });
   const client = new MonthlyV7Client({
-    transport, sessionStorage: memoryStorage(), draftStorage: drafts, idFactory: () => 'tab-1'
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts, idFactory: () => 'tab-1',
+    host: {
+      getLegacyLocalState: async () => ({
+        fileId: 'legacy', timestamp: 1,
+        modules: [{ id: 101, title: '較舊 IndexedDB 內容', columns: ['舊本機內容'] }]
+      })
+    }
   });
   await client.initialize({ workspaceKey: 'workspace-test' });
   await client.openSite('gate');
@@ -1722,7 +2103,217 @@ test('record create/save/delete 使用 server UUID 與逐筆 lease/CAS', async (
   assert.equal(save.params.p_fencing_token, 3);
 });
 
-test('report metadata、structure 與 KPI batch 使用各自短 lease 並更新 server revisions', async () => {
+test('create module lost-ACK 只在唯一相同 payload 时重播旧 operation 并挂回 server identity', async () => {
+  const drafts = memoryStorage();
+  const oldOperationId = '00000000-0000-4000-8000-000000000805';
+  const payload = { id: 999, title: '本機新增', columns: ['內容'] };
+  const transport = fakeTransport({
+    monthly_v7_create_module: (params) => ({
+      ok: true, entityId: 'm-new', revision: 1, reportRevision: 4,
+      sortRank: 3, operationId: params.p_operation_id, watermark: 11
+    })
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-current', operationIdFactory: () => 'must-not-create-new-operation-id'
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-current' };
+  client.userSession = { id: 'user-current' };
+  client.user = { id: 'u1', username: 'owner', role: 'owner' };
+  client.snapshot = {
+    report: { id: 'r1', revision: 4, _serverRevision: 4 },
+    modules: [], records: [], users: []
+  };
+  const item = { ...payload };
+  drafts.setItem('monthly_v7_pending:create_module:r1', JSON.stringify({
+    operationId: oldOperationId,
+    signature: JSON.stringify({
+      p_workspace_key: 'workspace-test', p_user_session_id: 'user-old', p_client_session_id: 'tab-current',
+      p_report_id: 'r1', p_expected_report_revision: 3,
+      p_lease_id: 'lease-old', p_fencing_token: 4, p_payload: payload
+    }),
+    createdAt: '2026-08-12T00:00:00.000Z', actorUserId: 'u1'
+  }));
+
+  const result = await client.reconcilePendingCreateModule([item]);
+
+  assert.equal(result.ok, true);
+  assert.equal(item._v7Id, 'm-new');
+  assert.equal(item._v7Revision, 1);
+  assert.equal(client.currentReport()._serverRevision, 4);
+  assert.equal(client.snapshot.modules[0].id, 'm-new');
+  assert.equal(client.snapshot.modules[0].payload.id, 999);
+  assert.deepEqual(transport.calls.map((call) => call.name), ['monthly_v7_create_module']);
+  assert.equal(transport.calls[0].params.p_operation_id, oldOperationId);
+  assert.equal(transport.calls[0].params.p_lease_id, 'lease-old');
+  assert.equal(drafts.getItem('monthly_v7_pending:create_module:r1'), null);
+});
+
+test('create module pending 與目前 payload 不同時 fail closed 且零 RPC', async () => {
+  const drafts = memoryStorage();
+  const transport = fakeTransport({});
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-current'
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-current' };
+  client.userSession = { id: 'user-current' };
+  client.user = { id: 'u1', username: 'owner', role: 'owner' };
+  client.snapshot = { report: { id: 'r1', revision: 4, _serverRevision: 4 }, modules: [], records: [], users: [] };
+  drafts.setItem('monthly_v7_pending:create_module:r1', JSON.stringify({
+    operationId: '00000000-0000-4000-8000-000000000806',
+    signature: JSON.stringify({
+      p_workspace_key: 'workspace-test', p_user_session_id: 'user-old', p_client_session_id: 'tab-current',
+      p_report_id: 'r1', p_expected_report_revision: 3,
+      p_lease_id: 'lease-old', p_fencing_token: 4,
+      p_payload: { id: 999, title: '舊 intent' }
+    }),
+    createdAt: '2026-08-12T00:00:00.000Z', actorUserId: 'u1'
+  }));
+
+  await assert.rejects(
+    () => client.reconcilePendingCreateModule([{ id: 999, title: '目前不同 intent' }]),
+    (error) => error.code === 'PENDING_OPERATION_UNRESOLVED'
+  );
+  assert.equal(transport.calls.length, 0);
+  assert.ok(drafts.getItem('monthly_v7_pending:create_module:r1'));
+});
+
+test('reorder pending 已 COMMITTED 時先重播同 operation，不 claim 新 lease 或重複增加 revision', async () => {
+  const drafts = memoryStorage();
+  const oldOperationId = '00000000-0000-4000-8000-000000000801';
+  const transport = fakeTransport({
+    monthly_v7_reorder_modules: (params) => ({
+      ok: true, entityType: 'report_structure', entityId: 'r1',
+      reportRevision: 4, operationId: params.p_operation_id, watermark: 9
+    })
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-current', operationIdFactory: () => 'must-not-create-new-operation-id'
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-current' };
+  client.userSession = { id: 'user-current' };
+  client.user = { id: 'u1', username: 'owner', role: 'owner' };
+  client.snapshot = {
+    report: { id: 'r1', revision: 2, _serverRevision: 3 },
+    modules: [{ id: 'm1' }, { id: 'm2' }], records: [], users: []
+  };
+  drafts.setItem('monthly_v7_pending:reorder_modules:r1', JSON.stringify({
+    operationId: oldOperationId,
+    signature: JSON.stringify({
+      p_workspace_key: 'workspace-test', p_user_session_id: 'user-old', p_client_session_id: 'tab-current',
+      p_report_id: 'r1', p_expected_report_revision: 3,
+      p_lease_id: 'lease-old', p_fencing_token: 4,
+      p_module_order: ['m2', 'm1']
+    }),
+    createdAt: '2026-08-12T00:00:00.000Z', actorUserId: 'u1'
+  }));
+
+  const result = await client.reorderModules([{ _v7Id: 'm2' }, { _v7Id: 'm1' }]);
+
+  assert.equal(result.ok, true);
+  assert.equal(client.currentReport().revision, 4);
+  assert.deepEqual(transport.calls.map((call) => call.name), ['monthly_v7_reorder_modules']);
+  assert.equal(transport.calls[0].params.p_operation_id, oldOperationId);
+  assert.equal(transport.calls[0].params.p_lease_id, 'lease-old');
+  assert.equal(drafts.getItem('monthly_v7_pending:reorder_modules:r1'), null);
+});
+
+test('reorder pending 舊 lease 明確失效後才 claim 新 lease 並建立新 operation', async () => {
+  const drafts = memoryStorage();
+  const oldOperationId = '00000000-0000-4000-8000-000000000802';
+  const newOperationId = '00000000-0000-4000-8000-000000000803';
+  const transport = fakeTransport({
+    monthly_v7_reorder_modules: (params) => params.p_operation_id === oldOperationId
+      ? { ok: false, error: 'LEASE_LOST' }
+      : { ok: true, reportRevision: 4, operationId: newOperationId, watermark: 10 },
+    monthly_v7_claim_lease: {
+      ok: true, entity_type: 'report_structure', entity_id: 'r1',
+      lease_id: 'lease-new', fencing_token: 8, holder_user_id: 'u1', client_session_id: 'tab-current'
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-current', operationIdFactory: () => newOperationId
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-current' };
+  client.userSession = { id: 'user-current' };
+  client.user = { id: 'u1', username: 'owner', role: 'owner' };
+  client.snapshot = {
+    report: { id: 'r1', revision: 2, _serverRevision: 3 },
+    modules: [{ id: 'm1' }, { id: 'm2' }], records: [], users: []
+  };
+  drafts.setItem('monthly_v7_pending:reorder_modules:r1', JSON.stringify({
+    operationId: oldOperationId,
+    signature: JSON.stringify({
+      p_workspace_key: 'workspace-test', p_user_session_id: 'user-old', p_client_session_id: 'tab-current',
+      p_report_id: 'r1', p_expected_report_revision: 3,
+      p_lease_id: 'lease-old', p_fencing_token: 4,
+      p_module_order: ['m2', 'm1']
+    }),
+    createdAt: '2026-08-12T00:00:00.000Z', actorUserId: 'u1'
+  }));
+
+  const result = await client.reorderModules([{ _v7Id: 'm2' }, { _v7Id: 'm1' }]);
+
+  assert.equal(result.ok, true);
+  assert.equal(client.currentReport().revision, 4);
+  assert.deepEqual(transport.calls.map((call) => call.name), [
+    'monthly_v7_reorder_modules', 'monthly_v7_claim_lease', 'monthly_v7_reorder_modules'
+  ]);
+  const reorderCalls = transport.calls.filter((call) => call.name === 'monthly_v7_reorder_modules');
+  assert.equal(reorderCalls[0].params.p_operation_id, oldOperationId);
+  assert.equal(reorderCalls[0].params.p_lease_id, 'lease-old');
+  assert.equal(reorderCalls[1].params.p_operation_id, newOperationId);
+  assert.equal(reorderCalls[1].params.p_lease_id, 'lease-new');
+  assert.equal(drafts.getItem('monthly_v7_pending:reorder_modules:r1'), null);
+});
+
+test('reorder pending 的 module order 與目前不同時 fail closed 且零 RPC', async () => {
+  const drafts = memoryStorage();
+  const transport = fakeTransport({});
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-current', operationIdFactory: () => 'must-not-create-new-operation-id'
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-current' };
+  client.userSession = { id: 'user-current' };
+  client.user = { id: 'u1', username: 'owner', role: 'owner' };
+  client.snapshot = {
+    report: { id: 'r1', revision: 2, _serverRevision: 3 },
+    modules: [{ id: 'm1' }, { id: 'm2' }], records: [], users: []
+  };
+  drafts.setItem('monthly_v7_pending:reorder_modules:r1', JSON.stringify({
+    operationId: '00000000-0000-4000-8000-000000000804',
+    signature: JSON.stringify({
+      p_workspace_key: 'workspace-test', p_user_session_id: 'user-old', p_client_session_id: 'tab-current',
+      p_report_id: 'r1', p_expected_report_revision: 3,
+      p_lease_id: 'lease-old', p_fencing_token: 4,
+      p_module_order: ['m1', 'm2']
+    }),
+    createdAt: '2026-08-12T00:00:00.000Z', actorUserId: 'u1'
+  }));
+
+  await assert.rejects(
+    () => client.reorderModules([{ _v7Id: 'm2' }, { _v7Id: 'm1' }]),
+    (error) => error.code === 'PENDING_OPERATION_UNRESOLVED'
+  );
+  assert.equal(transport.calls.length, 0);
+  assert.ok(drafts.getItem('monthly_v7_pending:reorder_modules:r1'));
+});
+
+test('report metadata、structure 與 KPI batch 使用各自短 lease並更新 server revisions', async () => {
   let claimFence = 0;
   const transport = fakeTransport({
     monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
@@ -1750,12 +2341,16 @@ test('report metadata、structure 與 KPI batch 使用各自短 lease 並更新 
   await client.login('owner', 'pass');
   await client.saveReportMeta({ title: '新月報', date: '2026-08-11', period: { startMonth: 7 } });
   assert.equal(client.currentReport().revision, 2);
+  assert.equal(client.currentReport()._serverRevision, 2);
   const created = await client.createModule({ title: 'B', columns: [''] });
   assert.equal(created._v7Id, 'm2');
   assert.equal(client.currentReport().revision, 3);
   const first = { _v7Id: 'm1', _v7Revision: 1, title: 'A2' };
   await client.reorderModules([created, first]);
   assert.equal(client.currentReport().revision, 4);
+  const reorder = transport.calls.find((call) => call.name === 'monthly_v7_reorder_modules');
+  assert.deepEqual(reorder.params.p_module_order, ['m2', 'm1']);
+  assert.equal(Object.hasOwn(reorder.params, 'p_order'), false);
   await client.saveModuleBatch([first, created]);
   assert.deepEqual([first._v7Revision, created._v7Revision], [2, 2]);
   await client.deleteModule(created);

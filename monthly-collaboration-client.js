@@ -33,6 +33,9 @@
       this.status = { mode: 'unknown', authorityState: '', authorityEpoch: 0, minimumClientVersion: 0 };
       this.heartbeatTimer = null;
       this.sessionGeneration = 0;
+      this.userSessionPendingValidation = false;
+      this.loginAttemptEpoch = 0;
+      this.snapshotCommitQueue = Promise.resolve();
     }
 
     sessionErrorCode(value) {
@@ -92,6 +95,25 @@
       return error;
     }
 
+    staleLoginAttemptError(attemptId) {
+      const error = new Error('STALE_LOGIN_ATTEMPT');
+      error.code = 'STALE_LOGIN_ATTEMPT';
+      error.loginAttemptId = Number(attemptId);
+      error.currentLoginAttemptId = Number(this.loginAttemptEpoch);
+      error.silent = true;
+      return error;
+    }
+
+    isLoginAttemptCurrent(attemptId, siteSessionId = '') {
+      return Number(attemptId) === Number(this.loginAttemptEpoch)
+        && (!siteSessionId || String(this.siteSession && this.siteSession.id || '') === String(siteSessionId));
+    }
+
+    assertLoginAttempt(attemptId, siteSessionId = '') {
+      if (this.isLoginAttemptCurrent(attemptId, siteSessionId)) return attemptId;
+      throw this.staleLoginAttemptError(attemptId);
+    }
+
     async rpc(name, params) {
       const requestGeneration = this.sessionGeneration;
       try {
@@ -134,13 +156,17 @@
         try { this.siteSession = JSON.parse(this.sessionStorage.getItem('monthly_v7_site_session') || 'null'); } catch { this.siteSession = null; }
         try { this.userSession = JSON.parse(this.sessionStorage.getItem('monthly_v7_user_session') || 'null'); } catch { this.userSession = null; }
         try { this.user = JSON.parse(this.sessionStorage.getItem('monthly_v7_user_projection') || 'null'); } catch { this.user = null; }
+        this.userSessionPendingValidation = !!(this.userSession && this.userSession.id && this.user);
       }
       return Object.assign({}, this.status);
     }
 
     isActive() { return this.status.mode === 'v7'; }
     isSiteUnlocked() { return this.isActive() && !!(this.siteSession && this.siteSession.id); }
-    currentUser() { return this.userSession && this.userSession.id && this.user ? Object.assign({}, this.user) : null; }
+    isWriteReady() {
+      return !!(this.userSession && this.userSession.id && this.user && !this.userSessionPendingValidation);
+    }
+    currentUser() { return this.isWriteReady() ? Object.assign({}, this.user) : null; }
 
     captureSessionContext() {
       const user = this.currentUser();
@@ -186,22 +212,67 @@
 
     async login(username, password) {
       if (!this.isSiteUnlocked()) throw new Error('SITE_SESSION_REQUIRED');
-      const result = await this.rpc('monthly_v7_login_user', {
-        p_workspace_key: this.config.workspaceKey,
-        p_site_session_id: this.siteSession.id,
-        p_client_session_id: this.clientSessionId,
-        p_username: String(username || '').trim(),
-        p_password: String(password || '')
-      });
+      const attemptId = ++this.loginAttemptEpoch;
+      const siteSessionId = String(this.siteSession.id || '');
+      if (this.userSessionPendingValidation) {
+        this.clearUserSession();
+        this.sessionGeneration += 1;
+      }
+      let result;
+      try {
+        result = await this.transport.rpc('monthly_v7_login_user', {
+          p_workspace_key: this.config.workspaceKey,
+          p_site_session_id: siteSessionId,
+          p_client_session_id: this.clientSessionId,
+          p_username: String(username || '').trim(),
+          p_password: String(password || '')
+        });
+      } catch (error) {
+        this.assertLoginAttempt(attemptId, siteSessionId);
+        this.handleSessionError(error, this.sessionGeneration);
+        throw error;
+      }
+      this.assertLoginAttempt(attemptId, siteSessionId);
+      const sessionCode = this.sessionErrorCode(result);
+      if (sessionCode) {
+        this.handleSessionError(result, this.sessionGeneration);
+        const error = new Error(sessionCode);
+        error.code = sessionCode;
+        error.sessionInvalidHandled = true;
+        error.silent = true;
+        throw error;
+      }
       if (!result || result.ok !== true) throw new Error(result && result.error || 'USER_LOGIN_FAILED');
-      this.userSession = { id: result.user_session_id || result.userSessionId };
-      this.user = Object.assign({}, result.user || {});
+      const provisionalSession = { id: result.user_session_id || result.userSessionId };
+      const provisionalUser = Object.assign({}, result.user || {});
+      this.userSession = provisionalSession;
+      this.user = provisionalUser;
+      this.userSessionPendingValidation = true;
+      this.sessionGeneration += 1;
+      try {
+        await this.loadSnapshot({
+          retryTransient: true,
+          loginAttempt: { attemptId, siteSessionId, userSessionId: provisionalSession.id }
+        });
+        this.assertLoginAttempt(attemptId, siteSessionId);
+        if (String(this.userSession && this.userSession.id || '') !== String(provisionalSession.id)
+          || this.userSessionPendingValidation === true) {
+          throw this.staleLoginAttemptError(attemptId);
+        }
+      } catch (error) {
+        const ownsProvisional = this.isLoginAttemptCurrent(attemptId, siteSessionId)
+          && String(this.userSession && this.userSession.id || '') === String(provisionalSession.id)
+          && this.userSessionPendingValidation === true;
+        if (ownsProvisional) this.clearUserSession('login-snapshot-failed');
+        if (!this.isLoginAttemptCurrent(attemptId, siteSessionId)) throw this.staleLoginAttemptError(attemptId);
+        error.loginStage = 'snapshot';
+        error.credentialsAccepted = true;
+        throw error;
+      }
       if (this.sessionStorage) {
         this.sessionStorage.setItem('monthly_v7_user_session', JSON.stringify(this.userSession));
         this.sessionStorage.setItem('monthly_v7_user_projection', JSON.stringify(this.user));
       }
-      this.sessionGeneration += 1;
-      await this.loadSnapshot();
       return this.currentUser();
     }
 
@@ -224,13 +295,69 @@
       return payload;
     }
 
+    pendingReorderOrder(snapshot) {
+      const reportId = String(snapshot && snapshot.report && snapshot.report.id || '');
+      if (!this.draftStorage || !reportId) return null;
+      const raw = this.draftStorage.getItem(`monthly_v7_pending:reorder_modules:${reportId}`);
+      if (raw === null) return null;
+      try {
+        const pending = JSON.parse(raw);
+        const params = this.validatePendingEnvelope(pending);
+        const actorId = String(this.user && this.user.id || '');
+        const order = params && params.p_module_order;
+        const authorityIds = (snapshot.modules || []).map((row) => String(row.id));
+        const orderIds = Array.isArray(order) ? order.map(String) : [];
+        const exactSet = orderIds.length === authorityIds.length
+          && new Set(orderIds).size === authorityIds.length
+          && authorityIds.every((id) => orderIds.includes(id));
+        if (!actorId || String(pending.actorUserId || '') !== actorId
+          || String(params.p_workspace_key || '') !== String(this.config && this.config.workspaceKey || '')
+          || String(params.p_report_id || '') !== reportId
+          || !Number.isFinite(Number(params.p_expected_report_revision))
+          || !exactSet) return null;
+        return orderIds;
+      } catch (_error) {
+        // Keep malformed or ambiguous pending data untouched. A later write will
+        // surface PENDING_OPERATION_UNRESOLVED; it must never influence display.
+        return null;
+      }
+    }
+
+    applyPendingReorderDisplay(snapshot) {
+      const order = this.pendingReorderOrder(snapshot);
+      if (!order) return false;
+      const ranks = new Map(order.map((id, index) => [id, index + 1]));
+      for (const row of snapshot.modules || []) row._displaySortRank = ranks.get(String(row.id));
+      return true;
+    }
+
     async mergeSnapshotWithProtectedLocal(snapshot) {
       const incoming = this.cloneJson(snapshot, {});
       const previous = this.snapshot || {
         report: this.cloneJson(incoming.report, {}),
         modules: this.cloneJson(incoming.modules, []),
-        records: this.cloneJson(incoming.records, [])
+        records: this.cloneJson(incoming.records, []),
+        localOnlyModules: this.cloneJson(incoming.localOnlyModules, [])
       };
+      // Legacy-only rows are quarantine evidence, never live create intents. Do
+      // not carry localOnlyModules from an older client/snapshot into authority.
+      incoming.localOnlyModules = [];
+      const preserveAcceptedRecoveryOrder = previous.legacyLocalRecovery
+        && previous.legacyLocalRecovery.hasAcceptedRecovery === true
+        && previous.legacyLocalRecovery.orderChanged === true;
+      if (preserveAcceptedRecoveryOrder) {
+        const previousModuleRanks = new Map((previous.modules || []).map((row) => [
+          String(row.id),
+          Number(row._displaySortRank)
+        ]));
+        for (const row of incoming.modules || []) {
+          const previousRank = previousModuleRanks.get(String(row.id));
+          if (Number.isFinite(previousRank)) row._displaySortRank = previousRank;
+        }
+      }
+      if (!incoming.legacyLocalRecovery && previous.legacyLocalRecovery) {
+        incoming.legacyLocalRecovery = this.cloneJson(previous.legacyLocalRecovery, null);
+      }
       const protectedTargets = new Map();
       const protect = (entityType, entityId) => {
         if (!entityType || !entityId) return;
@@ -288,6 +415,7 @@
         if (entityType === 'report_meta' && incoming.report && previous.report) {
           const server = this.cloneJson(incoming.report, {});
           const meta = this.cloneJson(draft && draft.payload, null) || this.cloneJson(local, null) || this.cloneJson(previous.report, {});
+          incoming.report._serverRevision = Number(server.revision || 0);
           for (const field of ['title', 'date', 'period', 'settings', 'status']) {
             if (meta && Object.prototype.hasOwnProperty.call(meta, field)) incoming.report[field] = this.cloneJson(meta[field], meta[field]);
           }
@@ -302,17 +430,154 @@
 
     async loadSnapshot(options = {}) {
       if (!this.isSiteUnlocked()) throw new Error('SITE_SESSION_REQUIRED');
-      const snapshot = await this.rpc('monthly_v7_get_snapshot', {
-        p_workspace_key: this.config.workspaceKey,
-        p_site_session_id: this.siteSession.id,
-        p_user_session_id: this.userSession ? this.userSession.id : null
-      });
+      const retryTransient = options.retryTransient === true;
+      const loginAttempt = options.loginAttempt || null;
+      const assertLoadOwnership = () => {
+        if (!loginAttempt) return;
+        this.assertLoginAttempt(loginAttempt.attemptId, loginAttempt.siteSessionId);
+        if (String(this.userSession && this.userSession.id || '') !== String(loginAttempt.userSessionId || '')
+          || this.userSessionPendingValidation !== true) {
+          throw this.staleLoginAttemptError(loginAttempt.attemptId);
+        }
+      };
+      assertLoadOwnership();
+      let snapshot;
+      let attempt = 0;
+      while (true) {
+        try {
+          snapshot = await this.rpc('monthly_v7_get_snapshot', {
+            p_workspace_key: this.config.workspaceKey,
+            p_site_session_id: this.siteSession.id,
+            p_user_session_id: this.userSession ? this.userSession.id : null
+          });
+          assertLoadOwnership();
+          break;
+        } catch (error) {
+          assertLoadOwnership();
+          attempt += 1;
+          if (!retryTransient || attempt >= 2 || error?.code !== 'RPC_TIMEOUT') throw error;
+        }
+      }
       if (!snapshot || snapshot.ok !== true) throw new Error(snapshot && snapshot.error || 'SNAPSHOT_FAILED');
-      const merged = options.preserveLocalIntents === false ? snapshot : await this.mergeSnapshotWithProtectedLocal(snapshot);
+      const normalizedSnapshot = this.cloneJson(snapshot, {});
+      if (!normalizedSnapshot.workspace) {
+        normalizedSnapshot.workspace = {
+          id: snapshot.workspaceId || snapshot.workspace_id || '',
+          authorityState: snapshot.authorityState || snapshot.authority_state || this.status.authorityState,
+          authorityEpoch: Number(snapshot.authorityEpoch ?? snapshot.authority_epoch ?? this.status.authorityEpoch ?? 0)
+        };
+      }
+      let candidate = normalizedSnapshot;
+      if (!this.snapshot && options.preserveLegacyLocal !== false
+        && typeof this.host.getLegacyLocalState === 'function'
+        && this.core && typeof this.core.reconcileLegacyLocalModules === 'function') {
+        const legacyLocal = await this.host.getLegacyLocalState(normalizedSnapshot);
+        assertLoadOwnership();
+        const authoritySourceId = String(normalizedSnapshot.report && normalizedSnapshot.report.legacyFileId || '');
+        const recoverySourceId = String(legacyLocal && legacyLocal.recoverySourceId || '');
+        const reportMatches = legacyLocal
+          && authoritySourceId
+          && recoverySourceId === authoritySourceId
+          && String(legacyLocal.fileId || '') === authoritySourceId;
+        if (reportMatches && Array.isArray(legacyLocal.modules) && legacyLocal.modules.length) {
+          const reconciled = this.core.reconcileLegacyLocalModules(
+            normalizedSnapshot.modules,
+            legacyLocal.modules,
+            { localTimestamp: Number(legacyLocal.timestamp || 0) }
+          );
+          candidate = this.cloneJson(normalizedSnapshot, {});
+          candidate.modules = reconciled.serverRows;
+          candidate.localOnlyModules = reconciled.localOnlyModules;
+          const legacyRecoveries = [];
+          for (const recovery of reconciled.recovered) {
+            const existingDraft = this.readDraft('module', recovery.entityId);
+            if (existingDraft) {
+              // A V7 draft/pending intent is newer and more specific than a legacy
+              // IndexedDB snapshot.  Never replace it with the cutover recovery.
+              // Restore the authoritative server row before protected-merge so the
+              // draft keeps the true server payload/revision as its CAS baseline.
+              const authoritative = (normalizedSnapshot.modules || [])
+                .find((row) => String(row.id) === String(recovery.entityId));
+              const index = (candidate.modules || [])
+                .findIndex((row) => String(row.id) === String(recovery.entityId));
+              if (authoritative && index >= 0) {
+                const displayRank = Number(candidate.modules[index]._displaySortRank);
+                candidate.modules[index] = this.cloneJson(authoritative, {});
+                if (Number.isFinite(displayRank)) candidate.modules[index]._displaySortRank = displayRank;
+              }
+              continue;
+            }
+            this.saveDraft('module', recovery.entityId, recovery.payload, recovery.baseRevision);
+            legacyRecoveries.push(recovery);
+          }
+          // The snapshot does not expose a comparable report updatedAt value, so
+          // legacy report metadata can never prove freshness here. Preserve it in
+          // the durable recovery row/quarantine, but do not create a writable draft.
+          const localMeta = legacyLocal.reportMeta;
+          const serverMeta = normalizedSnapshot.report;
+          let reportMetaQuarantined = false;
+          if (localMeta && serverMeta) {
+            const localCore = {
+              title: String(localMeta.title || ''),
+              date: String(localMeta.date || ''),
+              period: this.cloneJson(localMeta.period, {})
+            };
+            const serverCore = {
+              title: String(serverMeta.title || ''),
+              date: String(serverMeta.date || ''),
+              period: this.cloneJson(serverMeta.period, {})
+            };
+            reportMetaQuarantined = JSON.stringify(localCore) !== JSON.stringify(serverCore);
+          }
+          const quarantinedCount = Array.isArray(reconciled.quarantinedModules)
+            ? reconciled.quarantinedModules.length
+            : 0;
+          if (legacyRecoveries.length > 0 || reconciled.orderChanged === true
+            || quarantinedCount > 0 || reportMetaQuarantined) {
+            candidate.legacyLocalRecovery = {
+              recoveredCount: legacyRecoveries.length,
+              localOnlyCount: 0,
+              quarantinedCount,
+              orderChanged: reconciled.orderChanged === true,
+              reportMetaRecovered: false,
+              reportMetaQuarantined,
+              hasAcceptedRecovery: legacyRecoveries.length > 0 || reconciled.orderChanged === true,
+              sourceTimestamp: Number(legacyLocal.timestamp || 0),
+              recoverySourceId
+            };
+          } else if (typeof this.host.clearLegacyRecovery === 'function') {
+            await this.host.clearLegacyRecovery(normalizedSnapshot.report && normalizedSnapshot.report.id);
+            assertLoadOwnership();
+          }
+        } else if (legacyLocal && Array.isArray(legacyLocal.modules) && legacyLocal.modules.length) {
+          candidate = this.cloneJson(normalizedSnapshot, {});
+          candidate.localOnlyModules = [];
+          candidate.legacyLocalRecovery = {
+            recoveredCount: 0,
+            localOnlyCount: 0,
+            quarantinedCount: legacyLocal.modules.length,
+            orderChanged: false,
+            reportMetaRecovered: false,
+            reportMetaQuarantined: !!legacyLocal.reportMeta,
+            hasAcceptedRecovery: false,
+            sourceMismatch: true,
+            sourceTimestamp: Number(legacyLocal.timestamp || 0),
+            recoverySourceId
+          };
+        }
+      }
+      const merged = options.preserveLocalIntents === false ? candidate : await this.mergeSnapshotWithProtectedLocal(candidate);
+      this.applyPendingReorderDisplay(merged);
+      assertLoadOwnership();
       this.snapshot = merged;
       const bundle = this.core.legacyBundleFromSnapshot(merged);
       this.watermark = Number(snapshot.watermark || 0);
       if (typeof this.host.applyBundle === 'function') await this.host.applyBundle(bundle, merged);
+      assertLoadOwnership();
+      if (this.userSession && this.user && this.userSessionPendingValidation) {
+        this.userSessionPendingValidation = false;
+        this.notifySessionStateChanged('user-session-validated');
+      }
       return merged;
     }
 
@@ -320,9 +585,23 @@
       return this.snapshot && this.snapshot.report ? this.snapshot.report : null;
     }
 
+    reportAuthorityRevision(report = this.currentReport()) {
+      const serverRevision = Number(report && report._serverRevision);
+      if (Number.isFinite(serverRevision) && serverRevision > 0) return serverRevision;
+      return Number(report && report.revision || 0);
+    }
+
+    setReportAuthorityRevision(report, value) {
+      const revision = Number(value);
+      if (!report || !Number.isFinite(revision) || revision <= 0) return revision;
+      report.revision = revision;
+      report._serverRevision = revision;
+      return revision;
+    }
+
     requireUserSession() {
       if (!this.isActive()) throw new Error('V7 authority is not active');
-      if (!this.userSession || !this.userSession.id || !this.user) throw new Error('USER_SESSION_REQUIRED');
+      if (!this.isWriteReady()) throw new Error('USER_SESSION_REQUIRED');
     }
 
     leaseKey(entityType, entityId) { return this.core.entityKey(entityType, entityId); }
@@ -1096,7 +1375,7 @@
       if (superseded) {
         const priorResult = superseded.result;
         if (priorResult && priorResult.ok === true) {
-          report.revision = Number(priorResult.revision);
+          this.setReportAuthorityRevision(report, priorResult.revision);
           report.title = String(superseded.previousParams.p_title || '');
           report.date = String(superseded.previousParams.p_report_date || '');
           report.period = this.cloneJson(superseded.previousParams.p_period, {});
@@ -1131,7 +1410,7 @@
           this.forgetCapturedLease(operationLease);
         }
         this.assertSessionContext(operationContext, 'save_report_meta');
-        report.revision = Number(result.revision);
+        this.setReportAuthorityRevision(report, result.revision);
         Object.assign(report, payload);
         this.clearDraft('report_meta', report.id);
         return result;
@@ -1158,6 +1437,91 @@
       return complete(result, false);
     }
 
+    async reconcilePendingCreateModule(items) {
+      this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      this.assertSessionContext(operationContext, 'reconcile_create_module');
+      const report = this.currentReport();
+      if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
+      const pendingKey = `create_module:${report.id}`;
+      if (!this.draftStorage) return null;
+      const storageKey = `monthly_v7_pending:${pendingKey}`;
+      const pendingRaw = this.draftStorage.getItem(storageKey);
+      if (pendingRaw === null) return null;
+      let pending;
+      try { pending = JSON.parse(pendingRaw); }
+      catch (_error) { throw this.pendingOperationError(); }
+      const previousParams = this.validatePendingEnvelope(pending);
+      pending = this.bindPendingActor('monthly_v7_create_module', pending, previousParams);
+      const expectedKeys = [
+        'p_workspace_key', 'p_user_session_id', 'p_client_session_id',
+        'p_report_id', 'p_expected_report_revision',
+        'p_lease_id', 'p_fencing_token', 'p_payload'
+      ].sort();
+      const actualKeys = Object.keys(previousParams).sort();
+      if (actualKeys.length !== expectedKeys.length
+        || !actualKeys.every((key, index) => key === expectedKeys[index])
+        || String(previousParams.p_workspace_key || '') !== String(this.config.workspaceKey || '')
+        || String(previousParams.p_report_id || '') !== String(report.id)
+        || !Number.isSafeInteger(previousParams.p_expected_report_revision)
+        || previousParams.p_expected_report_revision < 0
+        || !previousParams.p_payload || typeof previousParams.p_payload !== 'object'
+        || Array.isArray(previousParams.p_payload)) {
+        throw this.pendingOperationError();
+      }
+      const pendingPayload = this.cloneJson(previousParams.p_payload, {});
+      const matches = (Array.isArray(items) ? items : []).filter((item) => (
+        this.operationCanonical(this.modulePayload(item)) === this.operationCanonical(pendingPayload)
+      ));
+      if (matches.length !== 1) throw this.pendingOperationError();
+      const item = matches[0];
+      previousParams.p_user_session_id = operationContext.userSessionId;
+      previousParams.p_client_session_id = operationContext.clientSessionId;
+      const result = await this.executeOperation(
+        'monthly_v7_create_module', previousParams, pendingKey
+      );
+      this.assertSessionContext(operationContext, 'reconcile_create_module');
+      if (!result || result.ok !== true) {
+        if (result && result.error === 'LEASE_LOST') {
+          const replayLease = this.getLease('report_structure', report.id);
+          this.forgetCapturedLease(replayLease);
+          return result;
+        }
+        return this.commandResult(result, 'CREATE_MODULE_FAILED');
+      }
+      const entityId = String(result.entityId || result.entity_id || '');
+      const revision = Number(result.revision);
+      if (!entityId || !Number.isFinite(revision)
+        || (item._v7Id && String(item._v7Id) !== entityId)) {
+        const envelope = {
+          operationId: pending.operationId,
+          signature: JSON.stringify(previousParams),
+          createdAt: pending.createdAt,
+          actorUserId: pending.actorUserId
+        };
+        this.draftStorage.setItem(storageKey, JSON.stringify(envelope));
+        throw this.pendingOperationError();
+      }
+      item._v7Id = entityId;
+      item._v7Revision = revision;
+      this.setReportAuthorityRevision(report, result.reportRevision ?? result.report_revision);
+      this.watermark = Math.max(this.watermark, Number(result.watermark || 0));
+      if (!Array.isArray(this.snapshot.modules)) this.snapshot.modules = [];
+      let row = this.snapshot.modules.find((entry) => String(entry && entry.id || '') === entityId);
+      if (!row) {
+        row = {
+          id: entityId,
+          legacyItemId: `v7:${entityId}`,
+          sortRank: Number(result.sortRank ?? result.sort_rank ?? this.snapshot.modules.length + 1)
+        };
+        this.snapshot.modules.push(row);
+      }
+      row.revision = revision;
+      row.payload = this.cloneJson(pendingPayload, {});
+      if (typeof this.host.onModuleCreated === 'function') this.host.onModuleCreated(item);
+      return result;
+    }
+
     async createModule(payload) {
       this.requireUserSession();
       const operationContext = this.captureSessionContext();
@@ -1172,13 +1536,13 @@
         p_user_session_id: operationContext.userSessionId,
         p_client_session_id: operationContext.clientSessionId,
         p_report_id: report.id,
-        p_expected_report_revision: Number(report.revision),
+        p_expected_report_revision: this.reportAuthorityRevision(report),
         p_lease_id: operationLease.leaseId,
         p_fencing_token: operationLease.fencingToken,
         p_payload: cleanPayload
       }, `create_module:${report.id}`), 'CREATE_MODULE_FAILED');
       this.assertSessionContext(operationContext, 'create_module');
-      report.revision = Number(result.reportRevision ?? result.report_revision);
+      this.setReportAuthorityRevision(report, result.reportRevision ?? result.report_revision);
       this.forgetCapturedLease(operationLease);
       const item = Object.assign({}, cleanPayload, {
         _v7Id: result.entityId || result.entity_id,
@@ -1196,20 +1560,41 @@
       if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
       const order = (items || []).map((item) => item && item._v7Id);
       if (!order.length || order.some((id) => !id)) throw new TypeError('all modules require V7 IDs');
-      const operationLease = this.getLease('report_structure', report.id) || await this.claimLease('report_structure', report.id);
-      this.assertSessionContext(operationContext, 'reorder_modules');
-      const result = this.commandResult(await this.executeOperation('monthly_v7_reorder_modules', {
+      const pendingKey = `reorder_modules:${report.id}`;
+      const desiredParams = {
         p_workspace_key: this.config.workspaceKey,
         p_user_session_id: operationContext.userSessionId,
         p_client_session_id: operationContext.clientSessionId,
         p_report_id: report.id,
-        p_expected_report_revision: Number(report.revision),
-        p_lease_id: operationLease.leaseId,
-        p_fencing_token: operationLease.fencingToken,
-        p_order: order
-      }, `reorder_modules:${report.id}`), 'REORDER_MODULES_FAILED');
+        p_expected_report_revision: this.reportAuthorityRevision(report),
+        p_module_order: order
+      };
+      const replayLease = this.getLease('report_structure', report.id);
+      const replayed = await this.replayPendingBeforeLease(
+        'monthly_v7_reorder_modules', pendingKey, desiredParams
+      );
       this.assertSessionContext(operationContext, 'reorder_modules');
-      report.revision = Number(result.reportRevision ?? result.report_revision);
+      if (replayed) {
+        this.forgetCapturedLease(replayLease);
+        if (replayed.ok === true) {
+          this.setReportAuthorityRevision(report, replayed.reportRevision ?? replayed.report_revision);
+          this.watermark = Math.max(this.watermark, Number(replayed.watermark || 0));
+          return replayed;
+        }
+        if (replayed.error !== 'LEASE_LOST') {
+          return this.commandResult(replayed, 'REORDER_MODULES_FAILED');
+        }
+      }
+      const operationLease = this.getLease('report_structure', report.id)
+        || await this.claimLease('report_structure', report.id);
+      this.assertSessionContext(operationContext, 'reorder_modules');
+      const result = this.commandResult(await this.executeOperation('monthly_v7_reorder_modules', Object.assign({}, desiredParams, {
+        p_lease_id: operationLease.leaseId,
+        p_fencing_token: operationLease.fencingToken
+      }), pendingKey), 'REORDER_MODULES_FAILED');
+      this.assertSessionContext(operationContext, 'reorder_modules');
+      this.setReportAuthorityRevision(report, result.reportRevision ?? result.report_revision);
+      this.watermark = Math.max(this.watermark, Number(result.watermark || 0));
       this.forgetCapturedLease(operationLease);
       return result;
     }
@@ -1352,14 +1737,14 @@
           p_client_session_id: operationContext.clientSessionId,
           p_module_id: entityId,
           p_expected_module_revision: expectedRevision,
-          p_expected_report_revision: Number(report.revision),
+          p_expected_report_revision: this.reportAuthorityRevision(report),
           p_structure_lease_id: structureLease.leaseId,
           p_structure_fencing_token: structureLease.fencingToken,
           p_module_lease_id: moduleLease.leaseId,
           p_module_fencing_token: moduleLease.fencingToken
         }, `delete_module:${entityId}`), 'DELETE_MODULE_FAILED');
         this.assertSessionContext(operationContext, 'delete_module');
-        report.revision = Number(result.reportRevision ?? result.report_revision);
+        this.setReportAuthorityRevision(report, result.reportRevision ?? result.report_revision);
         const structureKey = this.leaseKey('report_structure', report.id);
         const moduleKey = this.leaseKey('module', entityId);
         if (this.leases.get(structureKey) === structureLease) this.leases.delete(structureKey);
@@ -1673,6 +2058,7 @@
       this.stopRealtime();
       this.userSession = null;
       this.user = null;
+      this.userSessionPendingValidation = false;
       this.leases.clear();
       if (this.sessionStorage) {
         this.sessionStorage.removeItem('monthly_v7_user_session');

@@ -10,11 +10,12 @@ const port = Number(process.env.PORT || 4187);
 const fakeSdk = readFileSync(join(__dirname, 'fixtures', 'fake-supabase.js'));
 
 function freshState() {
+  const initialModuleUpdatedAt = '2026-08-10T00:00:00.000Z';
   return {
     report: { id: '11111111-1111-4111-8111-111111111111', legacyFileId: 'browser-report', title: '瀏覽器協作測試', date: '2026-08-10', period: { startM: '8', startD: '1', endM: '8', endD: '31' }, revision: 1, settings: {} },
     modules: [
-      { id: '22222222-2222-4222-8222-222222222221', legacyItemId: '101', sortRank: 1, revision: 1, payload: { id: 101, icon: 'fas fa-edit', iconColor: '#64748b', title: 'A 原始項目', colLayout: '1', colCount: 1, columns: ['A 內容'], attachments: [], selectedForPdf: true, pdfOrder: 1 } },
-      { id: '22222222-2222-4222-8222-222222222222', legacyItemId: '102', sortRank: 2, revision: 1, payload: { id: 102, icon: 'fas fa-edit', iconColor: '#64748b', title: 'B 原始項目', colLayout: '1', colCount: 1, columns: ['B 內容'], attachments: [], selectedForPdf: true, pdfOrder: 2 } }
+      { id: '22222222-2222-4222-8222-222222222221', legacyItemId: '101', sortRank: 1, revision: 1, updatedAt: initialModuleUpdatedAt, payload: { id: 101, icon: 'fas fa-edit', iconColor: '#64748b', title: 'A 原始項目', colLayout: '1', colCount: 1, columns: ['A 內容'], attachments: [], selectedForPdf: true, pdfOrder: 1 } },
+      { id: '22222222-2222-4222-8222-222222222222', legacyItemId: '102', sortRank: 2, revision: 1, updatedAt: initialModuleUpdatedAt, payload: { id: 102, icon: 'fas fa-edit', iconColor: '#64748b', title: 'B 原始項目', colLayout: '1', colCount: 1, columns: ['B 內容'], attachments: [], selectedForPdf: true, pdfOrder: 2 } }
     ],
     records: [],
     users: [
@@ -161,10 +162,107 @@ function rpc(name, p) {
     }
     module.payload = clone(p.p_payload);
     module.revision += 1;
+    module.updatedAt = new Date().toISOString();
     lease.expiresAt = now() + 90000;
     event('module', module.id, module.revision, p.p_operation_id);
     const result = { ok: true, entityId: module.id, revision: module.revision, watermark: state.sequence };
     return storeOperation(p.p_operation_id, user.id, requestHash, result);
+  }
+  if (name === 'monthly_v7_create_module') {
+    const user = userForSession(p.p_user_session_id);
+    if (!user) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const key = `report_structure:${state.report.id}`;
+    const lease = state.leases.get(key);
+    if (!lease || lease.expiresAt <= now() || lease.leaseId !== p.p_lease_id
+      || lease.fencingToken !== Number(p.p_fencing_token)
+      || lease.clientSessionId !== p.p_client_session_id || lease.holderUserId !== user.id) {
+      return { ok: false, error: 'LEASE_LOST' };
+    }
+    if (state.report.id !== p.p_report_id || state.report.revision !== Number(p.p_expected_report_revision)) {
+      return { ok: false, error: 'REVISION_CONFLICT', currentRevision: state.report.revision };
+    }
+    const id = randomUUID();
+    const module = {
+      id,
+      legacyItemId: `v7:${id}`,
+      sortRank: state.modules.length + 1,
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+      payload: clone(p.p_payload)
+    };
+    state.modules.push(module);
+    state.report.revision += 1;
+    lease.expiresAt = now() - 1;
+    event('module', id, 1, p.p_operation_id);
+    event('report_structure', state.report.id, state.report.revision, p.p_operation_id);
+    return {
+      ok: true, entityType: 'module', entityId: id, revision: 1,
+      reportRevision: state.report.revision, sortRank: module.sortRank,
+      operationId: p.p_operation_id, watermark: state.sequence
+    };
+  }
+  if (name === 'monthly_v7_save_module_batch') {
+    const user = userForSession(p.p_user_session_id);
+    if (!user) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const lease = state.leases.get(`kpi_batch:${state.report.id}`);
+    if (!lease || lease.expiresAt <= now() || lease.leaseId !== p.p_lease_id
+      || lease.fencingToken !== Number(p.p_fencing_token)
+      || lease.clientSessionId !== p.p_client_session_id || lease.holderUserId !== user.id) {
+      return { ok: false, error: 'LEASE_LOST' };
+    }
+    const changes = Array.isArray(p.p_changes) ? p.p_changes : [];
+    if (!changes.length) return { ok: false, error: 'INVALID_PAYLOAD' };
+    for (const change of changes) {
+      const module = state.modules.find((entry) => entry.id === change.moduleId);
+      if (!module) return { ok: false, error: 'ENTITY_NOT_FOUND' };
+      if (module.revision !== Number(change.expectedRevision)) {
+        return { ok: false, error: 'REVISION_CONFLICT', entityId: module.id, currentRevision: module.revision };
+      }
+    }
+    const updated = [];
+    for (const change of changes) {
+      const module = state.modules.find((entry) => entry.id === change.moduleId);
+      module.payload = clone(change.payload);
+      module.revision += 1;
+      module.updatedAt = new Date().toISOString();
+      updated.push({ entityId: module.id, revision: module.revision });
+      event('module', module.id, module.revision, p.p_operation_id);
+    }
+    lease.expiresAt = now() + 90000;
+    return { ok: true, updated, operationId: p.p_operation_id, watermark: state.sequence };
+  }
+  if (name === 'monthly_v7_reorder_modules') {
+    const user = userForSession(p.p_user_session_id);
+    if (!user) return { ok: false, error: 'USER_SESSION_INVALID' };
+    if (Object.prototype.hasOwnProperty.call(p, 'p_order') || !Array.isArray(p.p_module_order)) {
+      const error = new Error('Could not find the function public.monthly_v7_reorder_modules with the supplied named arguments');
+      error.code = 'PGRST202';
+      throw error;
+    }
+    const lease = state.leases.get(`report_structure:${state.report.id}`);
+    if (!lease || lease.expiresAt <= now() || lease.leaseId !== p.p_lease_id
+      || lease.fencingToken !== Number(p.p_fencing_token)
+      || lease.clientSessionId !== p.p_client_session_id || lease.holderUserId !== user.id) {
+      return { ok: false, error: 'LEASE_LOST' };
+    }
+    if (state.report.id !== p.p_report_id || state.report.revision !== Number(p.p_expected_report_revision)) {
+      return { ok: false, error: 'REVISION_CONFLICT', currentRevision: state.report.revision };
+    }
+    const expected = new Set(state.modules.map((entry) => entry.id));
+    if (p.p_module_order.length !== expected.size
+      || new Set(p.p_module_order).size !== expected.size
+      || p.p_module_order.some((id) => !expected.has(id))) {
+      return { ok: false, error: 'ORDER_MUST_INCLUDE_ALL_MODULES' };
+    }
+    const byId = new Map(state.modules.map((entry) => [entry.id, entry]));
+    state.modules = p.p_module_order.map((id, index) => Object.assign(byId.get(id), { sortRank: index + 1 }));
+    state.report.revision += 1;
+    lease.expiresAt = now() - 1;
+    event('report_structure', state.report.id, state.report.revision, p.p_operation_id);
+    return {
+      ok: true, entityType: 'report_structure', entityId: state.report.id,
+      reportRevision: state.report.revision, operationId: p.p_operation_id, watermark: state.sequence
+    };
   }
   if (name === 'monthly_v7_delete_module') {
     if (state.operations.has(p.p_operation_id)) return clone(state.operations.get(p.p_operation_id));
@@ -254,17 +352,23 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/__fake_structure_change' && req.method === 'POST') {
     state.modules.push({
-      id: 'm3', legacyItemId: '103', sortRank: 3, revision: 1,
+      id: 'm3', legacyItemId: '103', sortRank: 3, revision: 1, updatedAt: new Date().toISOString(),
       payload: { id: 103, title: '遠端新增模塊', columns: ['遠端內容'], colLayout: '1', selectedForPdf: true, moduleCategory: 'custom', pdfOrder: 3 }
     });
     state.report.revision += 1;
     event('report_structure', state.report.id, state.report.revision, randomUUID());
     res.writeHead(204); return res.end();
   }
+  if (url.pathname === '/__fake_reverse_module_order' && req.method === 'POST') {
+    state.modules = state.modules.slice().reverse().map((module, index) => ({ ...module, sortRank: index + 1 }));
+    state.report.revision += 1;
+    res.writeHead(204); return res.end();
+  }
   if (url.pathname === '/__fake_remote_module_change' && req.method === 'POST') {
     const module = state.modules[0];
     module.payload = Object.assign({}, module.payload, { title: '遠端較新內容' });
     module.revision += 1;
+    module.updatedAt = new Date().toISOString();
     event('module', module.id, module.revision, randomUUID());
     res.writeHead(204); return res.end();
   }

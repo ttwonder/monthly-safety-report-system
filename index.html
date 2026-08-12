@@ -2233,16 +2233,16 @@
     </div>
 
     <script src="./vendor/supabase-2.112.2.js"></script>
-    <script src="./monthly-collaboration-core.js"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.9"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.9"></script>
+    <script src="./monthly-collaboration-core.js?v=7.0.10"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.10"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.10"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
-        function changeGlobalFont() {
+        function changeGlobalFont(options = {}) {
             const enFont = document.getElementById('globalFontEnSelector').value;
             const zhFont = document.getElementById('globalFontZhSelector').value;
             document.body.style.fontFamily = `${enFont}, ${zhFont}, sans-serif`;
-            manualSave(false); 
+            if (options.persist !== false) manualSave(false);
         }
 
         const BlockTemplates = {
@@ -2611,12 +2611,12 @@
                         const fontZhSel = document.getElementById('globalFontZhSelector');
                         if (fontEnSel) fontEnSel.value = finalDataToUse.globalFontEn;
                         if (fontZhSel) fontZhSel.value = finalDataToUse.globalFontZh;
-                        changeGlobalFont();
+                        changeGlobalFont({ persist: false });
                     } else if (finalDataToUse.globalFont) {
                         const fontZhSel = document.getElementById('globalFontZhSelector');
                         if (fontZhSel) fontZhSel.value = finalDataToUse.globalFont;
-                        changeGlobalFont();
-                    } else { changeGlobalFont(); }
+                        changeGlobalFont({ persist: false });
+                    } else { changeGlobalFont({ persist: false }); }
 
                     if (loadedFromPortable) {
                         await saveToDB(reportData, portableData.timestamp);
@@ -2624,7 +2624,7 @@
                 } else {
                     document.getElementById('reportDate').value = new Date().toISOString().slice(0,10);
                     setDefaultPeriod();
-                    changeGlobalFont();
+                    changeGlobalFont({ persist: false });
                 }
 
                 renderTable();
@@ -2644,7 +2644,7 @@
                 console.error("載入失敗:", error);
                 reportData = JSON.parse(JSON.stringify(defaultData));
                 setDefaultPeriod();
-                changeGlobalFont();
+                changeGlobalFont({ persist: false });
                 renderTable();
             }
             hideLoader();
@@ -4331,7 +4331,7 @@
         }
 
         function switchV1Tab(tab) {
-            if (tab === 'cloud' && !v5CanManageData() && v5GetUsers().length > 0) {
+            if (tab === 'cloud' && !v5CanManageData()) {
                 alert('您無權訪問數據管理。請使用 owner 或管理員帳號登入。');
                 return;
             }
@@ -4873,7 +4873,9 @@
                 const snapshotRow = (client.snapshot?.modules || []).find(entry => entry.id === item._v7Id);
                 const baseline = snapshotRow?.payload || {};
                 const existingDraft = client.readDraft('module', item._v7Id);
-                const candidate = JSON.parse(JSON.stringify(existingDraft?.payload || item));
+                const candidate = window.MonthlyV7App?.client?.modulePayload
+                    ? window.MonthlyV7App.client.modulePayload(existingDraft?.payload || item)
+                    : JSON.parse(JSON.stringify(existingDraft?.payload || item));
                 let visibleChange = false;
                 const title = row.querySelector('.module-title-editor');
                 const titleValue = sanitizeModuleTitleHtml(title?.innerHTML ?? '');
@@ -5269,7 +5271,7 @@
             if (!listRoot) return;
             try {
                 const allRows = await v1ListSavedReports();
-                const rows = allRows.filter(row => row.id !== 'v2_records' && (Array.isArray(row.reportData) || Array.isArray(row.data)));
+                const rows = allRows.filter(row => row.id !== 'v2_records' && row.v7Recovery !== true && (Array.isArray(row.reportData) || Array.isArray(row.data)));
                 if (!rows.length) {
                     listRoot.innerHTML = '<div class="v1-empty-state">目前尚無歷史月報。</div>';
                     return;
@@ -6083,10 +6085,11 @@
 
         function v7ScheduleCloudAutoSave(delayMs = v7CloudAutoSaveIntervalMs()) {
             if (V4_CLOUD_APPLYING || V4_AUTO_SAVE_TIMER || !v7HasUnsyncedCloudChanges()) return;
-            if (!window.MonthlyV7App?.isActive?.() || !v5CurrentUser()) return;
+            if (!window.MonthlyV7App?.isActive?.() || !window.MonthlyV7App?.isWriteReady?.()) return;
+            if (window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery) return;
             V4_AUTO_SAVE_TIMER = setTimeout(async () => {
                 V4_AUTO_SAVE_TIMER = null;
-                if (!v7HasUnsyncedCloudChanges() || !v5CurrentUser()) return;
+                if (!v7HasUnsyncedCloudChanges() || !window.MonthlyV7App?.isWriteReady?.()) return;
                 await v4UploadToCloud({ silent: true, reason: '每分鐘自動保存', flushLatest: false });
                 if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
             }, Math.max(250, Number(delayMs) || v7CloudAutoSaveIntervalMs()));
@@ -6095,6 +6098,11 @@
         function v7MarkCloudDirty(reason = '修改') {
             V7_CLOUD_DIRTY_GENERATION += 1;
             if (typeof v7PreserveVisibleEditorDrafts === 'function') v7PreserveVisibleEditorDrafts();
+            if (window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery) {
+                v7ClearCloudAutoSaveTimer();
+                v4SetCloudRuntimeStatus(v7LegacyRecoveryStatusText(), 'warn');
+                return V7_CLOUD_DIRTY_GENERATION;
+            }
             if (!v5CurrentUser()) {
                 v4SetCloudRuntimeStatus(`${reason}已保存為本機草稿；請登入後提交。`, 'warn');
                 return V7_CLOUD_DIRTY_GENERATION;
@@ -6134,9 +6142,34 @@
             }
         }
 
+        function v7LegacyRecoveryStatusText(recovery = window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery) {
+            if (!recovery) return '';
+            const accepted = [];
+            if (Number(recovery.recoveredCount || 0) > 0) accepted.push(`依來源與時間證據救回 ${Number(recovery.recoveredCount)} 個本機修改`);
+            if (recovery.orderChanged === true) accepted.push('恢復切換前原項次');
+            const quarantined = Number(recovery.quarantinedCount || 0)
+                + (recovery.reportMetaQuarantined === true ? 1 : 0);
+            const quarantineReason = recovery.sourceMismatch === true ? '來源不一致' : '無法證明比雲端新';
+            const quarantineText = quarantined > 0
+                ? `另有 ${quarantined} 項救援候選因${quarantineReason}已隔離，未套用畫面；保存修改不會上傳或重建這些候選。`
+                : '';
+            if (accepted.length > 0) {
+                const loginHint = v5CurrentUser() ? '' : '請先登入，';
+                return `${accepted.join('；')}。禁止背景上傳，${loginHint}人工確認後按「保存修改」。${quarantineText}`;
+            }
+            return `${quarantineText || '切換前本機資料缺少可信 freshness 證據，已隔離且未套用畫面。'}背景自動上傳已暫停；本機救援副本仍保留。`;
+        }
+
         function v4CloudStatusHtml() {
-            const cls = V4_CLOUD_STATUS_KIND === 'ok' ? 'text-emerald-700 font-bold' : V4_CLOUD_STATUS_KIND === 'warn' ? 'text-amber-700 font-bold' : V4_CLOUD_STATUS_KIND === 'error' ? 'text-rose-700 font-bold' : 'text-slate-500';
-            return `<span id="v4-cloud-runtime-status" class="${cls}">${v2RecordText(V4_CLOUD_STATUS_TEXT)}</span>`;
+            const recoveryText = v7LegacyRecoveryStatusText();
+            // A real failed save must remain visible. Recovery outranks only
+            // ordinary success/draft messages so late local callbacks cannot hide
+            // the fail-closed cutover warning.
+            const showError = V4_CLOUD_STATUS_KIND === 'error';
+            const kind = showError ? 'error' : (recoveryText ? 'warn' : V4_CLOUD_STATUS_KIND);
+            const text = showError ? V4_CLOUD_STATUS_TEXT : (recoveryText || V4_CLOUD_STATUS_TEXT);
+            const cls = kind === 'ok' ? 'text-emerald-700 font-bold' : kind === 'warn' ? 'text-amber-700 font-bold' : kind === 'error' ? 'text-rose-700 font-bold' : 'text-slate-500';
+            return `<span id="v4-cloud-runtime-status" class="${cls}">${v2RecordText(text)}</span>`;
         }
 
         function v4SaveCloudConfigFromForm() {
@@ -6297,14 +6330,42 @@
                 const savePromise = (async () => {
                     try {
                         v4SetCloudRuntimeStatus('正在保存到雲端...', 'muted', { allowPendingFailureOverride: true });
-                        await window.MonthlyV7App.persistReportData(reportData, {
-                            resolveRevisionConflict: !silent
+                        const cloud = await window.MonthlyV7App.persistReportData(reportData, {
+                            resolveRevisionConflict: !silent,
+                            confirmLegacyRecovery: !silent
                         });
+                        if (cloud?.recoveryPending === true || cloud?.localOnly === true) {
+                            v4SetCloudRuntimeStatus('切換前救援內容仍只保存在本機；禁止背景上傳，請人工確認後按「保存修改」。', 'warn');
+                            return false;
+                        }
                         await window.MonthlyV7App.flush(v7CurrentReportMeta());
+                        const v7Client = window.MonthlyV7App?.client;
+                        if (v7Client?.snapshot?.legacyLocalRecovery) {
+                            const recovery = v7Client.snapshot.legacyLocalRecovery;
+                            const hasQuarantine = Number(recovery.quarantinedCount || 0) > 0
+                                || recovery.reportMetaQuarantined === true
+                                || recovery.sourceMismatch === true;
+                            delete v7Client.snapshot.localOnlyModules;
+                            if (hasQuarantine) {
+                                Object.assign(recovery, {
+                                    recoveredCount: 0,
+                                    orderChanged: false,
+                                    reportMetaRecovered: false,
+                                    hasAcceptedRecovery: false
+                                });
+                            } else {
+                                await v7ClearLegacyRecovery(v7Client.currentReport()?.id);
+                                delete v7Client.snapshot.legacyLocalRecovery;
+                            }
+                        }
                         v7AcknowledgeCloudSave(targetGeneration);
+                        const remainingRecovery = v7Client?.snapshot?.legacyLocalRecovery;
+                        if (remainingRecovery) v4SetCloudRuntimeStatus(v7LegacyRecoveryStatusText(remainingRecovery), 'warn');
                         if (!silent) {
                             const time = v7FormatCloudSaveTime(V7_LAST_CLOUD_SAVED_AT || Date.now());
-                            showToast(v7HasUnresolvedFormalSnapshotOperation()
+                            showToast(remainingRecovery
+                                ? '目前畫面資料已保存；隔離救援候選未上傳。'
+                                : v7HasUnresolvedFormalSnapshotOperation()
                                 ? `月報資料已保存｜${time}；正式 PDF 快照結果尚未確認`
                                 : `雲端已保存｜${time}`);
                         }
@@ -6450,7 +6511,16 @@
                 try {
                     if (v5CurrentUser()) await window.MonthlyV7App.syncLatest();
                     else await window.MonthlyV7App.loadSnapshot();
-                    v4SetCloudRuntimeStatus(`雲端資料已同步｜${v7FormatCloudSaveTime()}`, 'ok');
+                    const restoredDraftCount = reportData.filter(item => item?._v7Id
+                        && window.MonthlyV7App?.client?.readDraft?.('module', item._v7Id)).length;
+                    const recovery = window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery;
+                    if (recovery) {
+                        v4SetCloudRuntimeStatus(v7LegacyRecoveryStatusText(recovery), 'warn');
+                    } else if (restoredDraftCount > 0) {
+                        v4SetCloudRuntimeStatus(`已恢復 ${restoredDraftCount} 個未提交本機草稿；請按「保存修改」完成雲端提交。`, 'warn');
+                    } else {
+                        v4SetCloudRuntimeStatus(`雲端資料已同步｜${v7FormatCloudSaveTime()}`, 'ok');
+                    }
                     if (!silent) showToast('已同步最新逐項資料');
                     return true;
                 } catch (error) {
@@ -7005,10 +7075,23 @@
             return role === 'owner' ? 'Owner' : role === 'admin' ? '管理員' : '使用者';
         }
         function v5GetUsers() {
+            if (window.MonthlyV7App?.isActive?.()) {
+                const users = window.MonthlyV7App?.client?.snapshot?.users;
+                return Array.isArray(users) ? users.map(user => ({
+                    id: user.id,
+                    username: String(user.username || ''),
+                    displayName: String(user.displayName || user.username || ''),
+                    role: ['owner','admin','operator'].includes(user.role) ? user.role : 'operator',
+                    active: user.active !== false,
+                    version: Number(user.version || 0)
+                })) : [];
+            }
             try { return JSON.parse(localStorage.getItem(V5_USERS_KEY) || '[]'); } catch { return []; }
         }
         function v5SetUsers(users) {
-            localStorage.setItem(V5_USERS_KEY, JSON.stringify(Array.isArray(users) ? users : []));
+            if (!window.MonthlyV7App?.isActive?.()) {
+                localStorage.setItem(V5_USERS_KEY, JSON.stringify(Array.isArray(users) ? users : []));
+            }
             renderV5SessionBar();
         }
         function v5SessionPayload(user) {
@@ -7035,14 +7118,18 @@
             }
             renderV5SessionBar();
             renderTable();
-            if (document.getElementById('v1-pane-cloud')?.classList.contains('active') && !v5CanManageData() && v5GetUsers().length > 0) {
+            if (document.getElementById('v1-pane-cloud')?.classList.contains('active') && !v5CanManageData()) {
                 switchV1Tab('editor');
             }
         }
         function v5IsOwner() { return v5CurrentUser()?.role === 'owner'; }
         function v5IsAdmin() { const r = v5CurrentUser()?.role; return r === 'owner' || r === 'admin'; }
-        function v5CanManageData() { return v5GetUsers().length === 0 || v5IsAdmin(); }
-        function v5CanManageSupabaseConfig() { return v5GetUsers().length === 0 || v5IsOwner(); }
+        function v5CanManageData() {
+            return window.MonthlyV7App?.isActive?.() ? v5IsAdmin() : (v5GetUsers().length === 0 || v5IsAdmin());
+        }
+        function v5CanManageSupabaseConfig() {
+            return window.MonthlyV7App?.isActive?.() ? v5IsOwner() : (v5GetUsers().length === 0 || v5IsOwner());
+        }
         function v5RequireSupabaseOwner(msg = '只有 owner 可以查看或修改 Supabase 設定。') { if (v5CanManageSupabaseConfig()) return true; alert(msg); return false; }
         function v5RequireOwner(msg = '只有 owner 可以執行此操作。') { if (v5IsOwner()) return true; alert(msg); return false; }
         function v5RequireLogin(msg = '請先登入。') { if (v5CurrentUser()) return true; alert(msg); return false; }
@@ -7193,13 +7280,32 @@
             const username = (document.getElementById('v5-login-username')?.value || '').trim();
             const password = document.getElementById('v5-login-password')?.value || '';
             if (window.MonthlyV7App?.isActive?.()) {
+                if (!username || !password) return alert('請填寫用戶名和密碼。');
                 try {
                     const user = await window.MonthlyV7App.login(username, password);
                     renderV5SessionBar();
                     renderV4CloudPane();
                     renderTable();
                     showToast(`已登入：${user.displayName || user.username}`);
-                } catch (error) { alert('用戶名或密碼不正確。'); }
+                } catch (error) {
+                    v7ClearCloudAutoSaveTimer();
+                    const code = String(error?.code || error?.message || 'LOGIN_FAILED');
+                    let message;
+                    if (error?.credentialsAccepted === true || error?.loginStage === 'snapshot') {
+                        message = `帳號驗證已通過，但雲端資料載入失敗：${code}。本機草稿已保留，仍保持未登入；請稍後重試。`;
+                    } else if (code.includes('INVALID_CREDENTIALS') || code === '28P01') {
+                        message = '用戶名或密碼不正確。';
+                    } else if (code.includes('SITE_SESSION_INVALID')) {
+                        message = '進站驗證已失效；本機草稿已保留，請重新進入系統。';
+                    } else {
+                        message = `登入服務暫時無法完成：${code}。本機草稿已保留，請稍後重試。`;
+                    }
+                    v4SetCloudRuntimeStatus(message, error?.credentialsAccepted === true ? 'error' : 'warn', { allowCriticalOverride: true });
+                    renderV5SessionBar();
+                    const usernameInput = document.getElementById('v5-login-username');
+                    if (usernameInput) usernameInput.value = username;
+                    alert(message);
+                }
                 return;
             }
             const users = v5GetUsers();
@@ -7253,6 +7359,12 @@
             if (!root) return;
             const user = v5CurrentUser();
             const users = v5GetUsers();
+            const isV7 = !!window.MonthlyV7App?.isActive?.();
+            const v7UsersKnown = Array.isArray(window.MonthlyV7App?.client?.snapshot?.users);
+            const ownerExists = users.some(entry => entry.active !== false && entry.role === 'owner');
+            const signedOutLabel = isV7
+                ? (!v7UsersKnown ? '正在讀取雲端帳號' : (ownerExists ? '未登入' : '雲端未找到 Owner'))
+                : (users.length ? '未登入' : '尚未建立 owner');
             const configReady = v4ConfigReady();
             root.innerHTML = user ? `
                 <div class="v5-session-bar">
@@ -7264,7 +7376,7 @@
                     ${v4CloudStatusHtml()}
                 </div>` : `
                 <div class="v5-session-bar">
-                    <span class="v5-role-pill"><i class="fas fa-lock"></i>${users.length ? '未登入' : '尚未建立 owner'}</span>
+                    <span class="v5-role-pill"><i class="fas fa-lock"></i>${signedOutLabel}</span>
                     <input id="v5-login-username" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="用戶名">
                     <input id="v5-login-password" type="password" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="密碼" onkeydown="if(event.key==='Enter') v5Login()">
                     <button class="v5-sync-btn" onclick="v5Login()">登入</button>
@@ -7275,7 +7387,7 @@
         function v5UserAdminHtml() {
             const users = v5GetUsers();
             const canManage = v5CanManageData();
-            if (!canManage && users.length) return `<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>`;
+            if (!canManage) return `<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>`;
             const isOwner = v5IsOwner();
             const usernameCell = (u) => isOwner ? `<input data-v5-edit-username="1" class="border border-indigo-100 rounded px-2 py-1 text-xs min-w-[120px]" value="${v1EscapeAttr(u.username)}">` : v2RecordText(u.username);
             const displayCell = (u) => isOwner ? `<input data-v5-edit-display="1" class="border border-indigo-100 rounded px-2 py-1 text-xs min-w-[120px]" value="${v1EscapeAttr(u.displayName || u.username)}">` : v2RecordText(u.displayName);
@@ -7478,8 +7590,91 @@
             return null;
         }
 
+        const V7_LEGACY_RECOVERY_PREFIX = 'v7_legacy_recovery:';
+        function v7LegacyRecoveryId(snapshotOrReportId) {
+            const reportId = typeof snapshotOrReportId === 'string'
+                ? snapshotOrReportId
+                : String(snapshotOrReportId?.report?.id || '');
+            return reportId ? V7_LEGACY_RECOVERY_PREFIX + reportId : '';
+        }
+        async function v7PutRecoveryRow(row) {
+            const db = await initDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction([STORE_NAME], 'readwrite');
+                tx.objectStore(STORE_NAME).put(row);
+                tx.oncomplete = () => resolve(true);
+                tx.onerror = event => reject(event.target.error || tx.error);
+            });
+        }
+        async function v7GetLegacyLocalState(snapshot) {
+            const recoveryId = v7LegacyRecoveryId(snapshot);
+            const legacyFileId = String(snapshot?.report?.legacyFileId || '');
+            if (!recoveryId || !legacyFileId) return null;
+            const existing = await loadFromDB(recoveryId);
+            if (existing?.v7Recovery === true) {
+                return {
+                    fileId: legacyFileId,
+                    recoverySourceId: String(existing.recoverySourceId || ''),
+                    modules: JSON.parse(JSON.stringify(existing.data || [])),
+                    timestamp: Number(existing.sourceTimestamp || existing.timestamp || 0),
+                    reportMeta: {
+                        title: existing.sourceTitle || existing.title || '',
+                        date: existing.date || '',
+                        period: existing.period || {}
+                    }
+                };
+            }
+            const source = await loadFromDB(legacyFileId);
+            const modules = source && (Array.isArray(source.reportData) ? source.reportData : source.data);
+            if (!Array.isArray(modules) || modules.length === 0) return null;
+            // Only a real pre-V7 IndexedDB row is a cutover source. A normalized
+            // cache already carries server identities and must be recovered through
+            // the V7 draft/pending envelopes instead; treating it as legacy creates
+            // false recovery flags and can block pending-operation replay.
+            if (modules.some(row => row && (String(row._v7Id || '').trim()
+                || Object.prototype.hasOwnProperty.call(row, '_v7Revision')))) return null;
+            const captured = {
+                id: recoveryId,
+                v7Recovery: true,
+                recoverySourceId: legacyFileId,
+                sourceTimestamp: Number(source.timestamp || 0),
+                capturedAt: new Date().toISOString(),
+                sourceTitle: source.title || '月度安全會議報告',
+                title: `V7 切換前救援副本｜${source.title || '月度安全會議報告'}`,
+                date: source.date || '',
+                period: source.period || {},
+                data: JSON.parse(JSON.stringify(modules)),
+                timestamp: Date.now()
+            };
+            await v7PutRecoveryRow(captured);
+            return {
+                fileId: legacyFileId,
+                recoverySourceId: captured.recoverySourceId,
+                modules: JSON.parse(JSON.stringify(captured.data)),
+                timestamp: captured.sourceTimestamp,
+                reportMeta: {
+                    title: captured.sourceTitle,
+                    date: captured.date,
+                    period: captured.period
+                }
+            };
+        }
+        async function v7ClearLegacyRecovery(reportId) {
+            const recoveryId = v7LegacyRecoveryId(String(reportId || ''));
+            if (!recoveryId) return false;
+            const db = await initDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction([STORE_NAME], 'readwrite');
+                tx.objectStore(STORE_NAME).delete(recoveryId);
+                tx.oncomplete = () => resolve(true);
+                tx.onerror = event => reject(event.target.error || tx.error);
+            });
+        }
+
         window.MonthlyV7Host = {
             getLocalEntity: v7GetLocalEntity,
+            getLegacyLocalState: v7GetLegacyLocalState,
+            clearLegacyRecovery: v7ClearLegacyRecovery,
             applyBundle: async (bundle, snapshot) => {
                 await v4ApplyCloudBundle(bundle, 'V7 逐項雲端', { silent: true });
                 // 現有 UI 會補 moduleCategory/pdfOrder 等穩定預設；普通 row 可直接校準。
@@ -7492,7 +7687,7 @@
                         if (typeof serverPayload.selectedForPdf === 'undefined') serverPayload.selectedForPdf = true;
                         if (typeof serverPayload.pdfOrder === 'undefined') serverPayload.pdfOrder = index + 1;
                         if (!serverPayload.moduleCategory) serverPayload.moduleCategory = v1GetCategory(serverPayload).id;
-                    } else {
+                    } else if (item?._v7Id) {
                         window.MonthlyV7App?.syncModuleBaseline?.(item);
                     }
                 });
@@ -7502,7 +7697,10 @@
                 config.cloudRevision = Number(snapshot?.watermark || 0);
                 config.lastSyncAt = new Date().toISOString();
                 localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
-                if (restoredDraftCount > 0) {
+                const recovery = snapshot?.legacyLocalRecovery;
+                if (recovery) {
+                    v4SetCloudRuntimeStatus(v7LegacyRecoveryStatusText(recovery), 'warn');
+                } else if (restoredDraftCount > 0) {
                     v4SetCloudRuntimeStatus(`已恢復 ${restoredDraftCount} 個未提交本機草稿；請按「保存修改」完成雲端提交。`, 'warn');
                 } else {
                     v4SetCloudRuntimeStatus(`V7 雲端資料已載入｜${v7FormatCloudSaveTime()}`, 'ok');
@@ -7528,6 +7726,7 @@
             onTransportError: (error) => console.warn('V7 collaboration error', error),
             onSessionStateChanged: (event) => {
                 const code = String(event?.code || '');
+                if (!event?.user) v7ClearCloudAutoSaveTimer();
                 if (code === 'READ_SESSION_INVALID' || code === 'USER_SESSION_INVALID' || code === 'SITE_SESSION_INVALID') {
                     v7PreserveVisibleEditorDrafts();
                 }
@@ -7539,6 +7738,14 @@
                     siteAccessRenderGate();
                 }
                 renderV5SessionBar();
+                // Snapshot is applied before a restored/login session becomes trusted.
+                // Rebuild only after successful validation so role-gated controls match
+                // the verified actor.  Session-invalid paths intentionally do not rebuild
+                // the editor DOM because visible unsaved input must remain untouched.
+                if (String(event?.reason || '') === 'user-session-validated') {
+                    renderTable();
+                    if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
+                }
             },
             onItemSaved: () => renderV5SessionBar(),
             onUsersChanged: () => setTimeout(() => window.MonthlyV7App?.loadSnapshot?.().catch(console.warn), 0)
