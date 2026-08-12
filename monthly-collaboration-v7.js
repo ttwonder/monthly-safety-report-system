@@ -992,7 +992,15 @@
       if (typeof this.host.onTransportError === 'function') this.host.onTransportError(error);
       else if (root.console) root.console.error(error);
       if (this.client && this.client.sessionErrorCode(error)) return;
-      this.setStatus(`逐項雲端操作失敗：${error && error.message || error}`, 'error');
+      const code = String(error && error.code || '');
+      const message = String(error && error.message || error || '');
+      const responseUnavailable = code === 'RPC_TIMEOUT'
+        || /failed to fetch|networkerror|network request failed/i.test(message);
+      if (responseUnavailable) {
+        this.setStatus('雲端連線暫時中斷；目前結果暫時無法確認。本機草稿仍完整保留，系統稍後會再同步。', 'warn');
+        return;
+      }
+      this.setStatus(`逐項雲端操作失敗：${message}`, 'error');
     }
   }
 

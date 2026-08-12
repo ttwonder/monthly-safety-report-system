@@ -133,6 +133,38 @@ test('Supabase RPC 超時會明確失敗而不是讓保存狀態永久等待', a
   assert.ok(outcome.elapsedMs >= 20, `elapsedMs=${outcome.elapsedMs}`);
 });
 
+test('背景 Failed to fetch 顯示結果未確認而非誤稱雲端操作或保存失敗', () => {
+  const statuses = [];
+  const reported = [];
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  app.client = { sessionErrorCode: () => '' };
+  app.setHost({
+    onTransportError(error) { reported.push(error); },
+    setStatus(text, kind) { statuses.push({ text, kind }); }
+  });
+  const error = new TypeError('Failed to fetch');
+
+  app.reportError(error);
+
+  assert.deepEqual(reported, [error]);
+  assert.equal(statuses.at(-1).kind, 'warn');
+  assert.match(statuses.at(-1).text, /雲端連線.*暫時無法確認/);
+  assert.match(statuses.at(-1).text, /本機草稿.*保留/);
+  assert.doesNotMatch(statuses.at(-1).text, /雲端操作失敗|保存失敗/);
+});
+
+test('非網路的確定協作錯誤仍維持 error 狀態', () => {
+  const statuses = [];
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  app.client = { sessionErrorCode: () => '' };
+  app.setHost({ setStatus(text, kind) { statuses.push({ text, kind }); } });
+
+  app.reportError(Object.assign(new Error('PERMISSION_DENIED'), { code: 'PERMISSION_DENIED' }));
+
+  assert.equal(statuses.at(-1).kind, 'error');
+  assert.match(statuses.at(-1).text, /逐項雲端操作失敗：PERMISSION_DENIED/);
+});
+
 test('site/user session 綁定分頁 ID，登入後套用不含 hash 的 normalized snapshot', async () => {
   let appliedBundle;
   const transport = fakeTransport({
@@ -1330,6 +1362,346 @@ test('catchUp 逐項重讀變更，正在編輯或有草稿的 entity 不被遠�
   assert.deepEqual(deferred, ['m2']);
   assert.equal(result.watermark, 12);
   assert.equal(client.watermark, 12);
+});
+
+test('own-operation event 已被 catchUp 讀取但 ACK 先清 pending 時不誤報遠端版本', async () => {
+  const drafts = memoryStorage();
+  const deferred = [];
+  const operationId = '00000000-0000-4000-8000-000000000904';
+  let resolveSaveAck;
+  let signalSaveStarted;
+  let resolveEntity;
+  let signalEntityStarted;
+  const saveStarted = new Promise((resolve) => { signalSaveStarted = resolve; });
+  const entityStarted = new Promise((resolve) => { signalEntityStarted = resolve; });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 10,
+      report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 },
+      modules: [{ id: 'm1', revision: 1, payload: { title: '舊內容' } }], records: [], users: []
+    },
+    monthly_v7_claim_lease: {
+      ok: true, entity_type: 'module', entity_id: 'm1', lease_id: 'lease-1', fencing_token: 4,
+      holder_user_id: 'u1', client_session_id: 'tab-1'
+    },
+    monthly_v7_save_module: () => {
+      signalSaveStarted();
+      return new Promise((resolve) => { resolveSaveAck = resolve; });
+    },
+    monthly_v7_get_changes_since: {
+      ok: true, watermark: 11, hasMore: false,
+      events: [{ sequence: 11, entityType: 'module', entityId: 'm1', revision: 2 }]
+    },
+    monthly_v7_get_entity: () => {
+      signalEntityStarted();
+      return new Promise((resolve) => { resolveEntity = resolve; });
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-1', operationIdFactory: () => operationId,
+    host: { onRemoteChangeWhileEditing(entity) { deferred.push(entity.entityId); } }
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  const item = { _v7Id: 'm1', _v7Revision: 1, title: '本機新內容' };
+
+  const saving = client.saveModule(item);
+  await saveStarted;
+  assert.ok(drafts.getItem('monthly_v7_pending:save_module:m1'));
+  const catchingUp = client.catchUp();
+  await entityStarted;
+
+  resolveSaveAck({ ok: true, entityId: 'm1', revision: 2, watermark: 11 });
+  await saving;
+  assert.equal(drafts.getItem('monthly_v7_pending:save_module:m1'), null);
+  resolveEntity({ ok: true, entityType: 'module', entityId: 'm1', revision: 2, payload: { title: '本機新內容' } });
+  await catchingUp;
+
+  assert.deepEqual(deferred, []);
+});
+
+test('batch own-operation 的所有 production-shaped hints 在第一個 entity read 前固定保存意圖', async () => {
+  const drafts = memoryStorage();
+  const deferred = [];
+  const operationId = '00000000-0000-4000-8000-000000000905';
+  const pendingKey = 'save_module_batch:r1';
+  let entityReads = 0;
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 10,
+      report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 },
+      modules: [
+        { id: 'm1', revision: 1, payload: { title: '舊一' } },
+        { id: 'm2', revision: 1, payload: { title: '舊二' } }
+      ], records: [], users: []
+    },
+    monthly_v7_get_changes_since: {
+      ok: true, watermark: 12, hasMore: false,
+      events: [
+        { sequence: 11, entityType: 'module', entityId: 'm1', revision: 2 },
+        { sequence: 12, entityType: 'module', entityId: 'm2', revision: 2 }
+      ]
+    },
+    monthly_v7_get_entity: (params) => {
+      entityReads += 1;
+      if (entityReads === 1) drafts.removeItem(`monthly_v7_pending:${pendingKey}`);
+      return {
+        ok: true, entityType: 'module', entityId: params.p_entity_id, revision: 2,
+        payload: { title: params.p_entity_id === 'm1' ? '新一' : '新二' }
+      };
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts, idFactory: () => 'tab-1',
+    host: { onRemoteChangeWhileEditing(entity) { deferred.push(entity.entityId); } }
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  const signature = JSON.stringify({
+    p_workspace_key: 'workspace-test',
+    p_user_session_id: 'user-session-1',
+    p_client_session_id: 'tab-1',
+    p_report_id: 'r1',
+    p_changes: [
+      { moduleId: 'm1', expectedRevision: 1, payload: { title: '新一' } },
+      { moduleId: 'm2', expectedRevision: 1, payload: { title: '新二' } }
+    ],
+    p_lease_id: 'batch-lease',
+    p_fencing_token: 1
+  });
+  drafts.setItem(`monthly_v7_pending:${pendingKey}`, JSON.stringify({
+    operationId, signature, createdAt: '2026-08-13T00:00:00.000Z', actorUserId: 'u1'
+  }));
+  client.saveDraft('module', 'm1', { title: '本機一' }, 1);
+  client.saveDraft('module', 'm2', { title: '本機二' }, 1);
+
+  await client.catchUp();
+
+  assert.equal(entityReads, 2);
+  assert.deepEqual(deferred, []);
+});
+
+test('get_changes_since 回覆晚於保存 ACK 時以 confirmed revision/payload 收斂 own hint', async () => {
+  const drafts = memoryStorage();
+  const deferred = [];
+  let resolveSaveAck;
+  let signalSaveStarted;
+  let resolveChanges;
+  let signalChangesStarted;
+  const saveStarted = new Promise((resolve) => { signalSaveStarted = resolve; });
+  const changesStarted = new Promise((resolve) => { signalChangesStarted = resolve; });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 10,
+      report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 },
+      modules: [{ id: 'm1', revision: 1, payload: { title: '舊內容' } }], records: [], users: []
+    },
+    monthly_v7_claim_lease: {
+      ok: true, entity_type: 'module', entity_id: 'm1', lease_id: 'lease-1', fencing_token: 4,
+      holder_user_id: 'u1', client_session_id: 'tab-1'
+    },
+    monthly_v7_save_module: () => {
+      signalSaveStarted();
+      return new Promise((resolve) => { resolveSaveAck = resolve; });
+    },
+    monthly_v7_get_changes_since: () => {
+      signalChangesStarted();
+      return new Promise((resolve) => { resolveChanges = resolve; });
+    },
+    monthly_v7_get_entity: {
+      ok: true, entityType: 'module', entityId: 'm1', revision: 2, payload: { title: '本機新內容' }
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-1', operationIdFactory: () => '00000000-0000-4000-8000-000000000906',
+    host: { onRemoteChangeWhileEditing(entity) { deferred.push(entity.entityId); } }
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  const item = { _v7Id: 'm1', _v7Revision: 1, title: '本機新內容' };
+
+  const saving = client.saveModule(item);
+  await saveStarted;
+  const catchingUp = client.catchUp();
+  await changesStarted;
+  resolveSaveAck({ ok: true, entityId: 'm1', revision: 2 });
+  await saving;
+  resolveChanges({
+    ok: true, watermark: 11, hasMore: false,
+    events: [{ sequence: 11, entityType: 'module', entityId: 'm1', revision: 2 }]
+  });
+  await catchingUp;
+
+  assert.deepEqual(deferred, []);
+  assert.equal(client.snapshot.modules[0].revision, 2);
+  assert.deepEqual(client.snapshot.modules[0].payload, { title: '本機新內容' });
+});
+
+test('own ACK 後相同 entity 的較高遠端 revision/payload 仍保護草稿並警告', async () => {
+  const drafts = memoryStorage();
+  const deferred = [];
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 10,
+      report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 },
+      modules: [{ id: 'm1', revision: 1, payload: { title: '舊內容' } }], records: [], users: []
+    },
+    monthly_v7_claim_lease: {
+      ok: true, entity_type: 'module', entity_id: 'm1', lease_id: 'lease-1', fencing_token: 4,
+      holder_user_id: 'u1', client_session_id: 'tab-1'
+    },
+    monthly_v7_save_module: { ok: true, entityId: 'm1', revision: 2 },
+    monthly_v7_get_changes_since: {
+      ok: true, watermark: 12, hasMore: false,
+      events: [{ sequence: 12, entityType: 'module', entityId: 'm1', revision: 3 }]
+    },
+    monthly_v7_get_entity: {
+      ok: true, entityType: 'module', entityId: 'm1', revision: 3, payload: { title: '真正遠端內容' }
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-1', operationIdFactory: () => '00000000-0000-4000-8000-000000000907',
+    host: { onRemoteChangeWhileEditing(entity) { deferred.push(entity.entityId); } }
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  const item = { _v7Id: 'm1', _v7Revision: 1, title: '本機已確認內容' };
+
+  await client.saveModule(item);
+  await client.catchUp();
+
+  assert.deepEqual(deferred, ['m1']);
+  assert.equal(client.snapshot.modules[0].revision, 2);
+  assert.deepEqual(client.snapshot.modules[0].payload, { title: '本機已確認內容' });
+});
+
+test('report_meta ACK 後的後繼草稿不把晚到 own hint 誤報為遠端版本', async () => {
+  const drafts = memoryStorage();
+  const deferred = [];
+  let resolveSaveAck;
+  let signalSaveStarted;
+  let resolveChanges;
+  let signalChangesStarted;
+  const saveStarted = new Promise((resolve) => { signalSaveStarted = resolve; });
+  const changesStarted = new Promise((resolve) => { signalChangesStarted = resolve; });
+  const confirmed = {
+    title: '已確認標題 A', date: '2026-08-13', period: { startM: '8' }, settings: { font: 'A' }
+  };
+  const successor = { ...confirmed, title: '後繼草稿 B' };
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 10,
+      report: { id: 'r1', legacyFileId: 'x', title: '舊標題', date: '2026-08-01', period: {}, settings: {}, revision: 1 },
+      modules: [], records: [], users: []
+    },
+    monthly_v7_claim_lease: {
+      ok: true, entity_type: 'report_meta', entity_id: 'r1', lease_id: 'meta-lease', fencing_token: 1,
+      holder_user_id: 'u1', client_session_id: 'tab-1'
+    },
+    monthly_v7_save_report_meta: () => {
+      signalSaveStarted();
+      return new Promise((resolve) => { resolveSaveAck = resolve; });
+    },
+    monthly_v7_get_changes_since: () => {
+      signalChangesStarted();
+      return new Promise((resolve) => { resolveChanges = resolve; });
+    },
+    monthly_v7_get_entity: { ok: true, entityType: 'report_meta', entityId: 'r1', revision: 2, payload: confirmed }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-1', operationIdFactory: () => '00000000-0000-4000-8000-000000000908',
+    host: { onRemoteChangeWhileEditing(entity) { deferred.push(entity.entityId); } }
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  const saving = client.saveReportMeta(confirmed);
+  await saveStarted;
+  const catchingUp = client.catchUp();
+  await changesStarted;
+  resolveSaveAck({ ok: true, entityId: 'r1', revision: 2 });
+  await saving;
+  client.saveDraft('report_meta', 'r1', successor, 2);
+  resolveChanges({
+    ok: true, watermark: 11, hasMore: false,
+    events: [{ sequence: 11, entityType: 'report_meta', entityId: 'r1', revision: 2 }]
+  });
+  await catchingUp;
+
+  assert.deepEqual(deferred, []);
+  assert.equal(client.currentReport().revision, 2);
+  assert.equal(client.currentReport().title, confirmed.title);
+  assert.equal(client.readDraft('report_meta', 'r1').payload.title, successor.title);
+});
+
+test('report_meta 較高遠端 revision/payload 仍保護後繼草稿並警告', async () => {
+  const drafts = memoryStorage();
+  const deferred = [];
+  const confirmed = {
+    title: '已確認標題 A', date: '2026-08-13', period: {}, settings: {}
+  };
+  const successor = { ...confirmed, title: '後繼草稿 B' };
+  const remote = { ...confirmed, title: '真正遠端標題 C' };
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 10,
+      report: { id: 'r1', legacyFileId: 'x', title: '舊標題', date: '2026-08-01', period: {}, settings: {}, revision: 1 },
+      modules: [], records: [], users: []
+    },
+    monthly_v7_claim_lease: {
+      ok: true, entity_type: 'report_meta', entity_id: 'r1', lease_id: 'meta-lease', fencing_token: 1,
+      holder_user_id: 'u1', client_session_id: 'tab-1'
+    },
+    monthly_v7_save_report_meta: { ok: true, entityId: 'r1', revision: 2 },
+    monthly_v7_get_changes_since: {
+      ok: true, watermark: 12, hasMore: false,
+      events: [{ sequence: 12, entityType: 'report_meta', entityId: 'r1', revision: 3 }]
+    },
+    monthly_v7_get_entity: { ok: true, entityType: 'report_meta', entityId: 'r1', revision: 3, payload: remote }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-1', operationIdFactory: () => '00000000-0000-4000-8000-000000000909',
+    host: { onRemoteChangeWhileEditing(entity) { deferred.push(entity.entityId); } }
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  await client.saveReportMeta(confirmed);
+  client.saveDraft('report_meta', 'r1', successor, 2);
+  await client.catchUp();
+
+  assert.deepEqual(deferred, ['r1']);
+  assert.equal(client.currentReport().title, confirmed.title);
+  assert.equal(client.readDraft('report_meta', 'r1').payload.title, successor.title);
 });
 
 test('saveModuleBatch 成功後保留原先持有的 module lease', async () => {

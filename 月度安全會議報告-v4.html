@@ -2240,9 +2240,9 @@
     </div>
 
     <script src="./vendor/supabase-2.112.2.js"></script>
-    <script src="./monthly-collaboration-core.js?v=7.0.11"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.11"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.11"></script>
+    <script src="./monthly-collaboration-core.js?v=7.0.12"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.12"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.12"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont(options = {}) {
@@ -5965,6 +5965,7 @@
         let V6_LOCK_OWNER_TEXT = '';
         let V4_CLOUD_STATUS_TEXT = '正在初始化雲端同步...';
         let V4_CLOUD_STATUS_KIND = 'muted';
+        let V4_CLOUD_STATUS_OVER_RECOVERY = false;
         let V7_INITIALIZATION_ERROR = null;
         window.MonthlyV7App = window.MonthlyV7Browser ? new window.MonthlyV7Browser.MonthlyV7BrowserApp() : null;
 
@@ -6039,10 +6040,14 @@
                 || v7HasUnresolvedFormalSnapshotOperation();
             const pendingFailureProtected = V4_CLOUD_STATUS_KIND === 'error'
                 && v7CurrentReportHasPendingSaveOperation();
+            const pendingUnknownProtected = V4_CLOUD_STATUS_OVER_RECOVERY
+                && v7CurrentReportHasPendingSaveOperation();
             if (criticalStatusProtected && kind !== 'error' && options.allowCriticalOverride !== true) return false;
             if (pendingFailureProtected && kind !== 'error' && options.allowPendingFailureOverride !== true) return false;
+            if (pendingUnknownProtected && kind !== 'error' && options.allowPendingFailureOverride !== true) return false;
             V4_CLOUD_STATUS_TEXT = text || '';
             V4_CLOUD_STATUS_KIND = kind;
+            V4_CLOUD_STATUS_OVER_RECOVERY = options.preferOverRecovery === true;
             if (protectForMs > 0) {
                 V7_TRANSIENT_STATUS_UNTIL = Math.max(V7_TRANSIENT_STATUS_UNTIL, now + protectForMs);
             }
@@ -6164,9 +6169,9 @@
             // A real failed save must remain visible. Recovery outranks only
             // ordinary success/draft messages so late local callbacks cannot hide
             // the fail-closed cutover warning.
-            const showError = V4_CLOUD_STATUS_KIND === 'error';
-            const kind = showError ? 'error' : (recoveryText ? 'warn' : V4_CLOUD_STATUS_KIND);
-            const text = showError ? V4_CLOUD_STATUS_TEXT : (recoveryText || V4_CLOUD_STATUS_TEXT);
+            const showCurrentStatus = V4_CLOUD_STATUS_KIND === 'error' || V4_CLOUD_STATUS_OVER_RECOVERY;
+            const kind = showCurrentStatus ? V4_CLOUD_STATUS_KIND : (recoveryText ? 'warn' : V4_CLOUD_STATUS_KIND);
+            const text = showCurrentStatus ? V4_CLOUD_STATUS_TEXT : (recoveryText || V4_CLOUD_STATUS_TEXT);
             const cls = kind === 'ok' ? 'text-emerald-700 font-bold' : kind === 'warn' ? 'text-amber-700 font-bold' : kind === 'error' ? 'text-rose-700 font-bold' : 'text-slate-500';
             return `<span id="v4-cloud-runtime-status" class="${cls}">${v2RecordText(text)}</span>`;
         }
@@ -6379,9 +6384,29 @@
                         if (error?.code === 'REVISION_CONFLICT') {
                             v4SetCloudRuntimeStatus('項目保存衝突：REVISION_CONFLICT。本機草稿已保留；請按「保存修改」確認處理。', 'error');
                         } else {
-                            v4SetCloudRuntimeStatus('雲端保存失敗：' + error.message + '（本機草稿已保留）', 'error');
+                            const code = String(error?.code || '');
+                            const message = String(error?.message || error || '');
+                            const responseUnavailable = code === 'RPC_TIMEOUT'
+                                || /failed to fetch|networkerror|network request failed/i.test(message);
+                            if (responseUnavailable) {
+                                v4SetCloudRuntimeStatus(
+                                    `雲端保存結果尚未確認：${message}。本機草稿與待對帳操作均已保留，系統稍後會以同一操作自動對帳。`,
+                                    'warn',
+                                    { preferOverRecovery: true }
+                                );
+                            } else {
+                                v4SetCloudRuntimeStatus('雲端保存失敗：' + message + '（本機草稿已保留）', 'error');
+                            }
                         }
-                        if (!silent) alert('保存失敗，本機草稿已保留：' + error.message);
+                        if (!silent) {
+                            const code = String(error?.code || '');
+                            const message = String(error?.message || error || '');
+                            const responseUnavailable = code === 'RPC_TIMEOUT'
+                                || /failed to fetch|networkerror|network request failed/i.test(message);
+                            alert(responseUnavailable
+                                ? `雲端保存結果尚未確認：${message}。本機草稿已保留，請勿刷新；系統稍後會自動對帳。`
+                                : '保存失敗，本機草稿已保留：' + message);
+                        }
                         return false;
                     }
                 })();

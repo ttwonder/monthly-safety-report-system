@@ -1738,7 +1738,7 @@ test('full snapshot catch-up 不覆蓋尚未 blur 的本機 module', async ({ pa
   expect(errors).toEqual([]);
 });
 
-test('report metadata 未確認前不得提前顯示整份雲端成功，失敗後維持 dirty 重試', async ({ page, request }) => {
+test('report metadata 未確認前不得提前顯示整份雲端成功，結果未知時維持 dirty 重試', async ({ page, request }) => {
   const dialogs = [];
   page.on('dialog', async (dialog) => {
     dialogs.push(dialog.message());
@@ -1781,14 +1781,18 @@ test('report metadata 未確認前不得提前顯示整份雲端成功，失敗�
   });
   expect(result.history.some((value) => /(?:雲端已保存|月報資訊已保存)｜\d{2}:\d{2}:\d{2}/.test(value))).toBe(false);
   expect(result.finalStatus).toContain('RPC_TIMEOUT');
+  expect(result.finalStatus).toContain('保存結果尚未確認');
+  expect(result.finalStatus).toContain('本機草稿');
+  expect(result.finalStatus).not.toContain('保存失敗');
   expect(result.dirty).toBe(true);
   expect(result.actorPending).toBe(true);
   expect(result.draft).toContain('metadata 尚未確認的月報標題');
   expect(result.pending).toBeTruthy();
-  expect(dialogs.some((message) => message.includes('RPC_TIMEOUT'))).toBe(true);
+  expect(dialogs.some((message) => message.includes('RPC_TIMEOUT') && message.includes('結果尚未確認'))).toBe(true);
+  expect(dialogs.some((message) => message.includes('保存失敗'))).toBe(false);
 });
 
-test('保存 RPC 無回應會結束為失敗並保留草稿，重試後可由新瀏覽器讀回雲端內容', async ({ page, request, browser }) => {
+test('保存 RPC 無回應會結束等待並保留草稿，重試後可由新瀏覽器讀回雲端內容', async ({ page, request, browser }) => {
   const dialogs = [];
   page.on('dialog', async (dialog) => {
     dialogs.push(dialog.message());
@@ -1980,39 +1984,89 @@ test('列印目前內容不受雲端逾時或 pending 阻擋，且不建立正�
   expect(after.snapshots).toEqual(before.snapshots);
 });
 
-test('自己的 in-flight operation Realtime event 不誤報遠端新版本', async ({ page, request }) => {
+test('保存 ACK 先清 pending、晚到的 production-shaped Realtime hint 仍不誤報遠端新版本', async ({ page, request }) => {
   const dialogs = [];
+  let signalSaveCommitted;
+  let releaseSaveAck;
+  let signalChangesStarted;
+  let releaseChanges;
+  const saveCommitted = new Promise((resolve) => { signalSaveCommitted = resolve; });
+  const saveAckGate = new Promise((resolve) => { releaseSaveAck = resolve; });
+  const changesStarted = new Promise((resolve) => { signalChangesStarted = resolve; });
+  const changesGate = new Promise((resolve) => { releaseChanges = resolve; });
+
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_save_module') {
+      const response = await route.fetch();
+      signalSaveCommitted();
+      await saveAckGate;
+      await route.fulfill({ response });
+      return;
+    }
+    if (payload?.name === 'monthly_v7_get_changes_since') {
+      const response = await route.fetch();
+      signalChangesStarted();
+      await changesGate;
+      await route.fulfill({ response });
+      return;
+    }
+    await route.continue();
+  });
   page.on('dialog', async (dialog) => {
     dialogs.push(dialog.message());
     await dialog.dismiss();
   });
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.evaluate(() => {
-    window.MonthlyV7App.transport.requestTimeoutMs = 1200;
     reportData[0].title = '自己的 Realtime 保存內容';
     renderTable();
     v1EnsureModuleFields();
+    const status = document.getElementById('v4-cloud-runtime-status');
+    window.__ownRealtimeStatusHistory = [String(status?.textContent || '')];
+    window.__ownRealtimeStatusObserver = new MutationObserver(() => {
+      window.__ownRealtimeStatusHistory.push(String(status?.textContent || ''));
+    });
+    window.__ownRealtimeStatusObserver.observe(status, { childList: true, subtree: true, characterData: true });
     window.__ownRealtimeSaveState = { status: 'pending', result: null };
-  });
-  await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=1&mode=after_commit');
-  await page.evaluate(() => {
+    window.__ownRealtimeCatchUpState = { status: 'pending', error: '' };
     window.__ownRealtimeSavePromise = v5SaveChangesToCloud()
       .then((result) => { window.__ownRealtimeSaveState = { status: 'done', result }; })
       .catch((error) => {
         window.__ownRealtimeSaveState = { status: 'error', result: String(error?.message || error) };
       });
   });
+  await saveCommitted;
   await expect.poll(async () => (await request.get('/__fake_state')).json().then((state) => state.modules[0].revision), {
     timeout: 5000
   }).toBe(2);
 
-  const statusDuringOwnEvent = await page.evaluate(async () => {
-    await window.MonthlyV7App.client.catchUp();
-    return document.getElementById('v4-cloud-runtime-status')?.textContent || '';
+  await page.evaluate(() => {
+    window.__ownRealtimeCatchUpPromise = window.MonthlyV7App.client.catchUp()
+      .then(() => { window.__ownRealtimeCatchUpState = { status: 'done', error: '' }; })
+      .catch((error) => {
+        window.__ownRealtimeCatchUpState = { status: 'error', error: String(error?.message || error) };
+      });
   });
+  await changesStarted;
+  releaseSaveAck();
   await expect.poll(() => page.evaluate(() => window.__ownRealtimeSaveState.status), { timeout: 10000 }).toBe('done');
   expect(await page.evaluate(() => window.__ownRealtimeSaveState.result)).toBe(true);
-  expect(statusDuringOwnEvent).not.toContain('正在編輯的項目有遠端新版本');
+  expect(await page.evaluate(() => window.MonthlyV7App.client.hasCurrentActorPendingOperation(
+    'save_module:22222222-2222-4222-8222-222222222221'
+  ))).toBe(false);
+
+  releaseChanges();
+  await expect.poll(() => page.evaluate(() => window.__ownRealtimeCatchUpState.status), { timeout: 10000 }).toBe('done');
+  const statusResult = await page.evaluate(() => {
+    window.__ownRealtimeStatusObserver?.disconnect();
+    return {
+      history: window.__ownRealtimeStatusHistory,
+      finalStatus: document.getElementById('v4-cloud-runtime-status')?.textContent || ''
+    };
+  });
+  expect(statusResult.history.some((value) => value.includes('正在編輯的項目有遠端新版本'))).toBe(false);
+  expect(statusResult.finalStatus).toMatch(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
   expect(dialogs).toEqual([]);
   const state = await (await request.get('/__fake_state')).json();
   expect(state.modules[0].revision).toBe(2);

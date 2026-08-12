@@ -529,6 +529,7 @@ test('V7 change sequence 可補抓漏訊息，事件不帶 payload 並支援逐�
       ['workspace-test', a.login.user_session_id, a.clientSessionId, randomUUID(), item.id, item.revision, lease.lease_id, lease.fencing_token, JSON.stringify({ ...item.payload, title: 'sequence-test' })]
     ));
     assert.equal(saved.ok, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(saved, 'watermark'), false);
     const changes = rpcResult(await db.query(
       'select public.monthly_v7_get_changes_since($1,$2,$3,$4,$5) as result',
       ['workspace-test', a.site.site_session_id, a.login.user_session_id, 0, 100]
@@ -536,6 +537,10 @@ test('V7 change sequence 可補抓漏訊息，事件不帶 payload 並支援逐�
     assert.equal(changes.ok, true);
     assert.ok(changes.watermark > 0);
     assert.equal(changes.events.some((event) => event.entityId === item.id), true);
+    assert.equal(changes.events.some((event) => (
+      Object.prototype.hasOwnProperty.call(event, 'operationId')
+      || Object.prototype.hasOwnProperty.call(event, 'actorUserId')
+    )), false);
     assert.equal(JSON.stringify(changes).includes('sequence-test'), false);
     const entity = rpcResult(await db.query(
       'select public.monthly_v7_get_entity($1,$2,$3,$4,$5) as result',

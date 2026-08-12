@@ -44,8 +44,10 @@ function userForSession(id) {
   return session ? state.users.find((user) => user.id === session.userId) : null;
 }
 
-function event(entityType, entityId, revision, operationId) {
-  const row = { sequence: ++state.sequence, entityType, entityId, revision, operationId, changedAt: new Date().toISOString() };
+function event(entityType, entityId, revision) {
+  // Match the production monthly_v7_get_changes_since contract: change hints
+  // deliberately expose no actor or operation identity.
+  const row = { sequence: ++state.sequence, entityType, entityId, revision, changedAt: new Date().toISOString() };
   state.events.push(row);
   return row;
 }
@@ -165,7 +167,7 @@ function rpc(name, p) {
     module.updatedAt = new Date().toISOString();
     lease.expiresAt = now() + 90000;
     event('module', module.id, module.revision, p.p_operation_id);
-    const result = { ok: true, entityId: module.id, revision: module.revision, watermark: state.sequence };
+    const result = { ok: true, entityId: module.id, revision: module.revision };
     return storeOperation(p.p_operation_id, user.id, requestHash, result);
   }
   if (name === 'monthly_v7_create_module') {
@@ -229,7 +231,7 @@ function rpc(name, p) {
       event('module', module.id, module.revision, p.p_operation_id);
     }
     lease.expiresAt = now() + 90000;
-    return { ok: true, updated, operationId: p.p_operation_id, watermark: state.sequence };
+    return { ok: true, updated, operationId: p.p_operation_id };
   }
   if (name === 'monthly_v7_reorder_modules') {
     const user = userForSession(p.p_user_session_id);
@@ -317,7 +319,7 @@ function rpc(name, p) {
     Object.assign(state.report, { title: p.p_title, date: p.p_report_date, period: clone(p.p_period), settings: clone(p.p_settings), revision: state.report.revision + 1 });
     lease.expiresAt = now() - 1;
     event('report_meta', state.report.id, state.report.revision, p.p_operation_id);
-    return { ok: true, revision: state.report.revision, watermark: state.sequence };
+    return { ok: true, revision: state.report.revision };
   }
   if (name === 'monthly_v7_create_report_snapshot') {
     if (!Object.prototype.hasOwnProperty.call(p, 'p_snapshot_kind') || Object.prototype.hasOwnProperty.call(p, 'p_kind')) {

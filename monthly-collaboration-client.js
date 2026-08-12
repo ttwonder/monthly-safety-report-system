@@ -775,42 +775,140 @@
       return String(pending.actorUserId) === currentActorId;
     }
 
-    pendingOperationMatchesCurrentEvent(pendingKey, event) {
-      if (!this.draftStorage || !pendingKey || !event) return false;
-      const eventOperationId = String(event.operationId || event.operation_id || '');
-      if (!eventOperationId) return false;
-      const pendingRaw = this.draftStorage.getItem(`monthly_v7_pending:${pendingKey}`);
-      if (pendingRaw === null) return false;
-      try {
-        const pending = JSON.parse(pendingRaw);
-        this.validatePendingEnvelope(pending);
-        const currentActorId = String(this.currentUser() && this.currentUser().id || '');
-        return !!currentActorId
-          && String(pending.actorUserId || '') === currentActorId
-          && String(pending.operationId || '') === eventOperationId;
-      } catch (_error) {
-        return false;
+    captureCurrentActorPendingSaveIntents() {
+      const intents = new Map();
+      const ambiguous = new Set();
+      if (!this.draftStorage) return intents;
+      const actorUserId = String(this.currentUser() && this.currentUser().id || '');
+      if (!actorUserId) return intents;
+      const addIntent = (entityType, entityId, expectedRevision, payload) => {
+        const type = String(entityType || '');
+        const id = String(entityId || '');
+        const baseRevision = Number(expectedRevision);
+        if (!['module', 'report_meta'].includes(type)
+          || !id || !Number.isSafeInteger(baseRevision) || baseRevision < 0
+          || !payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+        const key = this.leaseKey(type, id);
+        if (ambiguous.has(key)) return;
+        const intent = {
+          entityType: type, entityId: id, revision: baseRevision + 1,
+          payload: this.cloneJson(payload, {})
+        };
+        const existing = intents.get(key);
+        if (existing && (existing.revision !== intent.revision
+          || this.operationCanonical(existing.payload) !== this.operationCanonical(intent.payload))) {
+          intents.delete(key);
+          ambiguous.add(key);
+          return;
+        }
+        intents.set(key, intent);
+      };
+      const readPending = (rpcName, pendingKey, consume) => {
+        const raw = this.draftStorage.getItem(`monthly_v7_pending:${pendingKey}`);
+        if (raw === null) return;
+        try {
+          const pending = JSON.parse(raw);
+          const params = this.validatePendingEnvelope(pending);
+          if (String(pending.actorUserId || '') !== actorUserId) return;
+          consume(params);
+        } catch (_error) {
+          // Invalid/ambiguous pending evidence can never identify an own hint.
+        }
+      };
+      const moduleIds = new Set((this.snapshot && this.snapshot.modules || [])
+        .map((row) => String(row && row.id || '')).filter(Boolean));
+      for (const lease of this.leases.values()) {
+        if (String(lease && lease.entityType || '') === 'module' && lease.entityId) {
+          moduleIds.add(String(lease.entityId));
+        }
       }
+      for (const entityId of moduleIds) {
+        const pendingKey = `save_module:${entityId}`;
+        readPending('monthly_v7_save_module', pendingKey, (params) => {
+          if (!this.pendingTargetsEntity('monthly_v7_save_module', pendingKey, params, 'module', entityId)) return;
+          addIntent('module', entityId, params.p_expected_revision, params.p_payload);
+        });
+      }
+      const reportId = String(this.currentReport() && this.currentReport().id || '');
+      if (reportId) {
+        const pendingKey = `save_module_batch:${reportId}`;
+        readPending('monthly_v7_save_module_batch', pendingKey, (params) => {
+          for (const row of Array.isArray(params.p_changes) ? params.p_changes : []) {
+            const entityId = String(row && row.moduleId || '');
+            if (!this.pendingTargetsEntity('monthly_v7_save_module_batch', pendingKey, params, 'module', entityId)) continue;
+            addIntent('module', entityId, row.expectedRevision, row.payload);
+          }
+        });
+        const metaPendingKey = `save_report_meta:${reportId}`;
+        readPending('monthly_v7_save_report_meta', metaPendingKey, (params) => {
+          if (!this.pendingTargetsEntity('monthly_v7_save_report_meta', metaPendingKey, params, 'report_meta', reportId)) return;
+          addIntent(
+            'report_meta', reportId, params.p_expected_revision,
+            this.pendingEntityPayload('monthly_v7_save_report_meta', params, reportId)
+          );
+        });
+      }
+      return intents;
     }
 
-    isCurrentActorPendingEvent(entityType, entityId, event) {
-      const type = String(entityType || '');
-      const id = String(entityId || '');
-      const reportId = String(this.currentReport() && this.currentReport().id || '');
-      const candidates = [];
-      if (type === 'module' && id) {
-        candidates.push(`save_module:${id}`, `delete_module:${id}`);
-        if (reportId) candidates.push(
-          `save_module_batch:${reportId}`,
-          `create_module:${reportId}`,
-          `reorder_modules:${reportId}`
-        );
-      } else if (type === 'report_meta' && id) {
-        candidates.push(`save_report_meta:${id}`);
-      } else if (type.startsWith('record:') && id) {
-        candidates.push(`save_record:${id}`, `delete_record:${id}`);
+    changeConvergesWithLocalAuthority(event, entity, pendingIntent = null) {
+      if (!event || !entity || entity.ok !== true || entity.deleted === true) return false;
+      const entityType = String(event.entityType || event.entity_type || '');
+      if (!['module', 'report_meta'].includes(entityType)) return false;
+      const eventRevision = Number(event.revision);
+      const entityRevision = Number(entity.revision);
+      if (!Number.isSafeInteger(eventRevision) || eventRevision <= 0
+        || !Number.isSafeInteger(entityRevision) || entityRevision <= 0
+        || eventRevision > entityRevision) return false;
+      const payloadMatches = (payload) => payload && typeof payload === 'object'
+        && !Array.isArray(payload)
+        && this.operationCanonical(payload) === this.operationCanonical(entity.payload);
+      if (pendingIntent && entityRevision === Number(pendingIntent.revision)
+        && payloadMatches(pendingIntent.payload)) return true;
+      const entityId = String(event.entityId || event.entity_id || '');
+      let row = null;
+      let confirmedPayload = null;
+      if (entityType === 'module') {
+        row = (this.snapshot && this.snapshot.modules || [])
+          .find((entry) => String(entry && entry.id || '') === entityId);
+      } else {
+        row = this.currentReport();
+        if (String(row && row.id || '') === entityId) {
+          confirmedPayload = {
+            title: String(row.title || ''),
+            date: String(row.date || ''),
+            period: this.cloneJson(row.period, {}),
+            settings: this.cloneJson(row.settings, {})
+          };
+        } else {
+          row = null;
+        }
       }
-      return candidates.some((key) => this.pendingOperationMatchesCurrentEvent(key, event));
+      if (!row) return false;
+      const protectedRevision = Number(row._serverRevision);
+      const hasProtectedAuthority = Number.isSafeInteger(protectedRevision) && protectedRevision > 0
+        && (entityType !== 'module' || (row._serverPayload && typeof row._serverPayload === 'object'));
+      const confirmedRevision = hasProtectedAuthority ? protectedRevision : Number(row.revision);
+      if (entityType === 'module') {
+        confirmedPayload = hasProtectedAuthority ? row._serverPayload : row.payload;
+      }
+      return Number.isSafeInteger(confirmedRevision) && confirmedRevision > 0
+        && entityRevision === confirmedRevision
+        && payloadMatches(confirmedPayload);
+    }
+
+    confirmModuleAuthority(entityId, revision, payload) {
+      const id = String(entityId || '');
+      const confirmedRevision = Number(revision);
+      if (!id || !Number.isSafeInteger(confirmedRevision) || confirmedRevision <= 0
+        || !this.snapshot || !Array.isArray(this.snapshot.modules)) return null;
+      const row = this.snapshot.modules.find((entry) => String(entry && entry.id || '') === id);
+      if (!row) return null;
+      row.revision = confirmedRevision;
+      row.payload = this.cloneJson(payload, {});
+      delete row._serverRevision;
+      delete row._serverPayload;
+      return row;
     }
 
     pendingOperationTargets(rpcName, pendingKey) {
@@ -1365,6 +1463,7 @@
         }
         this.assertSessionContext(operationContext, 'save_module');
         item._v7Revision = Number(result.revision);
+        this.confirmModuleAuthority(entityId, item._v7Revision, payload);
         this.watermark = Math.max(this.watermark, Number(result.watermark || 0));
         this.clearDraft('module', entityId);
         if (typeof this.host.onItemSaved === 'function') this.host.onItemSaved({ entityType: 'module', entityId, revision: item._v7Revision });
@@ -1743,7 +1842,11 @@
       }
       const updates = new Map((result.updated || []).map((row) => [row.entityId || row.entity_id, Number(row.revision)]));
       (items || []).forEach((item) => {
-        if (updates.has(item._v7Id)) item._v7Revision = updates.get(item._v7Id);
+        if (updates.has(item._v7Id)) {
+          item._v7Revision = updates.get(item._v7Id);
+          const submitted = changes.find((row) => String(row.moduleId) === String(item._v7Id));
+          if (submitted) this.confirmModuleAuthority(item._v7Id, item._v7Revision, submitted.payload);
+        }
         this.clearDraft('module', item._v7Id);
       });
       // Persistence acknowledgement (including same-operation COMMITTED replay)
@@ -1996,6 +2099,9 @@
       let pageCount = 0;
       let lastResult = { watermark: this.watermark, events: [], hasMore: false };
       do {
+        // Production change hints intentionally contain no actor/operation ID.
+        // Capture exact pending save intent before this request can race its ACK.
+        const pendingSaveIntents = this.captureCurrentActorPendingSaveIntents();
         const raw = await this.rpc('monthly_v7_get_changes_since', {
           p_workspace_key: this.config.workspaceKey,
           p_site_session_id: this.siteSession.id,
@@ -2011,6 +2117,9 @@
           const id = event.entityId || event.entity_id;
           latestByEntity.set(this.leaseKey(type, id), { type, id, event });
         }
+        for (const value of latestByEntity.values()) {
+          value.pendingSaveIntent = pendingSaveIntents.get(this.leaseKey(value.type, value.id)) || null;
+        }
         let requiresFullSnapshot = false;
         for (const value of latestByEntity.values()) {
           if (!(value.type === 'module' || value.type === 'report_meta' || value.type.startsWith('record:'))) {
@@ -2025,8 +2134,10 @@
             p_entity_id: value.id
           });
           const hasLocalIntent = !!this.getLease(value.type, value.id) || !!(this.draftStorage && this.draftStorage.getItem(this.draftKey(value.type, value.id)));
-          const ownPendingEvent = this.isCurrentActorPendingEvent(value.type, value.id, value.event);
-          if (hasLocalIntent && !ownPendingEvent) {
+          const convergedOwnSaveHint = this.changeConvergesWithLocalAuthority(
+            value.event, entity, value.pendingSaveIntent
+          );
+          if (hasLocalIntent && !convergedOwnSaveHint) {
             if (typeof this.host.onRemoteChangeWhileEditing === 'function') this.host.onRemoteChangeWhileEditing(entity, value.event);
           } else if (!hasLocalIntent && typeof this.host.applyEntity === 'function') {
             await this.host.applyEntity(entity, value.event);
