@@ -247,6 +247,120 @@ test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
 });
 
+test('未登入純進站同步不得誤標月報編輯為本機草稿或要求登入提交', async ({ page, request }) => {
+  await page.addInitScript(() => {
+    let capturedOnload = null;
+    Object.defineProperty(window, 'onload', {
+      configurable: true,
+      get: () => capturedOnload,
+      set: (handler) => {
+        capturedOnload = handler;
+        window.__entryCapturedOnload = handler;
+      }
+    });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.evaluate(async () => {
+    const boot = window.__entryCapturedOnload;
+    if (typeof boot !== 'function') throw new Error('PRODUCTION_ONLOAD_NOT_CAPTURED');
+    window.onload = null;
+    window.__entryCapturedOnload = null;
+    await boot.call(window);
+  });
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.evaluate(() => {
+    window.__entryStatusHistory = [];
+    window.__entrySaveHistory = [];
+    window.__entryManualSaveHistory = [];
+    window.__entryAutoSaveHistory = [];
+    const originalStatus = window.v4SetCloudRuntimeStatus;
+    window.v4SetCloudRuntimeStatus = (...args) => {
+      window.__entryStatusHistory.push({
+        text: String(args[0] || ''),
+        kind: String(args[1] || ''),
+        stack: String(new Error('ENTRY_STATUS').stack || '')
+      });
+      return originalStatus(...args);
+    };
+    const originalSave = window.saveToDB;
+    window.saveToDB = async (...args) => {
+      window.__entrySaveHistory.push({
+        options: args[2] || {},
+        applying: Boolean(window.V4_CLOUD_APPLYING),
+        stack: String(new Error('ENTRY_SAVE').stack || '')
+      });
+      return originalSave(...args);
+    };
+    const originalManualSave = window.manualSave;
+    window.manualSave = (...args) => {
+      window.__entryManualSaveHistory.push({
+        args,
+        stack: String(new Error('ENTRY_MANUAL_SAVE').stack || '')
+      });
+      return originalManualSave(...args);
+    };
+    const originalTriggerAutoSave = window.triggerAutoSave;
+    window.triggerAutoSave = (...args) => {
+      window.__entryAutoSaveHistory.push({
+        element: args[0]?.id || args[0]?.className || args[0]?.tagName || '',
+        stack: String(new Error('ENTRY_AUTO_SAVE').stack || '')
+      });
+      return originalTriggerAutoSave(...args);
+    };
+  });
+
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await expect.poll(() => page.evaluate(() => {
+    const snapshotIds = (window.MonthlyV7App?.client?.snapshot?.modules || []).map((item) => String(item?.id || ''));
+    const modelIds = Array.isArray(reportData) ? reportData.map((item) => String(item?._v7Id || '')) : [];
+    const domIds = Array.from(document.querySelectorAll('#tableBody tr[data-v7-entity-id]'))
+      .map((row) => String(row.dataset.v7EntityId || ''));
+    return snapshotIds.length > 0
+      && JSON.stringify(modelIds) === JSON.stringify(snapshotIds)
+      && JSON.stringify(domIds) === JSON.stringify(snapshotIds);
+  }), { timeout: 30000 }).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__entryStatusHistory
+    .some((entry) => /雲端資料已(?:載入|同步)/.test(entry.text))), { timeout: 10000 }).toBe(true);
+  await page.waitForTimeout(1000);
+
+  // 登入表單也不是月報內容；輸入帳密不得觸發月報 autosave。
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.waitForTimeout(1000);
+
+  const browserState = await page.evaluate(() => ({
+    currentUser: window.MonthlyV7App?.currentUser?.() || null,
+    status: document.getElementById('v4-cloud-runtime-status')?.textContent || '',
+    statusHistory: window.__entryStatusHistory,
+    saveHistory: window.__entrySaveHistory,
+    manualSaveHistory: window.__entryManualSaveHistory,
+    autoSaveHistory: window.__entryAutoSaveHistory,
+    draftKeys: Object.keys(localStorage).filter((key) => key.startsWith('monthly_v7_draft:')),
+    pendingKeys: Object.keys(localStorage).filter((key) => key.startsWith('monthly_v7_pending:')),
+    dirtyGeneration: window.V7_CLOUD_DIRTY_GENERATION,
+    savedGeneration: window.V7_CLOUD_SAVED_GENERATION
+  }));
+  const fakeState = await (await request.get('/__fake_state')).json();
+
+  expect(browserState.currentUser).toBeNull();
+  expect(
+    browserState.statusHistory.map((entry) => entry.text).join('\n'),
+    JSON.stringify({
+      statusHistory: browserState.statusHistory,
+      saveHistory: browserState.saveHistory,
+      manualSaveHistory: browserState.manualSaveHistory,
+      autoSaveHistory: browserState.autoSaveHistory
+    }, null, 2)
+  ).not.toMatch(/月報編輯已保存為本機草稿|請登入後提交/);
+  expect(browserState.status).not.toMatch(/月報編輯已保存為本機草稿|請登入後提交/);
+  expect(browserState.draftKeys).toEqual([]);
+  expect(browserState.pendingKeys).toEqual([]);
+  expect(browserState.dirtyGeneration).toBe(browserState.savedGeneration);
+  expect(fakeState.operations).toEqual([]);
+});
+
 test('雲端 module title 保留安全格式但不得建立或執行持久型 XSS 節點', async ({ page, request }) => {
   await page.addInitScript(() => { window.__v7TitleXssExecuted = 0; });
   await request.post('/__fake_malicious_module_title');
@@ -1813,6 +1927,153 @@ test('保存已提交但回覆遺失時，刷新後重播舊 operation 不重複
   await independentContext.close();
 });
 
+test('列印目前內容不受雲端逾時或 pending 阻擋，且不建立正式 snapshot', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await expect(page.getByRole('button', { name: '列印目前內容' })).toBeVisible();
+  const editor = page.locator('#tableBody .module-title-editor').first();
+  await editor.click();
+  await editor.fill('只在目前畫面的草稿標題');
+  await page.evaluate(() => {
+    reportData[1].selectedForPdf = false;
+    window.MonthlyV7App.transport.requestTimeoutMs = 35;
+    window.__currentDraftPrintCalls = 0;
+    window.__currentDraftCloudWrites = [];
+    window.print = () => { window.__currentDraftPrintCalls += 1; };
+    const transport = window.MonthlyV7App.transport;
+    const originalRpc = transport.rpc.bind(transport);
+    transport.rpc = async (name, params) => {
+      if (/^monthly_v7_(?:save|create_report_snapshot|delete|reorder)/.test(name)) {
+        window.__currentDraftCloudWrites.push(name);
+      }
+      return originalRpc(name, params);
+    };
+  });
+  await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=always');
+  const before = await (await request.get('/__fake_state')).json();
+
+  await page.getByRole('button', { name: '列印目前內容' }).click();
+  await expect.poll(async () => (await page.evaluate(() => window.__currentDraftPrintCalls)) + dialogs.length, {
+    timeout: 15000
+  }).toBeGreaterThan(0);
+
+  expect(await page.evaluate(() => window.__currentDraftPrintCalls)).toBe(1);
+  expect(dialogs).toEqual([]);
+  await expect(page.locator('body')).toHaveAttribute('data-print-source', 'current-draft');
+  await expect(page.locator('#pdfPrintArea')).toContainText('只在目前畫面的草稿標題');
+  await expect(page.locator('#pdfPrintArea')).toContainText('B 原始項目');
+  await expect(page.locator('#pdfPrintArea')).toContainText('本機草稿');
+  await expect(page.locator('#pdfPrintArea')).toContainText('不是正式版本');
+  expect(await page.evaluate(() => window.__currentDraftCloudWrites)).toEqual([]);
+  expect(await page.evaluate(() => localStorage.getItem(
+    'monthly_v7_draft:module:22222222-2222-4222-8222-222222222221'
+  ))).toContain('只在目前畫面的草稿標題');
+
+  const after = await (await request.get('/__fake_state')).json();
+  expect(after.modules[0].payload.title).toBe(before.modules[0].payload.title);
+  expect(after.modules[0].revision).toBe(before.modules[0].revision);
+  expect(after.operations).toEqual(before.operations);
+  expect(after.snapshots).toEqual(before.snapshots);
+});
+
+test('自己的 in-flight operation Realtime event 不誤報遠端新版本', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    window.MonthlyV7App.transport.requestTimeoutMs = 1200;
+    reportData[0].title = '自己的 Realtime 保存內容';
+    renderTable();
+    v1EnsureModuleFields();
+    window.__ownRealtimeSaveState = { status: 'pending', result: null };
+  });
+  await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=1&mode=after_commit');
+  await page.evaluate(() => {
+    window.__ownRealtimeSavePromise = v5SaveChangesToCloud()
+      .then((result) => { window.__ownRealtimeSaveState = { status: 'done', result }; })
+      .catch((error) => {
+        window.__ownRealtimeSaveState = { status: 'error', result: String(error?.message || error) };
+      });
+  });
+  await expect.poll(async () => (await request.get('/__fake_state')).json().then((state) => state.modules[0].revision), {
+    timeout: 5000
+  }).toBe(2);
+
+  const statusDuringOwnEvent = await page.evaluate(async () => {
+    await window.MonthlyV7App.client.catchUp();
+    return document.getElementById('v4-cloud-runtime-status')?.textContent || '';
+  });
+  await expect.poll(() => page.evaluate(() => window.__ownRealtimeSaveState.status), { timeout: 10000 }).toBe('done');
+  expect(await page.evaluate(() => window.__ownRealtimeSaveState.result)).toBe(true);
+  expect(statusDuringOwnEvent).not.toContain('正在編輯的項目有遠端新版本');
+  expect(dialogs).toEqual([]);
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.modules[0].revision).toBe(2);
+  expect(state.modules[0].payload.title).toBe('自己的 Realtime 保存內容');
+});
+
+test('背景保存已在途時正式 PDF 只接續同一保存，不產生 REVISION_CONFLICT 或 LEASE_LOST', async ({ page, request }) => {
+  await page.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 500;
+  });
+  const dialogs = [];
+  let releaseFirstSave;
+  const firstSaveGate = new Promise((resolve) => { releaseFirstSave = resolve; });
+  let saveCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_save_module') {
+      saveCalls += 1;
+      if (saveCalls === 1) await firstSaveGate;
+    }
+    await route.continue();
+  });
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const editor = page.locator('#tableBody .module-title-editor').first();
+  await editor.click();
+  await editor.fill('背景保存與正式 PDF 共用的內容');
+  await expect.poll(() => saveCalls, { timeout: 10000 }).toBe(1);
+
+  await page.evaluate(() => {
+    window.__inFlightFormalPrintCalls = 0;
+    window.print = () => { window.__inFlightFormalPrintCalls += 1; };
+    window.__inFlightFormalState = { status: 'pending', error: '' };
+    window.__inFlightFormalPromise = printV1SelectedPdf()
+      .then(() => { window.__inFlightFormalState = { status: 'done', error: '' }; })
+      .catch((error) => {
+        window.__inFlightFormalState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await page.waitForTimeout(200);
+  expect(saveCalls).toBe(1);
+  releaseFirstSave();
+
+  await expect.poll(() => page.evaluate(() => window.__inFlightFormalState.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  await expect.poll(async () => (await page.evaluate(() => window.__inFlightFormalPrintCalls)) + dialogs.length, {
+    timeout: 30000
+  }).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.__inFlightFormalPrintCalls)).toBe(1);
+  expect(dialogs.some((message) => /REVISION_CONFLICT|LEASE_LOST|PENDING_DRAFTS_UNRESOLVED/.test(message))).toBe(false);
+  expect(dialogs).toEqual([]);
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.modules[0].payload.title.replace(/<br>$/i, '')).toBe('背景保存與正式 PDF 共用的內容');
+  expect(state.modules[0].revision).toBe(2);
+  expect(state.snapshots).toHaveLength(1);
+  expect(saveCalls).toBe(1);
+});
+
 test('PDF 保存等待期間又輸入的新內容會在建立快照前再次上雲端', async ({ page, request }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.evaluate(() => {
@@ -1872,7 +2133,7 @@ test('cloudSaved false 時不得建立 PDF snapshot 或列印', async ({ page })
     app.persistReportData = async () => ({ mode: 'v7', localOnly: true });
   });
 
-  await page.evaluate(() => printCurrentEditorReport());
+  await page.evaluate(() => printV1SelectedPdf());
   await page.waitForTimeout(200);
   expect(await page.evaluate(() => ({
     prints: window.__cloudFalsePrintCalls,
@@ -1905,7 +2166,7 @@ test('保存後 snapshot 前遠端內容變更時不得列印不同 intent', asy
     };
   });
 
-  await page.evaluate(() => printCurrentEditorReport());
+  await page.evaluate(() => printV1SelectedPdf());
   await page.waitForTimeout(200);
   expect(await page.evaluate(() => window.__remoteDriftPrintCalls)).toBe(0);
   expect(dialogs.some((message) => message.includes('STALE_SNAPSHOT_AFTER_SAVE'))).toBe(true);
@@ -1931,10 +2192,62 @@ test('PDF snapshot 建立後內容再變更時不得列印舊 snapshot', async (
     };
   });
 
-  await page.evaluate(() => printCurrentEditorReport());
+  await page.evaluate(() => printV1SelectedPdf());
   await page.waitForTimeout(200);
   expect(await page.evaluate(() => window.__pdfLatePrintCalls)).toBe(0);
   expect(dialogs.some((message) => message.includes('PDF_CONTENT_CHANGED_AFTER_SAVE'))).toBe(true);
+});
+
+test('正式 PDF 鎖期間保留 module lease，列印解鎖後才釋放乾淨 lease', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const moduleId = '22222222-2222-4222-8222-222222222221';
+  const editor = page.locator(`#tableBody tr[data-v7-entity-id="${moduleId}"] .module-title-editor`);
+  await editor.click();
+  await editor.fill('正式 PDF 鎖期間保留 lease');
+  await page.evaluate(() => {
+    window.__formalLeasePrintCalls = 0;
+    window.__formalLeaseSnapshotWaiting = false;
+    window.__formalLeaseState = { status: 'pending', error: '' };
+    window.print = () => { window.__formalLeasePrintCalls += 1; };
+    let releaseSnapshot;
+    const snapshotGate = new Promise((resolve) => { releaseSnapshot = resolve; });
+    window.__formalLeaseReleaseSnapshot = releaseSnapshot;
+    const app = window.MonthlyV7App;
+    const originalSnapshot = app.createReportSnapshot.bind(app);
+    app.createReportSnapshot = async (kind) => {
+      window.__formalLeaseSnapshotWaiting = true;
+      await snapshotGate;
+      return originalSnapshot(kind);
+    };
+    window.__formalLeasePromise = printV1SelectedPdf()
+      .then(() => { window.__formalLeaseState = { status: 'done', error: '' }; })
+      .catch((error) => {
+        window.__formalLeaseState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__formalLeaseSnapshotWaiting), { timeout: 30000 }).toBe(true);
+  await page.waitForTimeout(800);
+
+  expect(await page.evaluate((id) => Boolean(window.MonthlyV7App.client.getLease('module', id)), moduleId)).toBe(true);
+  const held = await (await request.get('/__fake_state')).json();
+  const heldLease = held.leases.find((lease) => lease.key === `module:${moduleId}`);
+  expect(heldLease).toBeTruthy();
+  expect(heldLease.expiresAt).toBeGreaterThan(Date.now());
+  await expect(page.locator('body')).toHaveAttribute('data-v7-formal-print-lock', 'true');
+
+  await page.evaluate(() => window.__formalLeaseReleaseSnapshot());
+  await expect.poll(() => page.evaluate(() => window.__formalLeasePrintCalls), { timeout: 30000 }).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__formalLeaseState.status), { timeout: 30000 }).toBe('done');
+  expect(dialogs).toEqual([]);
+  await expect(page.locator('body')).not.toHaveAttribute('data-v7-formal-print-lock');
+  await expect.poll(() => page.evaluate((id) => Boolean(window.MonthlyV7App.client.getLease('module', id)), moduleId), {
+    timeout: 5000
+  }).toBe(false);
 });
 
 test('正式 PDF 先同步焦點中內容，snapshot 等待期間鎖住本機輸入並於列印後解鎖', async ({ page }) => {
@@ -1973,7 +2286,7 @@ test('正式 PDF 先同步焦點中內容，snapshot 等待期間鎖住本機輸
       }
       return originalFlush(meta);
     };
-    window.__formalLockPromise = printCurrentEditorReport()
+    window.__formalLockPromise = printV1SelectedPdf()
       .then(() => { window.__formalLockResult = { status: 'done', error: '' }; })
       .catch((error) => {
         window.__formalLockResult = { status: 'error', error: String(error?.message || error) };
@@ -2063,6 +2376,93 @@ test('PDF 前置保存未獲雲端確認時不得建立正式快照或列印舊�
     draft: localStorage.getItem('monthly_v7_draft:module:22222222-2222-4222-8222-222222222221'),
     pending: localStorage.getItem('monthly_v7_pending:save_module:22222222-2222-4222-8222-222222222221')
   }))).toEqual({ draft: null, pending: null });
+});
+
+test('趨勢圖即時 canvas 屬性不會在正式 PDF 保存後重建 PENDING_DRAFTS_UNRESOLVED', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await installPdfColorFixture(page);
+  await page.evaluate(() => window.renderAllCharts());
+  await expect.poll(() => page.evaluate(() => {
+    const canvas = document.querySelector('#tableBody canvas.trend-canvas');
+    return Boolean(canvas && canvas.getAttribute('data-chart-id') && canvas.hasAttribute('width') && canvas.hasAttribute('style'));
+  })).toBe(true);
+  await page.evaluate(() => {
+    window.__chartFormalPdfPrintCalls = 0;
+    window.print = () => { window.__chartFormalPdfPrintCalls += 1; };
+    window.__chartFormalPdfState = { status: 'pending', error: '' };
+    window.__chartFormalPdfPromise = printV1SelectedPdf()
+      .then(() => { window.__chartFormalPdfState = { status: 'done', error: '' }; })
+      .catch((error) => {
+        window.__chartFormalPdfState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__chartFormalPdfState.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  await expect.poll(async () => (await page.evaluate(() => window.__chartFormalPdfPrintCalls)) + dialogs.length, {
+    timeout: 30000
+  }).toBeGreaterThan(0);
+
+  expect(await page.evaluate(() => window.__chartFormalPdfPrintCalls)).toBe(1);
+  expect(dialogs.some((message) => message.includes('PENDING_DRAFTS_UNRESOLVED'))).toBe(false);
+  expect(dialogs).toEqual([]);
+  const residue = await page.evaluate(() => ({
+    draft: localStorage.getItem('monthly_v7_draft:module:22222222-2222-4222-8222-222222222221'),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:22222222-2222-4222-8222-222222222221')
+  }));
+  expect(residue).toEqual({ draft: null, pending: null });
+  const server = await (await request.get('/__fake_state')).json();
+  expect(server.snapshots).toHaveLength(1);
+  expect(server.snapshots[0].modules[0].payload.columns[0]).not.toContain('data-chart-id');
+});
+
+test('新建項目後正式 PDF 以 payload 可見 id 比對，不誤判 STALE_SNAPSHOT_AFTER_SAVE', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    window.__createdModulePdfPrintCalls = 0;
+    window.print = () => { window.__createdModulePdfPrintCalls += 1; };
+  });
+
+  await page.getByRole('button', { name: '+ 新增會議項目' }).click();
+  await expect(page.locator('#tableBody tr')).toHaveCount(3);
+  await expect.poll(async () => {
+    const state = await (await request.get('/__fake_state')).json();
+    return state.modules.length;
+  }).toBe(3);
+  const before = await (await request.get('/__fake_state')).json();
+  const created = before.modules.at(-1);
+  expect(created.legacyItemId).toMatch(/^v7:/);
+  expect(String(created.payload.id)).not.toBe(created.legacyItemId);
+
+  await page.evaluate(() => {
+    window.__createdModulePdfState = { status: 'pending', error: '' };
+    window.__createdModulePdfPromise = printV1SelectedPdf()
+      .then(() => { window.__createdModulePdfState = { status: 'done', error: '' }; })
+      .catch((error) => {
+        window.__createdModulePdfState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__createdModulePdfState.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  await expect.poll(async () => (await page.evaluate(() => window.__createdModulePdfPrintCalls)) + dialogs.length, {
+    timeout: 30000
+  }).toBeGreaterThan(0);
+
+  expect(await page.evaluate(() => window.__createdModulePdfPrintCalls)).toBe(1);
+  expect(dialogs.some((message) => message.includes('STALE_SNAPSHOT_AFTER_SAVE'))).toBe(false);
+  expect(dialogs).toEqual([]);
+  const after = await (await request.get('/__fake_state')).json();
+  expect(after.snapshots).toHaveLength(1);
+  expect(after.snapshots[0].modules.at(-1).payload.id).toBe(created.payload.id);
 });
 
 test('正式 PDF snapshot RPC timeout 標示 create_snapshot 階段與確切 RPC', async ({ page, request }) => {

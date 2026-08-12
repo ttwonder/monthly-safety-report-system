@@ -775,6 +775,44 @@
       return String(pending.actorUserId) === currentActorId;
     }
 
+    pendingOperationMatchesCurrentEvent(pendingKey, event) {
+      if (!this.draftStorage || !pendingKey || !event) return false;
+      const eventOperationId = String(event.operationId || event.operation_id || '');
+      if (!eventOperationId) return false;
+      const pendingRaw = this.draftStorage.getItem(`monthly_v7_pending:${pendingKey}`);
+      if (pendingRaw === null) return false;
+      try {
+        const pending = JSON.parse(pendingRaw);
+        this.validatePendingEnvelope(pending);
+        const currentActorId = String(this.currentUser() && this.currentUser().id || '');
+        return !!currentActorId
+          && String(pending.actorUserId || '') === currentActorId
+          && String(pending.operationId || '') === eventOperationId;
+      } catch (_error) {
+        return false;
+      }
+    }
+
+    isCurrentActorPendingEvent(entityType, entityId, event) {
+      const type = String(entityType || '');
+      const id = String(entityId || '');
+      const reportId = String(this.currentReport() && this.currentReport().id || '');
+      const candidates = [];
+      if (type === 'module' && id) {
+        candidates.push(`save_module:${id}`, `delete_module:${id}`);
+        if (reportId) candidates.push(
+          `save_module_batch:${reportId}`,
+          `create_module:${reportId}`,
+          `reorder_modules:${reportId}`
+        );
+      } else if (type === 'report_meta' && id) {
+        candidates.push(`save_report_meta:${id}`);
+      } else if (type.startsWith('record:') && id) {
+        candidates.push(`save_record:${id}`, `delete_record:${id}`);
+      }
+      return candidates.some((key) => this.pendingOperationMatchesCurrentEvent(key, event));
+    }
+
     pendingOperationTargets(rpcName, pendingKey) {
       const targets = new Set();
       if (!this.draftStorage || !pendingKey) return targets;
@@ -1987,9 +2025,10 @@
             p_entity_id: value.id
           });
           const hasLocalIntent = !!this.getLease(value.type, value.id) || !!(this.draftStorage && this.draftStorage.getItem(this.draftKey(value.type, value.id)));
-          if (hasLocalIntent) {
+          const ownPendingEvent = this.isCurrentActorPendingEvent(value.type, value.id, value.event);
+          if (hasLocalIntent && !ownPendingEvent) {
             if (typeof this.host.onRemoteChangeWhileEditing === 'function') this.host.onRemoteChangeWhileEditing(entity, value.event);
-          } else if (typeof this.host.applyEntity === 'function') {
+          } else if (!hasLocalIntent && typeof this.host.applyEntity === 'function') {
             await this.host.applyEntity(entity, value.event);
           }
         }

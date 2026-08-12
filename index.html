@@ -199,31 +199,37 @@
         });
 
         document.addEventListener('input', function(e) {
-            v7MarkLocalDraftDirty(e.target);
-            if (e.target.classList.contains('kpi-min') ||
-                e.target.classList.contains('kpi-max') || 
-                e.target.classList.contains('current-val') || 
-                e.target.classList.contains('target-val') ||
-                e.target.classList.contains('avg-val')) {
-                window.updateKpiCard(e.target);
+            const target = e.target;
+            const isReportEditorInput = !!(target && (
+                target.closest?.('#reportContainer')
+                || target.matches?.('#globalFontEnSelector, #globalFontZhSelector')
+            ));
+            if (!isReportEditorInput) return;
+            v7MarkLocalDraftDirty(target);
+            if (target.classList.contains('kpi-min') ||
+                target.classList.contains('kpi-max') ||
+                target.classList.contains('current-val') ||
+                target.classList.contains('target-val') ||
+                target.classList.contains('avg-val')) {
+                window.updateKpiCard(target);
             }
-            if (e.target.classList.contains('progress-val')) {
-                window.updateProgressCard(e.target);
+            if (target.classList.contains('progress-val')) {
+                window.updateProgressCard(target);
             }
-            if (e.target.classList.contains('zone-min') || 
-                e.target.classList.contains('zone-max') || 
-                e.target.classList.contains('zone-limit1') || 
-                e.target.classList.contains('zone-limit-mid') || 
-                e.target.classList.contains('zone-limit2') || 
-                e.target.classList.contains('current-val')) {
-                window.updateZoneCard(e.target);
+            if (target.classList.contains('zone-min') ||
+                target.classList.contains('zone-max') ||
+                target.classList.contains('zone-limit1') ||
+                target.classList.contains('zone-limit-mid') ||
+                target.classList.contains('zone-limit2') ||
+                target.classList.contains('current-val')) {
+                window.updateZoneCard(target);
             }
 
-            // 【修正 2】：防抖延遲自動保存機制
-            // 解決使用者輸入後未觸發 blur 離開編輯區，直接關閉視窗導致未儲存的問題
+            // 只為真正的月報編輯欄位排程保存；進站密碼、登入與管理表單
+            // 不是月報內容，不得在進站同步完成後製造假的本機草稿提示。
             clearTimeout(window._globalInputSaveTimer);
             window._globalInputSaveTimer = setTimeout(() => {
-                triggerAutoSave(e.target);
+                triggerAutoSave(target);
                 setTimeout(preserveTrendAnchor, 0);
             }, 800);
         });
@@ -1181,6 +1187,7 @@
         .v1-empty-state { color:#94a3b8; text-align:center; padding:24px; border:1px dashed #cbd5e1; border-radius:12px; background:#fff; }
         .v1-history-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
         .v1-note-box { border-left:4px solid #8b5cf6; background:#faf5ff; color:#5b21b6; padding:10px 12px; border-radius:8px; font-size:13px; }
+        .v1-local-draft-banner { margin:0 0 4mm; padding:7px 10px; border:2px solid #b91c1c; color:#991b1b; background:#fef2f2; text-align:center; font-size:13px; font-weight:900; letter-spacing:.04em; }
 
         .v5-session-bar { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:7px 8px; margin:-4px 0 10px; border:1px solid #bae6fd; border-radius:12px; background:#f0f9ff; color:#075985; font-size:12px; font-weight:800; }
         .v5-role-pill { display:inline-flex; align-items:center; gap:4px; border-radius:999px; padding:3px 8px; background:#e0f2fe; color:#075985; }
@@ -2023,7 +2030,7 @@
                     <input type="file" id="excelUpload" class="hidden" accept=".xlsx, .xls" onchange="importExcel(event)">
                     <button onclick="document.getElementById('excelUpload').click()" class="toolbar-btn !border-green-300 !text-green-700 hover:!bg-green-50" title="支援還原隱藏版式資料"><i class="fas fa-file-import mr-1"></i>匯入Excel</button>
                     <button onclick="exportExcel()" class="toolbar-btn !border-green-300 !text-green-700 hover:!bg-green-50" title="匯出帶有隱藏版式資料的 Excel"><i class="fas fa-file-excel mr-1"></i>匯出Excel</button>
-                    <button onclick="printCurrentEditorReport()" class="toolbar-btn !border-gray-300 !text-gray-700 hover:!bg-gray-100" title="列印目前月報編輯畫面，不使用PDF輸出中心版式"><i class="fas fa-print mr-1"></i>列印(PDF)</button>
+                    <button onmousedown="event.preventDefault()" onclick="printCurrentEditorReport()" class="toolbar-btn !border-gray-300 !text-gray-700 hover:!bg-gray-100" title="固定並列印目前畫面內容；只保存本機草稿，不上傳雲端或建立正式快照"><i class="fas fa-print mr-1"></i>列印目前內容</button>
                     <button onclick="resetData()" class="toolbar-btn !border-gray-300 !text-red-500 hover:!bg-red-50" title="恢復預設範本"><i class="fas fa-undo mr-1"></i>重置</button>
                 </div>
             </div>
@@ -2233,9 +2240,9 @@
     </div>
 
     <script src="./vendor/supabase-2.112.2.js"></script>
-    <script src="./monthly-collaboration-core.js?v=7.0.10"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.10"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.10"></script>
+    <script src="./monthly-collaboration-core.js?v=7.0.11"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.11"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.11"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont(options = {}) {
@@ -2466,7 +2473,7 @@
                 });
                 transaction.oncomplete = async () => {
                     let cloudTargetGeneration = null;
-                    if (!V4_CLOUD_APPLYING && typeof v4QueueAutoSave === 'function') {
+                    if (!V4_CLOUD_APPLYING && options.markCloudDirty !== false && typeof v4QueueAutoSave === 'function') {
                         cloudTargetGeneration = v4QueueAutoSave('月報編輯', { v7CloudDirty: true });
                     }
                     if (window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING && options.deferCloud !== true) {
@@ -4462,12 +4469,12 @@
             const selected = v1GetSelectedModules();
             root.innerHTML = `
                 <div class="v1-page-card">
-                    <h2 class="v1-page-title"><i class="fas fa-file-pdf mr-2"></i>PDF 輸出中心</h2>
-                    <div class="v1-page-subtitle">只輸出已勾選模塊。左側調整選擇與順序，右側即時預覽月報 PDF 內容。</div>
+                    <h2 class="v1-page-title"><i class="fas fa-file-pdf mr-2"></i>正式 PDF 輸出中心</h2>
+                    <div class="v1-page-subtitle">正式 PDF 只輸出已勾選模塊，並以雲端已確認版本建立不可變快照。若只要列印眼前尚未同步的內容，請使用「月報編輯」工具列的「列印目前內容」。</div>
                     <div class="v1-pdf-layout">
                         <aside class="v1-pdf-side">
                             <div class="v1-action-row">
-                                <button class="v1-small-btn v1-primary-btn" onclick="printV1SelectedPdf()"><i class="fas fa-print mr-1"></i>輸出勾選 PDF</button>
+                                <button class="v1-small-btn v1-primary-btn" onclick="printV1SelectedPdf()"><i class="fas fa-print mr-1"></i>輸出正式 PDF</button>
                                 <button class="v1-small-btn" onclick="syncV1PdfSelectionFromDom(); renderV1PdfCenter()"><i class="fas fa-rotate mr-1"></i>刷新預覽</button>
                                 <button class="v1-small-btn" onclick="switchV1Tab('modules')"><i class="fas fa-check-square mr-1"></i>管理模塊</button>
                             </div>
@@ -4575,7 +4582,9 @@
             // 不在一般預覽建構時讀取舊 PDF DOM checkbox，避免模塊庫勾選被上一版預覽狀態覆蓋。
             // 只有 PDF 頁面的「刷新預覽」和「輸出勾選 PDF」會先明確呼叫 syncV1PdfSelectionFromDom()。
             if (options.syncFromDom === true) syncV1PdfSelectionFromDom();
-            const selected = v1GetSelectedModules();
+            const selected = options.selectAll === true
+                ? reportData.map((item, index) => ({ item, index, category: v1GetCategory(item), order: index + 1 }))
+                : v1GetSelectedModules();
             if (!selected.length) {
                 return `<div class="v1-empty-state">尚未勾選任何模塊，請先在左側或「模塊庫」選擇要輸出的內容。</div>`;
             }
@@ -4679,10 +4688,17 @@
             classifyV1PdfModulePageBreaks(document.getElementById('pdfPrintArea'));
         });
 
-        async function prepareV1PdfPrintArea() {
+        async function prepareV1PdfPrintArea(options = {}) {
             const printArea = document.getElementById('pdfPrintArea');
             if (!printArea) return false;
-            printArea.innerHTML = buildV1PdfHtml({ syncFromDom: false });
+            printArea.innerHTML = buildV1PdfHtml({ syncFromDom: false, selectAll: options.selectAll === true });
+            if (options.currentDraft === true) {
+                const banner = document.createElement('div');
+                banner.className = 'v1-local-draft-banner';
+                banner.setAttribute('role', 'note');
+                banner.textContent = '本機草稿／目前內容｜尚未確認雲端同步，不是正式版本';
+                printArea.prepend(banner);
+            }
             document.body.classList.add('pdf-render-prep');
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             if (window.renderAllCharts) window.renderAllCharts();
@@ -4746,7 +4762,7 @@
             }
         }
 
-        function v7FormalSnapshotIntentPayload(value, legacyId) {
+        function v7FormalSnapshotIntentPayload(value, legacyId, defaultPdfOrder = 0) {
             const payload = JSON.parse(JSON.stringify(value || {}));
             payload.title = sanitizeModuleTitleHtml(payload.title || '');
             if (payload.content !== undefined) {
@@ -4756,7 +4772,7 @@
             if (!payload.columns) payload.columns = [''];
             if (!payload.colLayout) payload.colLayout = payload.colCount ? Array(payload.colCount).fill('1').join(':') : '1';
             if (typeof payload.selectedForPdf === 'undefined') payload.selectedForPdf = true;
-            if (typeof payload.pdfOrder === 'undefined') payload.pdfOrder = 0;
+            if (typeof payload.pdfOrder === 'undefined') payload.pdfOrder = Number(defaultPdfOrder || 0);
             if (legacyId !== undefined && legacyId !== null) payload.id = String(legacyId);
             else if (payload.id !== undefined && payload.id !== null) payload.id = String(payload.id);
             if (!payload.moduleCategory) payload.moduleCategory = v1GetCategory(payload).id;
@@ -4765,13 +4781,17 @@
 
         function v7FormalSnapshotIntentSignatureFromSnapshot(snapshot) {
             if (!snapshot?.report || !Array.isArray(snapshot.modules)) return '';
-            const modules = snapshot.modules.map((item, index) => ({
-                id: String(item?.id || `missing-${index}`),
-                payload: v7FormalSnapshotIntentPayload(
-                    item?.payload && typeof item.payload === 'object' ? item.payload : {},
-                    item?.legacyItemId == null ? item?.id : item.legacyItemId
-                )
-            }));
+            const modules = snapshot.modules.map((item, index) => {
+                const payload = item?.payload && typeof item.payload === 'object' ? item.payload : {};
+                const legacyItemId = item?.legacyItemId;
+                const visibleId = String(legacyItemId || '').startsWith('v7:') && payload.id != null
+                    ? payload.id
+                    : (legacyItemId == null ? item?.id : legacyItemId);
+                return {
+                    id: String(item?.id || `missing-${index}`),
+                    payload: v7FormalSnapshotIntentPayload(payload, visibleId, index + 1)
+                };
+            });
             const report = snapshot.report;
             const meta = {
                 title: String(report.title || '月度安全會議報告'),
@@ -4821,7 +4841,8 @@
                 id: String(item?._v7Id || item?.id || `local-${index}`),
                 payload: v7FormalSnapshotIntentPayload(
                     app?.client?.modulePayload ? app.client.modulePayload(item) : item,
-                    item?.id
+                    item?.id,
+                    index + 1
                 )
             }));
             return v7FormalSnapshotIntentCanonical({ modules, meta: v7CurrentReportMeta() });
@@ -5003,6 +5024,7 @@
                 element.setAttribute('contenteditable', 'true');
             });
             window.MonthlyV7App?.decorateEditorRows?.();
+            window.MonthlyV7App?.scheduleInactiveCleanModuleReleases?.();
         }
 
         const V7_FORMAL_PDF_STAGE_LABELS = Object.freeze({
@@ -5187,38 +5209,15 @@
         }
 
         async function printCurrentEditorReport() {
-            // V7 必須從資料庫不可變 snapshot 列印；legacy mode 保留原 editor 列印。
-            if (window.MonthlyV7App?.isActive?.()) {
-                if (!v7RequireFormalPdfUser()) return;
-                let printLock = null;
-                try {
-                    printLock = await v7AcquireFormalPrintLock();
-                    const snapshotFloor = await v7RunFormalPdfStage('save_data', () => v7ConfirmCloudBeforeFormalSnapshot());
-                    const formal = await v7RunFormalPdfStage('create_snapshot', () => v7CreateFreshFormalSnapshot('pdf', snapshotFloor));
-                    v7AssertFormalSnapshotIntent(snapshotFloor);
-                    const ok = await v7RunFormalPdfStage('prepare_print', () => prepareV7FormalSnapshotPrintArea(formal, { selectAll: true }));
-                    if (!ok) {
-                        v7ReleaseFormalPrintLock(printLock);
-                        return;
-                    }
-                    v7AssertFormalSnapshotIntent(snapshotFloor);
-                    if (v7StartVerifiedPrint(snapshotFloor, printLock)) printLock = null;
-                    else v7ReleaseFormalPrintLock(printLock);
-                    return;
-                } catch (error) {
-                    v7ReleaseFormalPrintLock(printLock);
-                    v7ReportFormalPdfFailure(error);
-                    return;
-                }
-            }
-            if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
+            const focused = document.activeElement;
+            v7SyncFocusedEditorToModel(focused);
+            if (window.MonthlyV7App?.isActive?.()) v7PreserveVisibleEditorDrafts();
+            await saveToDB(reportData, Date.now(), { deferCloud: true, markCloudDirty: false });
             document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
-            document.body.dataset.printSource = 'editor';
-            const printArea = document.getElementById('pdfPrintArea');
-            if (printArea) printArea.innerHTML = '';
-            if (window.renderAllCharts) {
-                try { window.renderAllCharts(); } catch (err) { console.warn('列印前重畫趨勢圖失敗', err); }
-            }
+            const ok = await prepareV1PdfPrintArea({ selectAll: true, currentDraft: true });
+            if (!ok) return;
+            document.body.dataset.printSource = 'current-draft';
+            document.body.classList.add('pdf-print-mode');
             setTimeout(() => window.print(), 80);
         }
 
@@ -7562,7 +7561,9 @@
                     const columns = Array.from(row.querySelectorAll('[data-col-index]'));
                     if (columns.length) {
                         local.columns = Array.isArray(local.columns) ? local.columns.slice() : [];
-                        columns.forEach(node => { local.columns[Number(node.dataset.colIndex)] = node.innerHTML; });
+                        columns.forEach(node => {
+                            local.columns[Number(node.dataset.colIndex)] = sanitizeTrendChartHtml(node.innerHTML);
+                        });
                     }
                 }
                 return local;

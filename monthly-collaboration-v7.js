@@ -766,12 +766,17 @@
     scheduleUnchangedModuleRelease(row, delayMs = 350) {
       if (!row || !this.client) return;
       const entityId = String(row.dataset.v7EntityId || '');
+      if (root.document?.body?.dataset?.v7FormalPrintLock === 'true') {
+        this.cancelModuleRelease(entityId);
+        return;
+      }
       const operationLease = entityId ? this.client.getLease('module', entityId) : null;
       const operationContext = operationLease ? this.captureOperationContext() : null;
       if (!entityId || !operationLease || !operationContext) return;
       this.cancelModuleRelease(entityId);
       const timer = root.setTimeout(async () => {
         this.moduleReleaseTimers.delete(entityId);
+        if (root.document?.body?.dataset?.v7FormalPrintLock === 'true') return;
         if (!this.client || !this.isOperationContextCurrent(operationContext)
           || this.client.getLease('module', entityId) !== operationLease) return;
         const currentRow = Array.from(root.document.querySelectorAll('#tableBody tr[data-v7-entity-id]'))
