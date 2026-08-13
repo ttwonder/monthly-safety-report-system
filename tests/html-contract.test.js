@@ -65,3 +65,26 @@ test('進站與登入後共用使用者指定的本機 FPMC Logo，工具列控�
     'bc79ff64d006cdc036117c3051dd70223db4dc10a8e1a58dca0b20e9d0dd9bc0'
   );
 });
+
+test('列印目前內容固定沿用 PDF 勾選與排序，且輸出不帶版本提示', async () => {
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  const selectedBuilderStart = html.indexOf('function buildV1SelectedEditorPrintHtml(options = {})');
+  const selectedBuilderEnd = html.indexOf('function buildV1EditorPrintCloneHtml()', selectedBuilderStart);
+  const prepareStart = html.indexOf('async function prepareV1PdfPrintArea(options = {})');
+  const prepareEnd = html.indexOf('async function prepareV7FormalSnapshotPrintArea', prepareStart);
+  const currentPrintStart = html.indexOf('async function printCurrentEditorReport()');
+  const currentPrintEnd = html.indexOf('async function v1LoadReportById', currentPrintStart);
+  assert.ok(selectedBuilderStart > 0 && selectedBuilderEnd > selectedBuilderStart);
+  assert.ok(prepareStart > 0 && prepareEnd > prepareStart);
+  assert.ok(currentPrintStart > 0 && currentPrintEnd > currentPrintStart);
+
+  const selectedBuilder = html.slice(selectedBuilderStart, selectedBuilderEnd);
+  const prepare = html.slice(prepareStart, prepareEnd);
+  const currentPrint = html.slice(currentPrintStart, currentPrintEnd);
+  assert.match(selectedBuilder, /v1GetSelectedModules\(\)/);
+  assert.match(html, /\.sort\(\(a, b\) => \(a\.order - b\.order\) \|\| \(a\.index - b\.index\)\)/);
+  assert.match(currentPrint, /prepareV1PdfPrintArea\(\)/);
+  assert.doesNotMatch(currentPrint, /selectAll\s*:\s*true|currentDraft\s*:\s*true/);
+  assert.doesNotMatch(prepare, /v1-local-draft-banner|不是正式版本|非正式版|草稿版/);
+  assert.doesNotMatch(html, /class=["']v1-local-draft-banner/);
+});

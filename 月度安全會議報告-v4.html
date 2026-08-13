@@ -1187,8 +1187,6 @@
         .v1-empty-state { color:#94a3b8; text-align:center; padding:24px; border:1px dashed #cbd5e1; border-radius:12px; background:#fff; }
         .v1-history-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
         .v1-note-box { border-left:4px solid #8b5cf6; background:#faf5ff; color:#5b21b6; padding:10px 12px; border-radius:8px; font-size:13px; }
-        .v1-local-draft-banner { margin:0 0 4mm; padding:7px 10px; border:2px solid #b91c1c; color:#991b1b; background:#fef2f2; text-align:center; font-size:13px; font-weight:900; letter-spacing:.04em; }
-
         .v5-session-bar { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:7px 8px; margin:-4px 0 10px; border:1px solid #bae6fd; border-radius:12px; background:#f0f9ff; color:#075985; font-size:12px; font-weight:800; }
         .v5-role-pill { display:inline-flex; align-items:center; gap:4px; border-radius:999px; padding:3px 8px; background:#e0f2fe; color:#075985; }
         .v5-sync-btn { border:1px solid #7dd3fc; background:#fff; color:#0369a1; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:800; cursor:pointer; }
@@ -1328,6 +1326,32 @@
             body.pdf-print-mode #pdfPrintArea .trend-chart-container {
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .module-content-cell table.pdf-splittable-table {
+                page-break-inside: auto !important;
+                break-inside: auto !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .module-content-cell table.pdf-splittable-table > tbody > tr {
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-splittable-module {
+                border: 0 !important;
+                border-radius: 0 !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-splittable-module > .module-index-cell {
+                border-top: 1px solid #a5b4fc !important;
+                border-left: 1px solid #a5b4fc !important;
+                border-radius: 10px 0 0 0;
+            }
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-splittable-module > .module-title-cell {
+                border-top: 1px solid #a5b4fc !important;
+                border-right: 1px solid #a5b4fc !important;
+                border-radius: 0 10px 0 0;
+            }
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-splittable-module > .module-content-cell {
+                padding: 0 !important;
+                border-top: 0 !important;
             }
             body.pdf-print-mode #pdfPrintArea table[data-cloned-id="reportTable"] > thead { display:none !important; }
             body.pdf-print-mode #pdfPrintArea .module-content-cell thead { display:table-header-group; }
@@ -1550,7 +1574,7 @@
         }
         .v1-selected-editor-print-clone [data-cloned-id="tableBody"] .module-card-row {
             display:grid;
-            grid-template-columns:105px minmax(0,1fr);
+            grid-template-columns:132px minmax(0,1fr);
             width:100%;
             margin:0;
             border:1px solid #a5b4fc;
@@ -1566,9 +1590,9 @@
             align-items:center;
             min-width:0;
             border:0;
-            padding:7px 10px;
+            padding:9px 12px;
             box-sizing:border-box;
-            font-size:13px;
+            font-size:15px;
         }
         .v1-selected-editor-print-clone .module-index-cell {
             grid-column:1;
@@ -1587,6 +1611,7 @@
             align-items:stretch !important;
             flex-direction:column;
             min-height:72px;
+            padding:14px 12px !important;
             border-top:1px solid #a5b4fc !important;
             overflow:visible;
         }
@@ -1594,8 +1619,9 @@
         .v1-selected-editor-print-clone .module-title-editor,
         .v1-selected-editor-print-clone .module-content-cell .editable-div {
             min-height:0 !important;
-            font-size:13px !important;
+            font-size:16px !important;
         }
+        .v1-selected-editor-print-clone .print-only { font-size:16px !important; }
         @media screen and (max-width: 1100px) {
             #tableBody .module-card-row { grid-template-columns: minmax(130px, .24fr) minmax(0, 1fr); }
             .module-actions-cell { grid-column: 1 / -1; grid-row:2; border-top:1px solid #c7d2fe !important; }
@@ -4657,11 +4683,34 @@
             });
         }
 
+        function normalizeV1PdfTableHeader(table) {
+            if (!table || table.tHead) return false;
+            const body = table.tBodies?.[0];
+            const firstRow = body?.rows?.[0];
+            const cells = Array.from(firstRow?.cells || []);
+            if (!cells.length || !cells.every((cell) => cell.tagName === 'TH')) return false;
+            const thead = table.createTHead();
+            thead.appendChild(firstRow);
+            table.dataset.pdfPromotedHeader = 'true';
+            return true;
+        }
+
         function classifyV1PdfModulePageBreaks(printArea) {
             const pageContentHeight = (210 - 6 - 12) * 96 / 25.4;
             const maxSinglePageHeight = Math.floor(pageContentHeight) - 2;
             const rows = Array.from(printArea?.querySelectorAll?.('.module-card-row') || []);
-            rows.forEach((row) => row.classList.remove('pdf-keep-together'));
+            rows.forEach((row) => row.classList.remove('pdf-keep-together', 'pdf-splittable-module'));
+            const contentTables = Array.from(printArea?.querySelectorAll?.('.module-content-cell table') || []);
+            contentTables.forEach((table) => {
+                normalizeV1PdfTableHeader(table);
+                table.classList.remove('pdf-splittable-table');
+                const measuredHeight = Math.ceil(Math.max(table.getBoundingClientRect().height || 0, table.scrollHeight || 0));
+                table.dataset.pdfTableHeight = String(measuredHeight);
+                if (measuredHeight > maxSinglePageHeight) {
+                    table.classList.add('pdf-splittable-table');
+                    table.closest('.module-card-row')?.classList.add('pdf-splittable-module');
+                }
+            });
             const printAreaTop = printArea?.getBoundingClientRect?.().top || 0;
             const firstRowTop = rows.length ? rows[0].getBoundingClientRect().top - printAreaTop : 0;
             const firstPageOffset = ((firstRowTop % pageContentHeight) + pageContentHeight) % pageContentHeight;
@@ -4692,13 +4741,6 @@
             const printArea = document.getElementById('pdfPrintArea');
             if (!printArea) return false;
             printArea.innerHTML = buildV1PdfHtml({ syncFromDom: false, selectAll: options.selectAll === true });
-            if (options.currentDraft === true) {
-                const banner = document.createElement('div');
-                banner.className = 'v1-local-draft-banner';
-                banner.setAttribute('role', 'note');
-                banner.textContent = '本機草稿／目前內容｜尚未確認雲端同步，不是正式版本';
-                printArea.prepend(banner);
-            }
             document.body.classList.add('pdf-render-prep');
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             if (window.renderAllCharts) window.renderAllCharts();
@@ -5212,9 +5254,15 @@
             const focused = document.activeElement;
             v7SyncFocusedEditorToModel(focused);
             if (window.MonthlyV7App?.isActive?.()) v7PreserveVisibleEditorDrafts();
+            if (!v1GetSelectedModules().length) {
+                document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
+                document.getElementById('pdfPrintArea')?.replaceChildren();
+                showToast('請先勾選至少一個模塊再列印');
+                return;
+            }
             await saveToDB(reportData, Date.now(), { deferCloud: true, markCloudDirty: false });
             document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
-            const ok = await prepareV1PdfPrintArea({ selectAll: true, currentDraft: true });
+            const ok = await prepareV1PdfPrintArea();
             if (!ok) return;
             document.body.dataset.printSource = 'current-draft';
             document.body.classList.add('pdf-print-mode');

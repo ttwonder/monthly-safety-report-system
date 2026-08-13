@@ -1931,7 +1931,7 @@ test('保存已提交但回覆遺失時，刷新後重播舊 operation 不重複
   await independentContext.close();
 });
 
-test('列印目前內容不受雲端逾時或 pending 阻擋，且不建立正式 snapshot', async ({ page, request }) => {
+test('列印目前內容依勾選與 PDF 順序輸出，不帶版本提示，且不受雲端逾時或 pending 阻擋', async ({ page, request }) => {
   const dialogs = [];
   page.on('dialog', async (dialog) => {
     dialogs.push(dialog.message());
@@ -1939,11 +1939,22 @@ test('列印目前內容不受雲端逾時或 pending 阻擋，且不建立正�
   });
   await enterAndLogin(page, 'owner', 'owner-pass');
   await expect(page.getByRole('button', { name: '列印目前內容' })).toBeVisible();
-  const editor = page.locator('#tableBody .module-title-editor').first();
-  await editor.click();
-  await editor.fill('只在目前畫面的草稿標題');
   await page.evaluate(() => {
+    reportData[0].pdfOrder = 2;
     reportData[1].selectedForPdf = false;
+    reportData.push({
+      id: 103,
+      icon: 'fas fa-edit',
+      iconColor: '#64748b',
+      title: 'C 選中項目',
+      colLayout: '1',
+      colCount: 1,
+      columns: ['C 內容'],
+      attachments: [],
+      selectedForPdf: true,
+      pdfOrder: 1
+    });
+    renderTable();
     window.MonthlyV7App.transport.requestTimeoutMs = 35;
     window.__currentDraftPrintCalls = 0;
     window.__currentDraftCloudWrites = [];
@@ -1957,6 +1968,9 @@ test('列印目前內容不受雲端逾時或 pending 阻擋，且不建立正�
       return originalRpc(name, params);
     };
   });
+  const editor = page.locator('#tableBody .module-title-editor').first();
+  await editor.click();
+  await editor.fill('只在目前畫面的草稿標題');
   await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=always');
   const before = await (await request.get('/__fake_state')).json();
 
@@ -1968,10 +1982,16 @@ test('列印目前內容不受雲端逾時或 pending 阻擋，且不建立正�
   expect(await page.evaluate(() => window.__currentDraftPrintCalls)).toBe(1);
   expect(dialogs).toEqual([]);
   await expect(page.locator('body')).toHaveAttribute('data-print-source', 'current-draft');
-  await expect(page.locator('#pdfPrintArea')).toContainText('只在目前畫面的草稿標題');
-  await expect(page.locator('#pdfPrintArea')).toContainText('B 原始項目');
-  await expect(page.locator('#pdfPrintArea')).toContainText('本機草稿');
-  await expect(page.locator('#pdfPrintArea')).toContainText('不是正式版本');
+  await expect(page.locator('#pdfPrintArea .module-card-row')).toHaveCount(2);
+  expect(await page.locator('#pdfPrintArea .module-title-editor').allTextContents()).toEqual([
+    'C 選中項目',
+    '只在目前畫面的草稿標題'
+  ]);
+  await expect(page.locator('#pdfPrintArea')).not.toContainText('B 原始項目');
+  await expect(page.locator('#pdfPrintArea')).not.toContainText('本機草稿');
+  await expect(page.locator('#pdfPrintArea')).not.toContainText('非正式版');
+  await expect(page.locator('#pdfPrintArea')).not.toContainText('草稿版');
+  await expect(page.locator('#pdfPrintArea')).not.toContainText('不是正式版本');
   expect(await page.evaluate(() => window.__currentDraftCloudWrites)).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem(
     'monthly_v7_draft:module:22222222-2222-4222-8222-222222222221'
@@ -1982,6 +2002,28 @@ test('列印目前內容不受雲端逾時或 pending 阻擋，且不建立正�
   expect(after.modules[0].revision).toBe(before.modules[0].revision);
   expect(after.operations).toEqual(before.operations);
   expect(after.snapshots).toEqual(before.snapshots);
+});
+
+test('列印目前內容沒有勾選模塊時提示並停止，不輸出空白文件', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    reportData.forEach((item) => { item.selectedForPdf = false; });
+    renderTable();
+    window.__emptySelectionPrintCalls = 0;
+    window.__emptySelectionPrintState = { status: 'pending', error: '' };
+    window.print = () => { window.__emptySelectionPrintCalls += 1; };
+    window.__emptySelectionPrintPromise = printCurrentEditorReport()
+      .then(() => { window.__emptySelectionPrintState = { status: 'done', error: '' }; })
+      .catch((error) => {
+        window.__emptySelectionPrintState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__emptySelectionPrintState?.status), { timeout: 15000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__emptySelectionPrintState)).toEqual({ status: 'done', error: '' });
+  expect(await page.evaluate(() => window.__emptySelectionPrintCalls)).toBe(0);
+  await expect(page.locator('#saveToast')).toContainText('請先勾選至少一個模塊');
+  await expect(page.locator('#pdfPrintArea')).toBeEmpty();
 });
 
 test('保存 ACK 先清 pending、晚到的 production-shaped Realtime hint 仍不誤報遠端新版本', async ({ page, request }) => {
@@ -2765,6 +2807,70 @@ test('V7 PDF 列印區直接使用 immutable snapshot，而非 live editor', asy
   expect(errors).toEqual([]);
 });
 
+test('PDF 卡片保留螢幕主要視覺比例，只移除編輯控制並配合紙張寬度', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const screen = await page.locator('#tableBody .module-card-row').first().evaluate((row) => {
+    const px = (node, property) => parseFloat(getComputedStyle(node)[property]);
+    const indexCell = row.querySelector('.module-index-cell');
+    const titleCell = row.querySelector('.module-title-cell');
+    const contentCell = row.querySelector('.module-content-cell');
+    return {
+      indexWidth: indexCell.getBoundingClientRect().width,
+      indexFont: px(row.querySelector('.module-index-input'), 'fontSize'),
+      titleFont: px(row.querySelector('.module-title-editor'), 'fontSize'),
+      titlePaddingLeft: px(titleCell, 'paddingLeft'),
+      contentPaddingLeft: px(contentCell, 'paddingLeft'),
+      borderRadius: getComputedStyle(row).borderRadius,
+      borderColor: getComputedStyle(row).borderColor
+    };
+  });
+
+  await page.evaluate(() => {
+    window.__screenParityPrepareState = { status: 'pending', error: '' };
+    window.__screenParityPreparePromise = prepareV1PdfPrintArea()
+      .then((ok) => {
+        if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+        document.body.classList.add('pdf-print-mode');
+        window.__screenParityPrepareState = { status: 'done', error: '' };
+      })
+      .catch((error) => {
+        window.__screenParityPrepareState = { status: 'error', error: String(error?.message || error) };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__screenParityPrepareState?.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__screenParityPrepareState)).toEqual({ status: 'done', error: '' });
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+
+  const printed = await page.locator('#pdfPrintArea .module-card-row').first().evaluate((row) => {
+    const px = (node, property) => parseFloat(getComputedStyle(node)[property]);
+    const indexCell = row.querySelector('.module-index-cell');
+    const titleCell = row.querySelector('.module-title-cell');
+    const contentCell = row.querySelector('.module-content-cell');
+    return {
+      indexWidth: indexCell.getBoundingClientRect().width,
+      indexFont: px(row.querySelector('.print-only'), 'fontSize'),
+      titleFont: px(row.querySelector('.module-title-editor'), 'fontSize'),
+      titlePaddingLeft: px(titleCell, 'paddingLeft'),
+      contentPaddingLeft: px(contentCell, 'paddingLeft'),
+      borderRadius: getComputedStyle(row).borderRadius,
+      borderColor: getComputedStyle(row).borderColor,
+      actionCount: row.querySelectorAll('.module-actions-cell').length
+    };
+  });
+
+  expect(printed.actionCount).toBe(0);
+  expect(printed.borderRadius).toBe(screen.borderRadius);
+  expect(printed.borderColor).toBe(screen.borderColor);
+  expect(Math.abs(printed.indexWidth - screen.indexWidth)).toBeLessThanOrEqual(1);
+  expect(printed.indexFont).toBeGreaterThanOrEqual(screen.indexFont);
+  expect(printed.titleFont).toBeGreaterThanOrEqual(screen.titleFont);
+  expect(Math.abs(printed.titlePaddingLeft - screen.titlePaddingLeft)).toBeLessThanOrEqual(1);
+  expect(Math.abs(printed.contentPaddingLeft - screen.contentPaddingLeft)).toBeLessThanOrEqual(1);
+});
+
 test('PDF print media 保留部件與圖表色彩且小型圖表不跨頁切斷', async ({ page }) => {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
@@ -3060,6 +3166,93 @@ test('PDF 只對單頁可容納的臨界項目啟用 keep-together，長項目�
   expect(modules[1].measuredHeight).toBeLessThanOrEqual(720);
   expect(modules[1].keepTogether).toBe(true);
   expect(modules[1].breakInside).toBe('avoid');
+});
+
+test('超過單頁的長表格可自然跨頁，表頭重複且資料列不被拆開', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const rows = Array.from({ length: 72 }, (_, index) => `
+      <tr>
+        <td style="border:1px solid #cbd5e1;padding:5px 7px;">ROW-${String(index + 1).padStart(3, '0')} 自然分頁資料-${String(index + 1).padStart(2, '0')}</td>
+        <td style="border:1px solid #cbd5e1;padding:5px 7px;">第 ${index + 1} 列完整內容，不可在列內切開</td>
+      </tr>`).join('');
+    reportData[0].title = '長表格自然跨頁驗證';
+    reportData[0].columns = [`
+      <table class="custom-data-table" data-resizable-table="1" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+        <tbody>
+          <tr>
+            <th style="border:1px solid #64748b;padding:6px 7px;background:#e2e8f0;">TABLE-HEADER-ITEM 跨頁表頭-項次</th>
+            <th style="border:1px solid #64748b;padding:6px 7px;background:#e2e8f0;">TABLE-HEADER-DESC 跨頁表頭-說明</th>
+          </tr>
+          ${rows}
+        </tbody>
+      </table>`];
+    reportData[0].colLayout = '1';
+    reportData[0].selectedForPdf = true;
+    reportData.slice(1).forEach((item) => { item.selectedForPdf = false; });
+    renderTable();
+  });
+  await page.evaluate(() => {
+    window.__longTablePrepareState = { status: 'pending', error: '' };
+    window.__longTablePreparePromise = prepareV1PdfPrintArea().then((ok) => {
+      if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+      document.body.classList.add('pdf-print-mode');
+      window.__longTablePrepareState = { status: 'done', error: '' };
+    }).catch((error) => {
+      window.__longTablePrepareState = { status: 'error', error: String(error?.message || error) };
+    });
+  });
+  await expect.poll(() => page.evaluate(() => window.__longTablePrepareState?.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__longTablePrepareState)).toEqual({ status: 'done', error: '' });
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+
+  const layout = await page.evaluate(() => {
+    const area = document.getElementById('pdfPrintArea');
+    const module = area.querySelector('.module-card-row');
+    const table = module.querySelector('.custom-data-table');
+    const contentCell = module.querySelector('.module-content-cell');
+    const bodyRows = Array.from(table.tBodies[0].rows);
+    const liveTable = document.querySelector('#tableBody .custom-data-table');
+    return {
+      pageContentHeight: Number(area.dataset.pdfPageContentHeight || 0),
+      moduleHeight: Number(module.dataset.pdfModuleHeight || 0),
+      splittableModule: module.classList.contains('pdf-splittable-module'),
+      moduleBreakInside: getComputedStyle(module).breakInside,
+      moduleBorderBottomStyle: getComputedStyle(module).borderBottomStyle,
+      contentPaddingTop: getComputedStyle(contentCell).paddingTop,
+      tableHeight: Math.ceil(table.getBoundingClientRect().height),
+      tableBreakInside: getComputedStyle(table).breakInside,
+      printHasThead: Boolean(table.tHead),
+      liveHasThead: Boolean(liveTable?.tHead),
+      headerDisplay: table.tHead ? getComputedStyle(table.tHead).display : 'missing',
+      headerText: table.tHead?.textContent || '',
+      bodyRowCount: bodyRows.length,
+      bodyRowBreaks: Array.from(new Set(bodyRows.map((row) => getComputedStyle(row).breakInside)))
+    };
+  });
+
+  expect(layout.tableHeight).toBeGreaterThan(layout.pageContentHeight);
+  expect(layout.moduleHeight).toBeGreaterThan(layout.pageContentHeight);
+  expect(layout.splittableModule).toBe(true);
+  expect(layout.moduleBreakInside).toBe('auto');
+  expect(layout.moduleBorderBottomStyle).toBe('none');
+  expect(layout.contentPaddingTop).toBe('0px');
+  expect(layout.tableBreakInside).toBe('auto');
+  expect(layout.printHasThead).toBe(true);
+  expect(layout.liveHasThead).toBe(false);
+  expect(layout.headerDisplay).toBe('table-header-group');
+  expect(layout.headerText).toContain('TABLE-HEADER-ITEM');
+  expect(layout.bodyRowCount).toBe(72);
+  expect(layout.bodyRowBreaks).toEqual(['avoid']);
+
+  const pdfPath = testInfo.outputPath('long-table-natural-pagination.pdf');
+  const pdf = await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
+  await testInfo.attach('long-table-natural-pagination.pdf', { body: pdf, contentType: 'application/pdf' });
+  const pageObjects = pdf.toString('latin1').match(/\/Type\s*\/Page\b/g) || [];
+  expect(pageObjects.length).toBeGreaterThan(2);
+  expect(pageObjects.length).toBeLessThan(12);
 });
 
 test('舊 p_kind 的 PostgREST 失敗 pending 在 reload 後改送正確 snapshot RPC', async ({ page }) => {
