@@ -2266,9 +2266,9 @@
     </div>
 
     <script src="./vendor/supabase-2.112.2.js"></script>
-    <script src="./monthly-collaboration-core.js?v=7.0.12"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.12"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.12"></script>
+    <script src="./monthly-collaboration-core.js?v=7.0.13"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.13"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.13"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont(options = {}) {
@@ -5995,6 +5995,8 @@
         // === V4 Supabase / GitHub Pages 雲端同步準備 ===
         const V4_CLOUD_CONFIG_KEY = 'monthly_report_v4_cloud_config';
         const V4_CLOUD_TABLE = 'monthly_report_cloud_data';
+        const V4_LEGACY_LOCAL_SCOPE_KEY = 'monthly_report_legacy_local_authority_scope';
+        const V4_LEGACY_SESSION_SCOPE_KEY = 'monthly_report_legacy_session_authority_scope';
         let V4_CLOUD_APPLYING = false;
         let V4_CLOUD_SAVING = false;
         let V4_AUTO_SAVE_TIMER = null;
@@ -6231,8 +6233,18 @@
             config.anonKey = (document.getElementById('v4-supabase-anon')?.value || '').trim();
             config.workspaceKey = (document.getElementById('v4-workspace-key')?.value || '').trim();
             localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
+            V4_STARTUP_SYNC_DONE = false;
+            if (V4_SYNC_INTERVAL_ID) clearInterval(V4_SYNC_INTERVAL_ID);
+            V4_SYNC_INTERVAL_ID = null;
+            if (V6_LOCK_TIMER) clearInterval(V6_LOCK_TIMER);
+            V6_LOCK_TIMER = null;
+            V6_ACTIVE_LOCK_SECTION = '';
             v5ClearSupabaseConfigDraft();
-            showToast('雲端設定已保存於本機');
+            const gateError = document.getElementById('site-access-error');
+            if (gateError) gateError.textContent = '雲端設定已變更，必須重新驗證安全狀態；已停止登入與同步，請重新載入頁面。';
+            siteAccessRenderGate();
+            renderV5SessionBar();
+            showToast('雲端設定已保存；重新載入後才會驗證並啟用');
             renderV4CloudPane();
         }
 
@@ -6249,9 +6261,98 @@
             return !!(config.supabaseUrl && config.anonKey && config.workspaceKey);
         }
 
+        function v4CloudConfigIdentity(config) {
+            if (!config || typeof config !== 'object') return '';
+            return JSON.stringify([
+                String(config.supabaseUrl || '').trim().replace(/\/$/, ''),
+                String(config.anonKey || '').trim(),
+                String(config.workspaceKey || '').trim()
+            ]);
+        }
+
+        function v4CanBindLegacyAuthorityScope(config = v4GetCloudConfig()) {
+            const verifiedConfig = window.MonthlyV7App?.client?.config;
+            return window.MonthlyV7App?.status?.mode === 'legacy'
+                && v4ConfigReady(config)
+                && v4ConfigReady(verifiedConfig)
+                && v4CloudConfigIdentity(config) === v4CloudConfigIdentity(verifiedConfig);
+        }
+
+        function v4LegacyLocalAuthorityExists() {
+            return [
+                SITE_ACCESS_PASSWORD_HASH_KEY,
+                SITE_ACCESS_PASSWORD_UPDATED_KEY,
+                SITE_ACCESS_REMEMBER_KEY,
+                V5_USERS_KEY,
+                V5_REMEMBERED_SESSION_KEY
+            ].some(key => localStorage.getItem(key) !== null);
+        }
+
+        function v4LegacySessionAuthorityExists() {
+            return [SITE_ACCESS_UNLOCK_KEY, V5_SESSION_KEY]
+                .some(key => sessionStorage.getItem(key) !== null);
+        }
+
+        function v4MarkLegacyLocalAuthorityScope(config = v4GetCloudConfig()) {
+            if (!v4CanBindLegacyAuthorityScope(config)) return false;
+            localStorage.setItem(V4_LEGACY_LOCAL_SCOPE_KEY, v4CloudConfigIdentity(config));
+            return true;
+        }
+
+        function v4MarkLegacySessionAuthorityScope(config = v4GetCloudConfig()) {
+            if (!v4CanBindLegacyAuthorityScope(config)) return false;
+            sessionStorage.setItem(V4_LEGACY_SESSION_SCOPE_KEY, v4CloudConfigIdentity(config));
+            return true;
+        }
+
+        function v4BindExistingLegacyAuthorityScope(config = v4GetCloudConfig()) {
+            if (!v4CanBindLegacyAuthorityScope(config)) return false;
+            if (v4LegacyLocalAuthorityExists() && !localStorage.getItem(V4_LEGACY_LOCAL_SCOPE_KEY)) {
+                v4MarkLegacyLocalAuthorityScope(config);
+            }
+            if (v4LegacySessionAuthorityExists() && !sessionStorage.getItem(V4_LEGACY_SESSION_SCOPE_KEY)) {
+                v4MarkLegacySessionAuthorityScope(config);
+            }
+            return true;
+        }
+
+        function v4LegacyAuthorityScopeMatches(config = v4GetCloudConfig()) {
+            const identity = v4CloudConfigIdentity(config);
+            if (!identity) return false;
+            if (v4LegacyLocalAuthorityExists()
+                && localStorage.getItem(V4_LEGACY_LOCAL_SCOPE_KEY) !== identity) return false;
+            if (v4LegacySessionAuthorityExists()
+                && sessionStorage.getItem(V4_LEGACY_SESSION_SCOPE_KEY) !== identity) return false;
+            return true;
+        }
+
+        function v4CloudAuthorityMode(config = v4GetCloudConfig()) {
+            const verifiedConfig = window.MonthlyV7App?.client?.config;
+            const verifiedReady = v4ConfigReady(verifiedConfig);
+            if (!v4ConfigReady(config)) return verifiedReady ? 'blocked' : 'unconfigured';
+            if (!verifiedReady
+                || v4CloudConfigIdentity(config) !== v4CloudConfigIdentity(verifiedConfig)) return 'blocked';
+            const mode = String(window.MonthlyV7App?.status?.mode || 'unknown');
+            if (mode === 'legacy' && !v4LegacyAuthorityScopeMatches(config)) return 'blocked';
+            return mode === 'v7' || mode === 'legacy' ? mode : 'blocked';
+        }
+
+        function v4RejectUnsafeCloudFallback(options = {}) {
+            if (v4CloudAuthorityMode() !== 'blocked') return false;
+            const message = '雲端安全驗證尚未完成，已停止登入、同步及舊版雲端操作；本機資料未變更。';
+            v4SetCloudRuntimeStatus(message, 'error', { allowCriticalOverride: true });
+            if (options.alert === true && options.silent !== true) alert(message);
+            return true;
+        }
+
         async function v4CloudRequest(path, method = 'GET', body = null) {
             const config = v4GetCloudConfig();
             if (!v4ConfigReady(config)) throw new Error('請先填寫 Supabase URL、anon key、Workspace Key');
+            if (v4CloudAuthorityMode(config) === 'blocked') {
+                const error = new Error('V7_AUTHORITY_NOT_READY');
+                error.code = 'V7_AUTHORITY_NOT_READY';
+                throw error;
+            }
             const headers = {
                 'apikey': config.anonKey,
                 'Authorization': 'Bearer ' + config.anonKey,
@@ -6367,6 +6468,7 @@
 
         async function v4UploadToCloud(options = {}) {
             const silent = options.silent === true;
+            if (v4RejectUnsafeCloudFallback({ silent, alert: true })) return false;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!v5RequireLogin('請先登入後再保存修改。')) return false;
                 const flushLatest = options.flushLatest === true;
@@ -6506,6 +6608,7 @@
         }
 
         async function v4DownloadFromCloud() {
+            if (v4RejectUnsafeCloudFallback({ alert: true })) return false;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!confirm('確定同步最新逐項雲端資料嗎？有本機草稿的項目不會被自動覆蓋。')) return;
                 try { await window.MonthlyV7App.loadSnapshot(); showToast('已同步最新逐項資料'); }
@@ -6527,6 +6630,7 @@
         }
 
         async function v4TestCloudConnection() {
+            if (v4RejectUnsafeCloudFallback({ alert: true })) return false;
             if (!v5RequireSupabaseOwner()) return;
             if (window.MonthlyV7App?.isActive?.()) {
                 showToast('Supabase V7 連線與 Anonymous Auth 已就緒');
@@ -6548,6 +6652,7 @@
 
         function v4QueueAutoSave(reason = '修改', options = {}) {
             if (V4_CLOUD_APPLYING) return null;
+            if (v4RejectUnsafeCloudFallback({ silent: true })) return null;
             if (window.MonthlyV7App?.isActive?.()) {
                 return options.v7CloudDirty === true ? v7MarkCloudDirty(reason) : null;
             }
@@ -6578,6 +6683,7 @@
 
         async function v4AutoSyncLatestFromCloud(options = {}) {
             const silent = options.silent !== false;
+            if (v4RejectUnsafeCloudFallback({ silent, alert: !silent })) return false;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!window.MonthlyV7App.isSiteUnlocked()) return false;
                 try {
@@ -6641,6 +6747,7 @@
 
         async function v4CheckCloudRevision(options = {}) {
             const silent = options.silent !== false;
+            if (v4RejectUnsafeCloudFallback({ silent, alert: !silent })) return false;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!v5CurrentUser()) return false;
                 try { await window.MonthlyV7App.syncLatest(); if (!silent) v4SetCloudRuntimeStatus('逐項變更檢查完成。', 'ok'); return true; }
@@ -6676,6 +6783,7 @@
         async function v4AutoSyncOnStartup() {
             if (V4_STARTUP_SYNC_DONE) return true;
             V4_STARTUP_SYNC_DONE = true;
+            if (v4RejectUnsafeCloudFallback({ silent: true })) return false;
             const config = v4GetCloudConfig();
             if (config.autoSyncOnOpen === false) return true;
             return await v4AutoSyncLatestFromCloud({ silent: true, source: '打開系統，自動同步雲端資料...' });
@@ -6794,7 +6902,7 @@
         }
 
         function v6SetupEditLockGuards() {
-            if (window.MonthlyV7App?.isActive?.()) return;
+            if (window.MonthlyV7App?.isActive?.() || v4CloudAuthorityMode() === 'blocked') return;
             if (window.__v6EditLockGuardsReady) return;
             window.__v6EditLockGuardsReady = true;
             const block = (event) => {
@@ -6810,7 +6918,8 @@
             window.addEventListener('beforeunload', () => {
                 const config = v4GetCloudConfig();
                 const actor = v6CurrentActor();
-                if (!V6_ACTIVE_LOCK_SECTION || !v4ConfigReady(config)) return;
+                if (!V6_ACTIVE_LOCK_SECTION || !v4ConfigReady(config)
+                    || v4CloudAuthorityMode(config) === 'blocked') return;
                 try {
                     const payload = JSON.stringify({ p_workspace_key: config.workspaceKey, p_section_key: V6_ACTIVE_LOCK_SECTION, p_locked_by: actor.id });
                     fetch(`${config.supabaseUrl}/rest/v1/rpc/release_monthly_report_edit_lock`, {
@@ -6823,7 +6932,7 @@
         }
 
         function v4SetupAutoRefresh() {
-            if (V4_SYNC_INTERVAL_ID) return;
+            if (V4_SYNC_INTERVAL_ID || v4CloudAuthorityMode() === 'blocked') return;
             const v7Active = window.MonthlyV7App?.isActive?.() === true;
             const checkIfSafe = () => {
                 if (document.hidden || V4_CLOUD_SAVING || V4_CLOUD_APPLYING) return;
@@ -6939,12 +7048,15 @@
             if (clean) localStorage.setItem(SITE_ACCESS_PASSWORD_HASH_KEY, clean);
             else localStorage.removeItem(SITE_ACCESS_PASSWORD_HASH_KEY);
             localStorage.setItem(SITE_ACCESS_PASSWORD_UPDATED_KEY, updatedAt);
+            v4MarkLegacyLocalAuthorityScope();
         }
         function siteAccessGetUpdatedAt() {
             return localStorage.getItem(SITE_ACCESS_PASSWORD_UPDATED_KEY) || '';
         }
         function siteAccessIsUnlocked() {
-            if (window.MonthlyV7App?.isActive?.()) return window.MonthlyV7App.isSiteUnlocked();
+            const authorityMode = v4CloudAuthorityMode();
+            if (authorityMode === 'v7') return window.MonthlyV7App.isSiteUnlocked();
+            if (authorityMode === 'blocked') return false;
             // 進門密碼必須每次新瀏覽器 session 重新輸入；舊版曾存在的本機免輸入記錄在這裡清掉。
             try { localStorage.removeItem(SITE_ACCESS_REMEMBER_KEY); } catch {}
             return sessionStorage.getItem(SITE_ACCESS_UNLOCK_KEY) === siteAccessGetPasswordHash();
@@ -6953,6 +7065,7 @@
             // 只記住本次瀏覽器 session；不要寫入 localStorage。
             try { localStorage.removeItem(SITE_ACCESS_REMEMBER_KEY); } catch {}
             sessionStorage.setItem(SITE_ACCESS_UNLOCK_KEY, hash);
+            v4MarkLegacySessionAuthorityScope();
         }
         function siteAccessForgetUnlock() {
             sessionStorage.removeItem(SITE_ACCESS_UNLOCK_KEY);
@@ -6972,7 +7085,13 @@
             const input = document.getElementById('site-access-password');
             const error = document.getElementById('site-access-error');
             const password = input ? input.value : '';
-            if (window.MonthlyV7App?.isActive?.()) {
+            const authorityMode = v4CloudAuthorityMode();
+            if (authorityMode === 'blocked') {
+                if (error) error.textContent = '雲端安全驗證尚未完成，已停止登入與同步。';
+                if (input) { input.value = ''; input.focus(); }
+                return false;
+            }
+            if (authorityMode === 'v7') {
                 try {
                     await window.MonthlyV7App.openSite(password);
                     if (error) error.textContent = '';
@@ -7000,6 +7119,7 @@
         }
         async function siteAccessUpdatePasswordFromForm() {
             if (!v5CanManageData()) return alert('您無權修改網站進入密碼。');
+            if (v4RejectUnsafeCloudFallback({ alert: true })) return;
             const p1 = document.getElementById('site-access-new-password')?.value || '';
             const p2 = document.getElementById('site-access-confirm-password')?.value || '';
             if (!p1 || p1.length < 6) return alert('請輸入至少 6 個字元的新網站密碼。');
@@ -7147,7 +7267,8 @@
             return role === 'owner' ? 'Owner' : role === 'admin' ? '管理員' : '使用者';
         }
         function v5GetUsers() {
-            if (window.MonthlyV7App?.isActive?.()) {
+            const authorityMode = v4CloudAuthorityMode();
+            if (authorityMode === 'v7') {
                 const users = window.MonthlyV7App?.client?.snapshot?.users;
                 return Array.isArray(users) ? users.map(user => ({
                     id: user.id,
@@ -7158,11 +7279,14 @@
                     version: Number(user.version || 0)
                 })) : [];
             }
+            if (authorityMode === 'blocked') return [];
             try { return JSON.parse(localStorage.getItem(V5_USERS_KEY) || '[]'); } catch { return []; }
         }
         function v5SetUsers(users) {
-            if (!window.MonthlyV7App?.isActive?.()) {
+            const authorityMode = v4CloudAuthorityMode();
+            if (authorityMode !== 'v7' && authorityMode !== 'blocked') {
                 localStorage.setItem(V5_USERS_KEY, JSON.stringify(Array.isArray(users) ? users : []));
+                v4MarkLegacyLocalAuthorityScope();
             }
             renderV5SessionBar();
         }
@@ -7170,7 +7294,9 @@
             return { username: user.username, displayName: user.displayName || user.username, role: user.role || 'operator' };
         }
         function v5CurrentUser() {
-            if (window.MonthlyV7App?.isActive?.()) return window.MonthlyV7App.currentUser();
+            const authorityMode = v4CloudAuthorityMode();
+            if (authorityMode === 'v7') return window.MonthlyV7App.currentUser();
+            if (authorityMode === 'blocked') return null;
             try {
                 const raw = sessionStorage.getItem(V5_SESSION_KEY) || localStorage.getItem(V5_REMEMBERED_SESSION_KEY) || 'null';
                 const user = JSON.parse(raw);
@@ -7183,7 +7309,11 @@
                 const payload = v5SessionPayload(user);
                 const text = JSON.stringify(payload);
                 sessionStorage.setItem(V5_SESSION_KEY, text);
-                if (options.remember !== false) localStorage.setItem(V5_REMEMBERED_SESSION_KEY, text);
+                v4MarkLegacySessionAuthorityScope();
+                if (options.remember !== false) {
+                    localStorage.setItem(V5_REMEMBERED_SESSION_KEY, text);
+                    v4MarkLegacyLocalAuthorityScope();
+                }
             } else {
                 sessionStorage.removeItem(V5_SESSION_KEY);
                 localStorage.removeItem(V5_REMEMBERED_SESSION_KEY);
@@ -7197,10 +7327,14 @@
         function v5IsOwner() { return v5CurrentUser()?.role === 'owner'; }
         function v5IsAdmin() { const r = v5CurrentUser()?.role; return r === 'owner' || r === 'admin'; }
         function v5CanManageData() {
-            return window.MonthlyV7App?.isActive?.() ? v5IsAdmin() : (v5GetUsers().length === 0 || v5IsAdmin());
+            const authorityMode = v4CloudAuthorityMode();
+            if (authorityMode === 'blocked') return false;
+            return authorityMode === 'v7' ? v5IsAdmin() : (v5GetUsers().length === 0 || v5IsAdmin());
         }
         function v5CanManageSupabaseConfig() {
-            return window.MonthlyV7App?.isActive?.() ? v5IsOwner() : (v5GetUsers().length === 0 || v5IsOwner());
+            const authorityMode = v4CloudAuthorityMode();
+            if (authorityMode === 'blocked') return false;
+            return authorityMode === 'v7' ? v5IsOwner() : (v5GetUsers().length === 0 || v5IsOwner());
         }
         function v5RequireSupabaseOwner(msg = '只有 owner 可以查看或修改 Supabase 設定。') { if (v5CanManageSupabaseConfig()) return true; alert(msg); return false; }
         function v5RequireOwner(msg = '只有 owner 可以執行此操作。') { if (v5IsOwner()) return true; alert(msg); return false; }
@@ -7351,6 +7485,7 @@
         async function v5Login() {
             const username = (document.getElementById('v5-login-username')?.value || '').trim();
             const password = document.getElementById('v5-login-password')?.value || '';
+            if (v4RejectUnsafeCloudFallback({ alert: true })) return;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!username || !password) return alert('請填寫用戶名和密碼。');
                 try {
@@ -7431,12 +7566,17 @@
             if (!root) return;
             const user = v5CurrentUser();
             const users = v5GetUsers();
-            const isV7 = !!window.MonthlyV7App?.isActive?.();
+            const authorityMode = v4CloudAuthorityMode();
+            const isV7 = authorityMode === 'v7';
             const v7UsersKnown = Array.isArray(window.MonthlyV7App?.client?.snapshot?.users);
             const ownerExists = users.some(entry => entry.active !== false && entry.role === 'owner');
-            const signedOutLabel = isV7
+            const signedOutLabel = authorityMode === 'blocked'
+                ? '雲端安全驗證未完成'
+                : isV7
                 ? (!v7UsersKnown ? '正在讀取雲端帳號' : (ownerExists ? '未登入' : '雲端未找到 Owner'))
                 : (users.length ? '未登入' : '尚未建立 owner');
+            const sessionControlsDisabled = authorityMode === 'blocked' || (isV7 && !v7UsersKnown);
+            const disabledAttr = sessionControlsDisabled ? ' disabled aria-disabled="true"' : '';
             const configReady = v4ConfigReady();
             root.innerHTML = user ? `
                 <div class="v5-session-bar">
@@ -7449,10 +7589,10 @@
                 </div>` : `
                 <div class="v5-session-bar">
                     <span class="v5-role-pill"><i class="fas fa-lock"></i>${signedOutLabel}</span>
-                    <input id="v5-login-username" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="用戶名">
-                    <input id="v5-login-password" type="password" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="密碼" onkeydown="if(event.key==='Enter') v5Login()">
-                    <button class="v5-sync-btn" onclick="v5Login()">登入</button>
-                    <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
+                    <input id="v5-login-username" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="用戶名"${disabledAttr}>
+                    <input id="v5-login-password" type="password" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="密碼" onkeydown="if(event.key==='Enter') v5Login()"${disabledAttr}>
+                    <button class="v5-sync-btn" onclick="v5Login()"${disabledAttr}>登入</button>
+                    <button class="v5-sync-btn" onclick="v5SyncLatest()"${disabledAttr}><i class="fas fa-rotate mr-1"></i>同步最新</button>
                     ${v4CloudStatusHtml()}
                 </div>`;
         }
@@ -7835,8 +7975,16 @@
             const synced = await v4AutoSyncOnStartup();
             if (window.MonthlyV7App?.isActive?.() && !synced) {
                 SITE_ACCESS_BOOTED = false;
-                await window.MonthlyV7App.logout();
-                siteAccessRenderGate();
+                V4_STARTUP_SYNC_DONE = false;
+                try {
+                    await window.MonthlyV7App.logout();
+                } catch (error) {
+                    console.warn('[Monthly V7] startup cleanup acknowledgement unavailable', error);
+                } finally {
+                    const gateError = document.getElementById('site-access-error');
+                    if (gateError) gateError.textContent = '雲端帳號資料讀取失敗，已停止登入與同步；本機草稿仍保留。';
+                    siteAccessRenderGate();
+                }
                 return;
             }
             v4SetupAutoRefresh();
@@ -7849,6 +7997,9 @@
                 try {
                     if (!window.MonthlyV7App) throw new Error('V7 scripts 未載入');
                     await window.MonthlyV7App.initialize(config, window.MonthlyV7Host);
+                    if (window.MonthlyV7App?.status?.mode === 'legacy') {
+                        v4BindExistingLegacyAuthorityScope(config);
+                    }
                 } catch (error) {
                     V7_INITIALIZATION_ERROR = error;
                     document.body.classList.add('site-access-locked');

@@ -200,7 +200,13 @@
         draftStorage: root.localStorage,
         host: this.clientHost()
       });
-      this.status = await this.client.initialize(config);
+      try {
+        this.status = await this.client.initialize(config);
+      } catch (error) {
+        this.status = Object.assign({ mode: 'error' }, this.client.status || {});
+        this.initialized = false;
+        throw error;
+      }
       this.initialized = true;
       if (this.isActive()) this.installEditGuards();
       return this.status;

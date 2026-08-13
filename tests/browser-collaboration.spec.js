@@ -247,6 +247,242 @@ test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
 });
 
+test('configured workspace 的未知 authority 必須鎖住啟動且不得呼叫 legacy cloud read', async ({ page, request }) => {
+  await request.post('/__fake_status?kind=unknown');
+  await page.addInitScript(() => {
+    sessionStorage.setItem(
+      'monthly_report_site_access_unlocked_hash',
+      '38adfff5529d37b7699dadcc02aba2877a44fb6f6b788b3bfae859be6ebbc432'
+    );
+    let capturedOnload = null;
+    Object.defineProperty(window, 'onload', {
+      configurable: true,
+      get: () => capturedOnload,
+      set: (handler) => {
+        capturedOnload = handler;
+        window.__authorityCapturedOnload = handler;
+      }
+    });
+  });
+
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.evaluate(async () => {
+    const boot = window.__authorityCapturedOnload;
+    if (typeof boot !== 'function') throw new Error('PRODUCTION_ONLOAD_NOT_CAPTURED');
+    window.onload = null;
+    window.__authorityCapturedOnload = null;
+    await boot.call(window);
+    window.alert = () => {};
+    window.confirm = () => true;
+    await window.v4AutoSyncLatestFromCloud({ silent: true });
+    await window.v4CheckCloudRevision({ silent: true });
+    await window.v4DownloadFromCloud();
+    await window.v4TestCloudConnection();
+    await window.v4UploadToCloud({ silent: true });
+  });
+
+  await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+  await expect(page.locator('#site-access-error')).toContainText('雲端安全驗證無法初始化');
+  expect(await page.evaluate(() => window.MonthlyV7App?.status?.mode || '')).toBe('error');
+  await expect(page.locator('#v5TopStatus')).not.toContainText(/尚未建立 owner|雲端未找到 Owner/);
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.rpcCounts.get_monthly_report_cloud_data || 0).toBe(0);
+  expect(state.rpcCounts.upsert_monthly_report_cloud_data || 0).toBe(0);
+});
+
+test('已驗證 authority 不得沿用到未重新驗證的新雲端配置或 unload lock', async ({ page, request }) => {
+  await request.post('/__fake_status?kind=legacy');
+  await page.addInitScript(() => {
+    const owner = { username: 'owner', displayName: 'Legacy Owner', role: 'owner' };
+    localStorage.setItem('monthly_report_v5_users', JSON.stringify([{ ...owner, passwordHash: 'test-only' }]));
+    sessionStorage.setItem('monthly_report_v5_session', JSON.stringify(owner));
+    sessionStorage.setItem(
+      'monthly_report_site_access_unlocked_hash',
+      '38adfff5529d37b7699dadcc02aba2877a44fb6f6b788b3bfae859be6ebbc432'
+    );
+  });
+  await page.goto('/', { waitUntil: 'load' });
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App?.status?.mode || '')).toBe('legacy');
+  await expect(page.locator('body')).not.toHaveClass(/site-access-locked/);
+  const sourceIdentity = await page.evaluate(() => v4CloudConfigIdentity(v4GetCloudConfig()));
+  expect(await page.evaluate(() => localStorage.getItem('monthly_report_legacy_local_authority_scope'))).toBe(sourceIdentity);
+  expect(await page.evaluate(() => sessionStorage.getItem('monthly_report_legacy_session_authority_scope'))).toBe(sourceIdentity);
+  expect(await page.evaluate(() => v5CurrentUser()?.displayName || '')).toBe('Legacy Owner');
+  await page.evaluate(() => switchV1Tab('cloud'));
+  await expect(page.locator('#v4-workspace-key')).toBeVisible();
+  const before = await (await request.get('/__fake_state')).json();
+
+  const result = await page.evaluate(async () => {
+    const originalConfig = v4GetCloudConfig();
+    const incompleteMode = v4CloudAuthorityMode({ ...originalConfig, workspaceKey: '' });
+    originalConfig.autoSyncOnOpen = false;
+    localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(originalConfig));
+    const workspace = document.getElementById('v4-workspace-key');
+    if (!workspace) throw new Error('WORKSPACE_CONFIG_INPUT_NOT_FOUND');
+    workspace.value = 'changed-without-authority-check';
+    window.alert = () => {};
+    window.confirm = () => true;
+    v4SaveCloudConfigFromForm();
+    V6_ACTIVE_LOCK_SECTION = 'editor';
+    await v4AutoSyncLatestFromCloud({ silent: true });
+    await v4CheckCloudRevision({ silent: true });
+    await v4DownloadFromCloud();
+    await v4TestCloudConnection();
+    await v4UploadToCloud({ silent: true });
+    await v6ClaimCurrentSectionLock({ silent: true });
+    await v6ReleaseCurrentLock();
+    V6_ACTIVE_LOCK_SECTION = 'editor';
+    window.dispatchEvent(new Event('beforeunload'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return {
+      incompleteMode,
+      mode: v4CloudAuthorityMode(),
+      currentUser: v5CurrentUser(),
+      locked: document.body.classList.contains('site-access-locked')
+    };
+  });
+
+  expect(result).toEqual({ incompleteMode: 'blocked', mode: 'blocked', currentUser: null, locked: true });
+  const after = await (await request.get('/__fake_state')).json();
+  for (const name of [
+    'get_monthly_report_cloud_data',
+    'upsert_monthly_report_cloud_data',
+    'claim_monthly_report_edit_lock',
+    'release_monthly_report_edit_lock'
+  ]) {
+    expect(after.rpcCounts[name] || 0, name).toBe(before.rpcCounts[name] || 0);
+  }
+
+  const rawLegacyState = await page.evaluate(() => ({
+    unlock: sessionStorage.getItem('monthly_report_site_access_unlocked_hash'),
+    session: sessionStorage.getItem('monthly_report_v5_session'),
+    users: localStorage.getItem('monthly_report_v5_users')
+  }));
+  expect(rawLegacyState.unlock).toBeTruthy();
+  expect(rawLegacyState.session).toContain('Legacy Owner');
+  expect(rawLegacyState.users).toContain('Legacy Owner');
+
+  await page.reload({ waitUntil: 'load' });
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App?.status?.mode || '')).toBe('legacy');
+  await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+  const reloaded = await page.evaluate(() => ({
+    mode: v4CloudAuthorityMode(),
+    currentUser: v5CurrentUser(),
+    canManage: v5CanManageData(),
+    rawUnlock: sessionStorage.getItem('monthly_report_site_access_unlocked_hash'),
+    rawSession: sessionStorage.getItem('monthly_report_v5_session'),
+    rawUsers: localStorage.getItem('monthly_report_v5_users')
+  }));
+  expect(reloaded).toEqual({
+    mode: 'blocked',
+    currentUser: null,
+    canManage: false,
+    rawUnlock: rawLegacyState.unlock,
+    rawSession: rawLegacyState.session,
+    rawUsers: rawLegacyState.users
+  });
+  expect(await page.evaluate(() => localStorage.getItem('monthly_report_legacy_local_authority_scope'))).toBe(sourceIdentity);
+  expect(await page.evaluate(() => sessionStorage.getItem('monthly_report_legacy_session_authority_scope'))).toBe(sourceIdentity);
+  await expect(page.locator('#v5TopStatus')).not.toContainText(/尚未建立 owner|雲端未找到 Owner/);
+  const afterReload = await (await request.get('/__fake_state')).json();
+  for (const name of [
+    'get_monthly_report_cloud_data',
+    'upsert_monthly_report_cloud_data',
+    'claim_monthly_report_edit_lock',
+    'release_monthly_report_edit_lock'
+  ]) {
+    expect(afterReload.rpcCounts[name] || 0, `${name} after reload`).toBe(after.rpcCounts[name] || 0);
+  }
+});
+
+test('權威帳號名冊等待與失敗期間禁止登入同步，logout 失敗仍回 Gate 並可重試', async ({ page, request }) => {
+  let signalSnapshotStarted;
+  let releaseSnapshot;
+  const snapshotStarted = new Promise((resolve) => { signalSnapshotStarted = resolve; });
+  const snapshotGate = new Promise((resolve) => { releaseSnapshot = resolve; });
+  let interceptSnapshot = true;
+  let interceptLogout = true;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_get_snapshot' && interceptSnapshot) {
+      interceptSnapshot = false;
+      signalSnapshotStarted();
+      await snapshotGate;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 'SNAPSHOT_TEST_UNAVAILABLE', message: 'SNAPSHOT_TEST_UNAVAILABLE' })
+      });
+      return;
+    }
+    if (payload?.name === 'monthly_v7_logout' && interceptLogout) {
+      interceptLogout = false;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 'LOGOUT_TEST_UNAVAILABLE', message: 'LOGOUT_TEST_UNAVAILABLE' })
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.addInitScript(() => {
+    let capturedOnload = null;
+    Object.defineProperty(window, 'onload', {
+      configurable: true,
+      get: () => capturedOnload,
+      set: (handler) => {
+        capturedOnload = handler;
+        window.__rosterCapturedOnload = handler;
+      }
+    });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.evaluate(async () => {
+    const boot = window.__rosterCapturedOnload;
+    if (typeof boot !== 'function') throw new Error('PRODUCTION_ONLOAD_NOT_CAPTURED');
+    window.onload = null;
+    window.__rosterCapturedOnload = null;
+    await boot.call(window);
+  });
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await snapshotStarted;
+  await expect.poll(() => page.evaluate(() => {
+    const root = document.getElementById('v5TopStatus');
+    const controls = Array.from(root?.querySelectorAll('#v5-login-username, #v5-login-password, button') || []);
+    return {
+      text: String(root?.textContent || ''),
+      controls: controls.map((element) => ({ text: String(element.textContent || '').trim(), disabled: element.disabled }))
+    };
+  }), { timeout: 5000 }).toMatchObject({
+    text: expect.stringContaining('正在讀取雲端帳號'),
+    controls: [
+      { disabled: true },
+      { disabled: true },
+      { text: '登入', disabled: true },
+      { text: expect.stringContaining('同步最新'), disabled: true }
+    ]
+  });
+  expect(await page.locator('#v5TopStatus').textContent()).not.toMatch(/尚未建立 owner|雲端未找到 Owner/);
+  releaseSnapshot();
+
+  await expect(page.locator('#siteAccessGate')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+  await expect(page.locator('#site-access-error')).toContainText('雲端帳號資料讀取失敗');
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('body')).not.toHaveClass(/site-access-locked/);
+  await expect(page.locator('#v5TopStatus')).toContainText('未登入');
+  await expect(page.locator('#v5-login-username')).toBeEnabled();
+  await expect(page.locator('#v5-login-password')).toBeEnabled();
+  await expect(page.locator('#v5TopStatus')).not.toContainText(/尚未建立 owner|雲端未找到 Owner/);
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.rpcCounts.get_monthly_report_cloud_data || 0).toBe(0);
+});
+
 test('未登入純進站同步不得誤標月報編輯為本機草稿或要求登入提交', async ({ page, request }) => {
   await page.addInitScript(() => {
     let capturedOnload = null;
@@ -1854,21 +2090,39 @@ test('保存 RPC 無回應會結束等待並保留草稿，重試後可由新瀏
 
 test('保存已提交但回覆遺失時，刷新後重播舊 operation 不重複增加 revision', async ({ page, request, browser }) => {
   const dialogs = [];
+  let signalSaveCommitted;
+  let releaseSaveAck;
+  const saveCommitted = new Promise((resolve) => { signalSaveCommitted = resolve; });
+  const saveAckGate = new Promise((resolve) => { releaseSaveAck = resolve; });
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_save_module') {
+      const response = await route.fetch();
+      signalSaveCommitted();
+      await saveAckGate;
+      try { await route.fulfill({ response }); } catch {}
+      return;
+    }
+    await route.continue();
+  });
   page.on('dialog', async (dialog) => {
     dialogs.push(dialog.message());
     await dialog.dismiss();
   });
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.evaluate(() => {
-    window.MonthlyV7App.transport.requestTimeoutMs = 35;
+    window.MonthlyV7App.transport.requestTimeoutMs = 500;
     reportData[0].title = '已提交但回覆遺失的內容';
     renderTable();
     v1EnsureModuleFields();
   });
-  await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=always&mode=after_commit');
-
-  await page.evaluate(() => v5SaveChangesToCloud());
+  await page.evaluate(() => {
+    window.__lostAckSavePromise = v5SaveChangesToCloud();
+  });
+  await saveCommitted;
   await expect.poll(() => page.locator('#v5TopStatus').innerText()).toContain('RPC_TIMEOUT');
+  releaseSaveAck();
+  await page.evaluate(() => window.__lostAckSavePromise);
   expect(dialogs.some((message) => message.includes('RPC_TIMEOUT'))).toBe(true);
   const committed = await (await request.get('/__fake_state')).json();
   expect(committed.modules[0].revision).toBe(2);
@@ -1883,8 +2137,6 @@ test('保存已提交但回覆遺失時，刷新後重播舊 operation 不重複
   )));
   expect(draftBeforeReload.payload).toEqual(JSON.parse(pendingBeforeReload.signature).p_payload);
   expect(draftBeforeReload.supersedesOperation).toBeUndefined();
-  await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=0&mode=after_commit');
-
   await page.reload();
   await expect.poll(() => page.evaluate(() => Boolean(
     window.MonthlyV7App?.client?.userSession?.id
@@ -2561,7 +2813,7 @@ test('新建項目後正式 PDF 以 payload 可見 id 比對，不誤判 STALE_S
   expect(after.snapshots[0].modules.at(-1).payload.id).toBe(created.payload.id);
 });
 
-test('正式 PDF snapshot RPC timeout 標示 create_snapshot 階段與確切 RPC', async ({ page, request }) => {
+test('正式 PDF snapshot RPC timeout 標示 create_snapshot 階段與確切 RPC', async ({ page }) => {
   const dialogs = [];
   page.on('dialog', async (dialog) => {
     dialogs.push(dialog.message());
@@ -2569,11 +2821,22 @@ test('正式 PDF snapshot RPC timeout 標示 create_snapshot 階段與確切 RPC
   });
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.evaluate(() => {
-    window.MonthlyV7App.transport.requestTimeoutMs = 35;
+    const transport = window.MonthlyV7App.transport;
+    const originalRpc = transport.rpc.bind(transport);
+    transport.rpc = async (name, params) => {
+      if (name === 'monthly_v7_create_report_snapshot') {
+        const error = new Error('RPC_TIMEOUT');
+        error.code = 'RPC_TIMEOUT';
+        error.operation = name;
+        error.rpcName = name;
+        error.elapsedMs = 37;
+        throw error;
+      }
+      return originalRpc(name, params);
+    };
     window.__v7PrintCalled = false;
     window.print = () => { window.__v7PrintCalled = true; };
   });
-  await request.post('/__fake_hang_rpc?name=monthly_v7_create_report_snapshot&count=always');
 
   await page.evaluate(() => printV1SelectedPdf());
   await expect.poll(() => dialogs.length, { timeout: 15000 }).toBeGreaterThan(0);

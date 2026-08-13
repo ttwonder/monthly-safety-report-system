@@ -20,6 +20,7 @@
         return `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       });
       this.operationIdFactory = options.operationIdFactory || this.idFactory;
+      this.clientVersion = Number.isFinite(Number(options.clientVersion)) ? Number(options.clientVersion) : 7;
       const storedClientId = this.sessionStorage && this.sessionStorage.getItem('monthly_v7_client_session_id');
       this.clientSessionId = storedClientId || this.idFactory();
       if (this.sessionStorage && !storedClientId) this.sessionStorage.setItem('monthly_v7_client_session_id', this.clientSessionId);
@@ -143,14 +144,50 @@
     async initialize(config) {
       this.config = Object.assign({}, config || {});
       if (!String(this.config.workspaceKey || '').trim()) throw new Error('workspaceKey is required');
-      if (typeof this.transport.ensureAnonymous === 'function') await this.transport.ensureAnonymous(this.config);
-      const raw = await this.rpc('monthly_v7_get_status', { p_workspace_key: this.config.workspaceKey });
+      let raw;
+      try {
+        if (typeof this.transport.ensureAnonymous === 'function') await this.transport.ensureAnonymous(this.config);
+        raw = await this.rpc('monthly_v7_get_status', { p_workspace_key: this.config.workspaceKey });
+      } catch (error) {
+        this.status = {
+          mode: 'error', authorityState: '', authorityEpoch: 0,
+          minimumClientVersion: 0,
+          errorCode: String(error && (error.code || error.message) || 'V7_AUTHORITY_STATUS_UNAVAILABLE')
+        };
+        throw error;
+      }
+      const failAuthority = (code, authorityState = '', authorityEpoch = 0, minimumClientVersion = 0) => {
+        this.status = { mode: 'error', authorityState, authorityEpoch, minimumClientVersion, errorCode: code };
+        const error = new Error(code);
+        error.code = code;
+        throw error;
+      };
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw) || raw.ok !== true) {
+        failAuthority('V7_AUTHORITY_STATUS_INVALID');
+      }
       const authorityState = String(raw && (raw.authority_state || raw.authorityState) || '');
+      const rawAuthorityEpoch = raw.authority_epoch ?? raw.authorityEpoch;
+      const rawMinimumClientVersion = raw.minimum_client_version ?? raw.minimumClientVersion;
+      const authorityEpoch = Number(rawAuthorityEpoch);
+      const minimumClientVersion = Number(rawMinimumClientVersion);
+      if (!authorityState) failAuthority('V7_AUTHORITY_STATUS_INVALID');
+      if (rawAuthorityEpoch == null || rawMinimumClientVersion == null
+        || typeof rawAuthorityEpoch !== 'number' || !Number.isInteger(authorityEpoch) || authorityEpoch <= 0
+        || typeof rawMinimumClientVersion !== 'number' || !Number.isInteger(minimumClientVersion) || minimumClientVersion <= 0) {
+        failAuthority('V7_AUTHORITY_STATUS_INVALID', authorityState);
+      }
+      if (minimumClientVersion > this.clientVersion) {
+        failAuthority('V7_CLIENT_VERSION_UNSUPPORTED', authorityState, authorityEpoch, minimumClientVersion);
+      }
+      if (authorityState !== 'NORMALIZED_ACTIVE' && authorityState !== 'LEGACY_ACTIVE') {
+        failAuthority('V7_AUTHORITY_STATE_UNSUPPORTED', authorityState, authorityEpoch, minimumClientVersion);
+      }
       this.status = {
         mode: authorityState === 'NORMALIZED_ACTIVE' ? 'v7' : 'legacy',
         authorityState,
-        authorityEpoch: Number(raw && (raw.authority_epoch ?? raw.authorityEpoch) || 0),
-        minimumClientVersion: Number(raw && (raw.minimum_client_version ?? raw.minimumClientVersion) || 0)
+        authorityEpoch,
+        minimumClientVersion,
+        errorCode: ''
       };
       if (this.status.mode === 'v7' && this.sessionStorage) {
         try { this.siteSession = JSON.parse(this.sessionStorage.getItem('monthly_v7_site_session') || 'null'); } catch { this.siteSession = null; }

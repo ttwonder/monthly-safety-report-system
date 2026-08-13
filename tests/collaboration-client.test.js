@@ -45,10 +45,51 @@ test('initialize 僅在 NORMALIZED_ACTIVE 啟用 V7，LEGACY_ACTIVE 保持 V6 wr
   assert.equal(active.isActive(), true);
 });
 
+test('initialize 對空白、未知、錯誤與不相容 authority status 一律 fail closed', async () => {
+  const cases = [
+    { label: 'null', response: null, code: 'V7_AUTHORITY_STATUS_INVALID' },
+    { label: 'empty', response: { ok: true }, code: 'V7_AUTHORITY_STATUS_INVALID' },
+    { label: 'missing-epoch', response: { ok: true, authority_state: 'NORMALIZED_ACTIVE', minimum_client_version: 7 }, code: 'V7_AUTHORITY_STATUS_INVALID' },
+    { label: 'missing-version', response: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2 }, code: 'V7_AUTHORITY_STATUS_INVALID' },
+    { label: 'wrong-number-type', response: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: '2', minimum_client_version: 7 }, code: 'V7_AUTHORITY_STATUS_INVALID' },
+    { label: 'unknown', response: { ok: true, authority_state: 'MIGRATION_UNKNOWN', authority_epoch: 2, minimum_client_version: 7 }, code: 'V7_AUTHORITY_STATE_UNSUPPORTED' },
+    { label: 'malformed', response: ['NORMALIZED_ACTIVE'], code: 'V7_AUTHORITY_STATUS_INVALID' },
+    {
+      label: 'client-version',
+      response: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 8 },
+      code: 'V7_CLIENT_VERSION_UNSUPPORTED'
+    }
+  ];
+
+  for (const fixture of cases) {
+    const transport = fakeTransport({ monthly_v7_get_status: fixture.response });
+    const client = new MonthlyV7Client({
+      transport,
+      sessionStorage: memoryStorage(),
+      draftStorage: memoryStorage(),
+      clientVersion: 7
+    });
+    await assert.rejects(client.initialize({ workspaceKey: 'workspace-test' }), (error) => {
+      assert.equal(error.code, fixture.code, fixture.label);
+      return true;
+    });
+    assert.equal(client.status.mode, 'error', fixture.label);
+    assert.equal(client.isActive(), false, fixture.label);
+    assert.deepEqual(transport.calls.map((call) => call.name), ['ensureAnonymous', 'monthly_v7_get_status'], fixture.label);
+  }
+
+  const statusError = Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' });
+  const transport = fakeTransport({ monthly_v7_get_status: () => { throw statusError; } });
+  const client = new MonthlyV7Client({ transport, sessionStorage: memoryStorage(), draftStorage: memoryStorage() });
+  await assert.rejects(client.initialize({ workspaceKey: 'workspace-test' }), { code: 'RPC_TIMEOUT' });
+  assert.equal(client.status.mode, 'error');
+  assert.equal(client.status.errorCode, 'RPC_TIMEOUT');
+});
+
 test('session operation context 綁定 generation、actor 與 session IDs', async () => {
   const sessions = memoryStorage();
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: {
       ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' }
@@ -380,7 +421,7 @@ test('legacy 來源不符或本機時間不晚於 authority 時只隔離，不�
     let bundle;
     const client = new MonthlyV7Client({
       transport: fakeTransport({
-        monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+        monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
         monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
         monthly_v7_get_snapshot: {
           ok: true, watermark: 1,
@@ -428,7 +469,7 @@ test('snapshot 只以同 actor 的有效 V7 reorder pending 恢復顯示順序',
   let bundle;
   const client = new MonthlyV7Client({
     transport: fakeTransport({
-      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
       monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
       monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
       monthly_v7_get_snapshot: {
@@ -462,7 +503,7 @@ test('連續登入時舊 attempt 的 snapshot 晚失敗不得清除後繼成功 
     rejectSnapshotA = reject;
   });
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: (params) => ({
       ok: true,
@@ -511,7 +552,7 @@ test('連續登入時舊 attempt 即使 snapshot 先成功也不得覆蓋後發�
     report: { id: 'r1', revision }, modules: [], records: [], users: []
   });
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: (params) => ({
       ok: true,
@@ -546,7 +587,7 @@ test('連續登入時舊 attempt 即使 snapshot 先成功也不得覆蓋後發�
 
 test('claimLease 被占用時帶出持鎖者顯示名稱，不暴露 LEASE_HELD 技術碼', async () => {
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u2', username: 'operator', role: 'operator' } },
     monthly_v7_get_snapshot: {
@@ -581,7 +622,7 @@ test('logoutUser 只撤銷 user session，保留 site session 與本機草稿', 
   const sessions = memoryStorage();
   const drafts = memoryStorage();
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: {
       ok: true,
@@ -620,7 +661,7 @@ test('logoutUser server 回 ok false 時上拋未確認狀態，但仍清本頁 
   const sessions = memoryStorage();
   const drafts = memoryStorage();
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authorityState: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authorityState: 'NORMALIZED_ACTIVE', authorityEpoch: 2, minimumClientVersion: 7 },
     monthly_v7_open_site: { ok: true, siteSessionId: 'site-1', expiresAt: '2099-01-01' },
     monthly_v7_login_user: { ok: true, userSessionId: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' }, expiresAt: '2099-01-01' },
     monthly_v7_get_snapshot: { ok: true, watermark: 1, report: { id: 'r1' }, modules: [], records: [], users: [] },
@@ -647,7 +688,7 @@ test('openSite 建立新 site session 前清除舊 user session 與身份投影'
   sessions.setItem('monthly_v7_user_session', JSON.stringify({ id: 'user-old', expiresAt: '' }));
   sessions.setItem('monthly_v7_user_projection', JSON.stringify({ id: 'u1', username: 'owner', role: 'owner' }));
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-new' }
   });
   const client = new MonthlyV7Client({ transport, sessionStorage: sessions, draftStorage: memoryStorage() });
@@ -669,7 +710,7 @@ test('currentUser 不接受缺少 user session 的孤立身份投影', async () 
   sessions.setItem('monthly_v7_site_session', JSON.stringify({ id: 'site-1', expiresAt: '' }));
   sessions.setItem('monthly_v7_user_projection', JSON.stringify({ id: 'u1', username: 'owner', role: 'owner' }));
   const client = new MonthlyV7Client({
-    transport: fakeTransport({ monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' } }),
+    transport: fakeTransport({ monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 } }),
     sessionStorage: sessions,
     draftStorage: memoryStorage()
   });
@@ -685,7 +726,7 @@ test('READ_SESSION_INVALID 集中清除 user session，保留 site session、草
   const sessionEvents = [];
   let snapshotRead = 0;
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: {
       ok: true,
@@ -730,7 +771,7 @@ test('PostgREST SQLSTATE 28000 的 session invalid 不重試業務 RPC 且保留
   const drafts = memoryStorage();
   let saveCalls = 0;
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: {
       ok: true,
@@ -777,7 +818,7 @@ test('舊 session 世代晚到的 invalid 回應不得清除重新登入的新 s
   let resolveStaleRead;
   const sessionEvents = [];
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: () => {
       loginCount += 1;
@@ -1432,7 +1473,7 @@ test('batch own-operation 的所有 production-shaped hints 在第一個 entity 
   const pendingKey = 'save_module_batch:r1';
   let entityReads = 0;
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1500,7 +1541,7 @@ test('get_changes_since 回覆晚於保存 ACK 時以 confirmed revision/payload
   const saveStarted = new Promise((resolve) => { signalSaveStarted = resolve; });
   const changesStarted = new Promise((resolve) => { signalChangesStarted = resolve; });
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1555,7 +1596,7 @@ test('own ACK 後相同 entity 的較高遠端 revision/payload 仍保護草稿�
   const drafts = memoryStorage();
   const deferred = [];
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1608,7 +1649,7 @@ test('report_meta ACK 後的後繼草稿不把晚到 own hint 誤報為遠端版
   };
   const successor = { ...confirmed, title: '後繼草稿 B' };
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1667,7 +1708,7 @@ test('report_meta 較高遠端 revision/payload 仍保護後繼草稿並警告',
   const successor = { ...confirmed, title: '後繼草稿 B' };
   const remote = { ...confirmed, title: '真正遠端標題 C' };
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-session-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1706,7 +1747,7 @@ test('report_meta 較高遠端 revision/payload 仍保護後繼草稿並警告',
 
 test('saveModuleBatch 成功後保留原先持有的 module lease', async () => {
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1759,7 +1800,7 @@ test('saveModuleBatch 成功後保留原先持有的 module lease', async () => 
 test('saveModuleBatch 有 pending 時先重播舊 operation，不先 claim 目前 batch lease', async () => {
   const drafts = memoryStorage();
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1817,7 +1858,7 @@ test('saveModuleBatch 舊 operation 回 LEASE_LOST 後才 claim 並只送一個�
   const oldOperationId = '00000000-0000-4000-8000-000000000795';
   const newOperationId = '00000000-0000-4000-8000-000000000796';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1873,7 +1914,7 @@ test('saveModuleBatch 舊 operation 回 LEASE_LOST 後才 claim 並只送一個�
 test('lost acknowledgement 以同一 operation_id 自動重送', async () => {
   let attempts = 0;
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 }, modules: [], records: [], users: [] },
@@ -1903,7 +1944,7 @@ test('saveModule 有 pending 時先重播舊 operation，另一人持有目前 l
   const drafts = memoryStorage();
   const oldOperationId = '00000000-0000-4000-8000-000000000785';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1952,7 +1993,7 @@ test('saveModule 有 pending 時先重播舊 operation，另一人持有目前 l
 test('saveModule 舊 operation 回傳 COMMITTED 時保留已存在的同 actor lease', async () => {
   const drafts = memoryStorage();
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -1997,7 +2038,7 @@ test('相同保存內容只在 session 更新時沿用 pending operation ID 並�
   const drafts = memoryStorage();
   const operationId = '00000000-0000-4000-8000-000000000778';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-current' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-current', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 }, modules: [], records: [], users: [] },
@@ -2045,7 +2086,7 @@ test('pending 保存的 lease 或 fencing token 更新時先重播舊簽章，�
   const oldOperationId = '00000000-0000-4000-8000-000000000779';
   const newOperationId = '00000000-0000-4000-8000-000000000780';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-current', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -2285,7 +2326,7 @@ test('pending fencing token 非正整數時任何 RPC 前 fail closed 且保留 
   const oldOperationId = '00000000-0000-4000-8000-000000000795';
   const newOperationId = '00000000-0000-4000-8000-000000000796';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: {
       ok: true, user_session_id: 'user-current',
@@ -2444,7 +2485,7 @@ test('nested payload 的 lease/fencing 同名業務欄位不同時不得被忽�
 
 test('record create/save/delete 使用 server UUID 與逐筆 lease/CAS', async () => {
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 }, modules: [], records: [], users: [] },
@@ -2688,7 +2729,7 @@ test('reorder pending 的 module order 與目前不同時 fail closed 且零 RPC
 test('report metadata、structure 與 KPI batch 使用各自短 lease並更新 server revisions', async () => {
   let claimFence = 0;
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -2751,7 +2792,7 @@ test('report_meta RPC timeout 會落本機 draft，重新載入 snapshot 後恢�
     throw error;
   };
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: snapshot,
@@ -2780,7 +2821,7 @@ test('report_meta RPC timeout 會落本機 draft，重新載入 snapshot 後恢�
 
   const reloaded = new MonthlyV7Client({
     transport: fakeTransport({
-      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
       monthly_v7_open_site: { ok: true, site_session_id: 'site-2' },
       monthly_v7_login_user: { ok: true, user_session_id: 'user-2', user: { id: 'u1', username: 'owner', role: 'owner' } },
       monthly_v7_get_snapshot: snapshot
@@ -2802,7 +2843,7 @@ test('report_meta 舊 operation 回 LEASE_LOST 後才 claim 並只送一個新 o
   const oldOperationId = '00000000-0000-4000-8000-000000000797';
   const newOperationId = '00000000-0000-4000-8000-000000000798';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: {
@@ -2852,7 +2893,7 @@ test('report_meta 舊 operation 回 LEASE_LOST 後才 claim 並只送一個新 o
 
 test('user 管理、正式 snapshot 與 site password rotation 走 server RPC 並撤銷本頁 sessions', async () => {
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 }, modules: [], records: [], users: [] },
@@ -2888,7 +2929,7 @@ test('舊 snapshot pending envelope 在重新登入換 session 後沿用 operati
   const drafts = memoryStorage();
   const snapshotOperationId = '00000000-0000-4000-8000-000000000888';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 }, modules: [], records: [], users: [] },
@@ -2952,7 +2993,7 @@ test('非精確舊 snapshot pending envelope 仍 fail closed 且不 dispatch', a
   const sessions = memoryStorage();
   const drafts = memoryStorage();
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 }, modules: [], records: [], users: [] },
@@ -3042,7 +3083,7 @@ test('full snapshot catch-up 逐項合併並保留 lease/draft 本機內容', as
   let appliedBundle = null;
   const remoteConflicts = [];
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: () => {
@@ -3331,7 +3372,7 @@ test('有明確 superseding marker 時先以原 operation 對帳 A，再以新 o
   const oldOperationId = '00000000-0000-4000-8000-000000000881';
   const newOperationId = '00000000-0000-4000-8000-000000000882';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: {
       ok: true, user_session_id: 'user-current',
@@ -3438,7 +3479,7 @@ test('pending ownership 只把目前身份或損壞 envelope 視為本次待對�
 test('部分 module 的 batch pending 只把原 batch 涵蓋項目列為待重試', async () => {
   const drafts = memoryStorage();
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: {
       ok: true, user_session_id: 'user-current', user: { id: 'u1', username: 'owner', role: 'owner' }
@@ -3516,7 +3557,7 @@ test('batch superseding drafts 先整批對帳 A，再以新 operation 整批保
   const oldOperationId = '00000000-0000-4000-8000-000000000883';
   const newOperationId = '00000000-0000-4000-8000-000000000884';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: {
       ok: true, user_session_id: 'user-current', user: { id: 'u1', username: 'owner', role: 'owner' }
@@ -3585,7 +3626,7 @@ test('report metadata superseding draft 先對帳 A，再以新 operation 保存
   const oldOperationId = '00000000-0000-4000-8000-000000000885';
   const newOperationId = '00000000-0000-4000-8000-000000000886';
   const transport = fakeTransport({
-    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE' },
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
     monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
     monthly_v7_login_user: {
       ok: true, user_session_id: 'user-current', user: { id: 'u1', username: 'owner', role: 'owner' }

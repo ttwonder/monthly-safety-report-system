@@ -12,6 +12,9 @@ const fakeSdk = readFileSync(join(__dirname, 'fixtures', 'fake-supabase.js'));
 function freshState() {
   const initialModuleUpdatedAt = '2026-08-10T00:00:00.000Z';
   return {
+    statusResponse: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    statusFailure: null,
+    rpcCounts: new Map(),
     report: { id: '11111111-1111-4111-8111-111111111111', legacyFileId: 'browser-report', title: '瀏覽器協作測試', date: '2026-08-10', period: { startM: '8', startD: '1', endM: '8', endD: '31' }, revision: 1, settings: {} },
     modules: [
       { id: '22222222-2222-4222-8222-222222222221', legacyItemId: '101', sortRank: 1, revision: 1, updatedAt: initialModuleUpdatedAt, payload: { id: 101, icon: 'fas fa-edit', iconColor: '#64748b', title: 'A 原始項目', colLayout: '1', colCount: 1, columns: ['A 內容'], attachments: [], selectedForPdf: true, pdfOrder: 1 } },
@@ -66,6 +69,7 @@ function storeOperation(operationId, actorUserId, requestHash, result) {
 
 function resultState() {
   return {
+    rpcCounts: Object.fromEntries(state.rpcCounts.entries()),
     report: state.report,
     modules: state.modules,
     records: state.records,
@@ -83,7 +87,15 @@ function resultState() {
 }
 
 function rpc(name, p) {
-  if (name === 'monthly_v7_get_status') return { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 };
+  state.rpcCounts.set(name, Number(state.rpcCounts.get(name) || 0) + 1);
+  if (name === 'monthly_v7_get_status') {
+    if (state.statusFailure) {
+      const error = new Error(state.statusFailure.message || 'STATUS_UNAVAILABLE');
+      error.code = state.statusFailure.code || 'STATUS_UNAVAILABLE';
+      throw error;
+    }
+    return clone(state.statusResponse);
+  }
   if (name === 'monthly_v7_open_site') {
     if (p.p_password !== state.sitePassword) return { ok: false, error: 'INVALID_CREDENTIALS' };
     const id = randomUUID();
@@ -348,6 +360,17 @@ const mime = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascri
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/__fake_reset' && req.method === 'POST') { state = freshState(); res.writeHead(204); return res.end(); }
+  if (url.pathname === '/__fake_status' && req.method === 'POST') {
+    const kind = String(url.searchParams.get('kind') || 'normalized');
+    state.statusFailure = null;
+    if (kind === 'legacy') state.statusResponse = { ok: true, authority_state: 'LEGACY_ACTIVE', authority_epoch: 1, minimum_client_version: 6 };
+    else if (kind === 'unknown') state.statusResponse = { ok: true, authority_state: 'MIGRATION_UNKNOWN', authority_epoch: 2, minimum_client_version: 7 };
+    else if (kind === 'empty') state.statusResponse = { ok: true };
+    else if (kind === 'null') state.statusResponse = null;
+    else if (kind === 'error') state.statusFailure = { code: 'STATUS_UNAVAILABLE', message: 'STATUS_UNAVAILABLE' };
+    else state.statusResponse = { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 };
+    res.writeHead(204); return res.end();
+  }
   if (url.pathname === '/__fake_invalidate_user_sessions' && req.method === 'POST') {
     state.userSessions.clear();
     res.writeHead(204); return res.end();
@@ -393,6 +416,12 @@ const server = http.createServer((req, res) => {
     res.writeHead(204); return res.end();
   }
   if (url.pathname === '/__fake_state') { res.writeHead(200, { 'Content-Type': mime['.json'] }); return res.end(JSON.stringify(resultState())); }
+  if (url.pathname.startsWith('/rest/v1/rpc/') && req.method === 'POST') {
+    const name = url.pathname.slice('/rest/v1/rpc/'.length);
+    state.rpcCounts.set(name, Number(state.rpcCounts.get(name) || 0) + 1);
+    res.writeHead(403, { 'Content-Type': mime['.json'] });
+    return res.end(JSON.stringify({ code: '42501', message: `permission denied for function ${name}` }));
+  }
   if (url.pathname === '/__fake_rpc' && req.method === 'POST') {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
