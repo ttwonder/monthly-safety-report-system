@@ -60,6 +60,17 @@ async function applyV7(db) {
   await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7.sql'), 'utf8'));
 }
 
+async function applyTrustedDeviceResume(db) {
+  await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-trusted-device-resume.sql'), 'utf8'));
+}
+
+async function activateNormalizedAuthority(db) {
+  await db.exec(`
+    update public.monthly_v7_workspaces
+    set authority_state='NORMALIZED_ACTIVE',minimum_client_version=7
+  `);
+}
+
 async function setAuthUid(db, uid) {
   await db.query(`select set_config('request.jwt.claim.sub', $1, false)`, [uid]);
 }
@@ -884,5 +895,1060 @@ test('V7 authenticated 只能讀有有效 site session 的 change hints，不能
   } finally {
     try { await db.exec(`reset role`); } catch {}
     await db.close();
+  }
+});
+
+test('trusted-device resume migration 可重跑、預設私有且不改變舊登入流程', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    const before = await openAndLogin(
+      db,
+      '11111111-1111-4111-8111-111111111111',
+      'owner',
+      'owner-pass',
+      'tab-before-resume-migration'
+    );
+    assert.equal(before.site.ok, true);
+    assert.equal(before.login.ok, true);
+
+    await applyTrustedDeviceResume(db);
+    await applyTrustedDeviceResume(db);
+
+    const contracts = (await db.query(`
+      select
+        to_regclass('public.monthly_v7_trusted_devices') is not null as device_table,
+        to_regclass('public.monthly_v7_resume_tokens') is not null as token_table,
+        exists(
+          select 1 from information_schema.columns
+          where table_schema='public' and table_name='monthly_v7_site_sessions'
+            and column_name='trusted_device_id' and is_nullable='YES'
+        ) as site_session_link,
+        (select relrowsecurity from pg_class where oid='public.monthly_v7_trusted_devices'::regclass) as device_rls,
+        (select relrowsecurity from pg_class where oid='public.monthly_v7_resume_tokens'::regclass) as token_rls,
+        not has_table_privilege('anon','public.monthly_v7_trusted_devices','SELECT') as anon_device_blocked,
+        not has_table_privilege('authenticated','public.monthly_v7_trusted_devices','SELECT') as authenticated_device_blocked,
+        not has_table_privilege('anon','public.monthly_v7_resume_tokens','SELECT') as anon_token_blocked,
+        not has_table_privilege('authenticated','public.monthly_v7_resume_tokens','SELECT') as authenticated_token_blocked
+    `)).rows[0];
+    assert.deepEqual(contracts, {
+      device_table: true,
+      token_table: true,
+      site_session_link: true,
+      device_rls: true,
+      token_rls: true,
+      anon_device_blocked: true,
+      authenticated_device_blocked: true,
+      anon_token_blocked: true,
+      authenticated_token_blocked: true
+    });
+
+    const empty = (await db.query(`
+      select
+        (select count(*)::int from public.monthly_v7_trusted_devices) as devices,
+        (select count(*)::int from public.monthly_v7_resume_tokens) as tokens
+    `)).rows[0];
+    assert.deepEqual(empty, { devices: 0, tokens: 0 });
+
+    const after = await openAndLogin(
+      db,
+      '22222222-2222-4222-8222-222222222222',
+      'operator',
+      'operator-pass',
+      'tab-after-resume-migration'
+    );
+    assert.equal(after.site.ok, true);
+    assert.equal(after.login.ok, true);
+  } finally {
+    await db.close();
+  }
+});
+
+test('trusted-device migration 不使基础 V7 schema 重放后的旧 open_site 失效', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await applyV7(db);
+    await setAuthUid(db, '11111111-1111-4111-8111-111111111111');
+    const site = rpcResult(await db.query(
+      'select public.monthly_v7_open_site($1,$2,$3) as result',
+      ['workspace-test', 'site-pass', 'tab-base-replay']
+    ));
+    assert.equal(site.ok, true);
+  } finally {
+    await db.close();
+  }
+});
+
+
+test('site resume 發行只回傳 raw token 一次、伺服器只存 verifier 且再次發行撤銷舊 token', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    await setAuthUid(db, uid);
+    const site = rpcResult(await db.query(
+      'select public.monthly_v7_open_site($1,$2,$3) as result',
+      ['workspace-test', 'site-pass', 'tab-site-issue']
+    ));
+
+    const first = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', site.site_session_id, 'tab-site-issue']
+    ));
+    assert.equal(first.ok, true);
+    assert.match(first.resume_token, /^[a-f0-9]{64}$/);
+    assert.match(String(first.trusted_device_id), /^[a-f0-9-]{36}$/);
+    assert.equal(Object.hasOwn(first, 'user_session_id'), false);
+
+    const firstRows = await db.query(`
+      select d.id as device_id,d.auth_uid,d.authority_epoch,d.site_policy_generation,
+        s.trusted_device_id,t.token_hash,t.purpose,t.consumed_at,t.revoked_at
+      from public.monthly_v7_trusted_devices d
+      join public.monthly_v7_site_sessions s on s.trusted_device_id=d.id
+      join public.monthly_v7_resume_tokens t on t.trusted_device_id=d.id
+      where s.id=$1
+    `, [site.site_session_id]);
+    assert.equal(firstRows.rows.length, 1);
+    const firstRow = firstRows.rows[0];
+    assert.equal(firstRow.device_id, first.trusted_device_id);
+    assert.equal(firstRow.trusted_device_id, first.trusted_device_id);
+    assert.equal(firstRow.auth_uid, uid);
+    assert.equal(firstRow.purpose, 'site');
+    assert.equal(firstRow.token_hash, sha256(first.resume_token));
+    assert.notEqual(firstRow.token_hash, first.resume_token);
+    assert.equal(firstRow.consumed_at, null);
+    assert.equal(firstRow.revoked_at, null);
+
+    const second = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', site.site_session_id, 'tab-site-issue']
+    ));
+    assert.equal(second.ok, true);
+    assert.equal(second.trusted_device_id, first.trusted_device_id);
+    assert.notEqual(second.resume_token, first.resume_token);
+
+    const tokenState = (await db.query(`
+      select count(*)::int as total,
+        count(*) filter(where consumed_at is null and revoked_at is null and expires_at>now())::int as active,
+        bool_or(token_hash=$1) as has_first_hash,
+        bool_or(token_hash=$2) as has_second_hash
+      from public.monthly_v7_resume_tokens
+      where trusted_device_id=$3 and purpose='site'
+    `, [sha256(first.resume_token), sha256(second.resume_token), first.trusted_device_id])).rows[0];
+    assert.deepEqual(tokenState, { total: 2, active: 1, has_first_hash: true, has_second_hash: true });
+
+    const rawColumns = await db.query(`
+      select column_name from information_schema.columns
+      where table_schema='public' and table_name='monthly_v7_resume_tokens'
+        and column_name in ('token','raw_token','resume_token')
+    `);
+    assert.equal(rawColumns.rows.length, 0);
+
+    const acl = (await db.query(`
+      select
+        not has_function_privilege('anon','public.monthly_v7_issue_site_resume(text,uuid,text)','EXECUTE') as anon_blocked,
+        has_function_privilege('authenticated','public.monthly_v7_issue_site_resume(text,uuid,text)','EXECUTE') as authenticated_allowed
+    `)).rows[0];
+    assert.deepEqual(acl, { anon_blocked: true, authenticated_allowed: true });
+  } finally {
+    await db.close();
+  }
+});
+
+test('site resume token 單次交換為新 session 並原子輪替，replay 不建立 session', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    await setAuthUid(db, uid);
+    const site = rpcResult(await db.query(
+      'select public.monthly_v7_open_site($1,$2,$3) as result',
+      ['workspace-test', 'site-pass', 'tab-site-source']
+    ));
+    const issued = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', site.site_session_id, 'tab-site-source']
+    ));
+
+    const restored = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', issued.resume_token, 'tab-site-restored']
+    ));
+    assert.equal(restored.ok, true);
+    assert.notEqual(restored.site_session_id, site.site_session_id);
+    assert.equal(restored.trusted_device_id, issued.trusted_device_id);
+    assert.match(restored.resume_token, /^[a-f0-9]{64}$/);
+    assert.notEqual(restored.resume_token, issued.resume_token);
+    assert.equal(Object.hasOwn(restored, 'user_session_id'), false);
+    assert.equal(Object.hasOwn(restored, 'user'), false);
+
+    const sessions = await db.query(`
+      select id,client_session_id,trusted_device_id,expires_at
+      from public.monthly_v7_site_sessions
+      where trusted_device_id=$1
+      order by created_at,id
+    `, [issued.trusted_device_id]);
+    assert.equal(sessions.rows.length, 2);
+    const restoredSession = sessions.rows.find((row) => row.id === restored.site_session_id);
+    assert.equal(restoredSession.client_session_id, 'tab-site-restored');
+    assert.equal(restoredSession.trusted_device_id, issued.trusted_device_id);
+    const device = (await db.query(
+      'select expires_at from public.monthly_v7_trusted_devices where id=$1',
+      [issued.trusted_device_id]
+    )).rows[0];
+    assert.ok(new Date(restoredSession.expires_at) <= new Date(device.expires_at));
+    assert.equal((await db.query('select count(*)::int as count from public.monthly_v7_user_sessions')).rows[0].count, 0);
+
+    const rotated = await db.query(`
+      select token_hash,consumed_at,replaced_by_token_id
+      from public.monthly_v7_resume_tokens
+      where trusted_device_id=$1 and purpose='site'
+      order by issued_at,id
+    `, [issued.trusted_device_id]);
+    assert.equal(rotated.rows.length, 2);
+    assert.equal(rotated.rows[0].token_hash, sha256(issued.resume_token));
+    assert.notEqual(rotated.rows[0].consumed_at, null);
+    assert.notEqual(rotated.rows[0].replaced_by_token_id, null);
+    assert.equal(rotated.rows[1].token_hash, sha256(restored.resume_token));
+    assert.equal(rotated.rows[1].consumed_at, null);
+
+    const beforeReplay = (await db.query('select count(*)::int as count from public.monthly_v7_site_sessions')).rows[0].count;
+    const replay = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', issued.resume_token, 'tab-site-replay']
+    ));
+    assert.deepEqual(replay, { ok: false, error: 'SITE_RESUME_INVALID' });
+    const afterReplay = (await db.query('select count(*)::int as count from public.monthly_v7_site_sessions')).rows[0].count;
+    assert.equal(afterReplay, beforeReplay);
+  } finally {
+    await db.close();
+  }
+});
+
+test('忘記可信裝置會撤銷其 tokens 與 sessions，且不影響其他裝置', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    await setAuthUid(db, uid);
+
+    const siteA = rpcResult(await db.query(
+      'select public.monthly_v7_open_site($1,$2,$3) as result',
+      ['workspace-test', 'site-pass', 'tab-forget-a']
+    ));
+    const userA = rpcResult(await db.query(
+      'select public.monthly_v7_login_user($1,$2,$3,$4,$5) as result',
+      ['workspace-test', siteA.site_session_id, 'owner', 'owner-pass', 'tab-forget-a']
+    ));
+    const markerA = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', siteA.site_session_id, 'tab-forget-a']
+    ));
+
+    const siteB = rpcResult(await db.query(
+      'select public.monthly_v7_open_site($1,$2,$3) as result',
+      ['workspace-test', 'site-pass', 'tab-forget-b']
+    ));
+    const markerB = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', siteB.site_session_id, 'tab-forget-b']
+    ));
+    assert.notEqual(markerA.trusted_device_id, markerB.trusted_device_id);
+
+    const forgotten = rpcResult(await db.query(
+      'select public.monthly_v7_forget_trusted_device($1,$2,$3) as result',
+      ['workspace-test', siteA.site_session_id, 'tab-forget-a']
+    ));
+    assert.deepEqual(forgotten, {
+      ok: true,
+      forgotten: true,
+      trusted_device_id: markerA.trusted_device_id
+    });
+
+    const stateA = (await db.query(`
+      select d.revoked_at is not null as revoked,
+        (select count(*)::int from public.monthly_v7_resume_tokens t
+          where t.trusted_device_id=d.id and t.revoked_at is null) as live_tokens,
+        (select count(*)::int from public.monthly_v7_site_sessions s
+          where s.trusted_device_id=d.id) as live_site_sessions,
+        (select count(*)::int from public.monthly_v7_user_sessions u
+          where u.id=$2) as live_user_sessions
+      from public.monthly_v7_trusted_devices d where d.id=$1
+    `, [markerA.trusted_device_id, userA.user_session_id])).rows[0];
+    assert.deepEqual(stateA, {
+      revoked: true,
+      live_tokens: 0,
+      live_site_sessions: 0,
+      live_user_sessions: 0
+    });
+
+    const replayA = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', markerA.resume_token, 'tab-forget-a-replay']
+    ));
+    assert.deepEqual(replayA, { ok: false, error: 'SITE_RESUME_INVALID' });
+    await assert.rejects(
+      () => db.query(
+        'select public.monthly_v7_get_snapshot($1,$2,$3::uuid) as result',
+        ['workspace-test', siteA.site_session_id, null]
+      ),
+      /SITE_SESSION_INVALID/
+    );
+
+    const restoredB = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', markerB.resume_token, 'tab-forget-b-restored']
+    ));
+    assert.equal(restoredB.ok, true);
+  } finally {
+    await db.close();
+  }
+});
+
+test('user resume marker 與 site marker 分離並綁定 user version、role 與 trusted device', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    const session = await openAndLogin(db, uid, 'owner', 'owner-pass', 'tab-user-issue');
+    const siteMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', session.site.site_session_id, session.clientSessionId]
+    ));
+
+    const first = rpcResult(await db.query(
+      'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', session.site.site_session_id, session.login.user_session_id, session.clientSessionId]
+    ));
+    assert.equal(first.ok, true);
+    assert.equal(first.trusted_device_id, siteMarker.trusted_device_id);
+    assert.match(first.resume_token, /^[a-f0-9]{64}$/);
+    assert.equal(first.user.id, session.login.user.id);
+    assert.equal(first.user.version, session.login.user.version);
+    assert.equal(first.user.role, 'owner');
+
+    const stored = (await db.query(`
+      select t.purpose,t.user_id,t.user_version,t.user_role,t.token_hash
+      from public.monthly_v7_resume_tokens t
+      where t.trusted_device_id=$1
+      order by t.purpose
+    `, [siteMarker.trusted_device_id])).rows;
+    assert.equal(stored.length, 2);
+    const siteToken = stored.find((row) => row.purpose === 'site');
+    const userToken = stored.find((row) => row.purpose === 'user');
+    assert.equal(siteToken.user_id, null);
+    assert.equal(userToken.user_id, session.login.user.id);
+    assert.equal(userToken.user_version, session.login.user.version);
+    assert.equal(userToken.user_role, 'owner');
+    assert.equal(userToken.token_hash, sha256(first.resume_token));
+    assert.notEqual(userToken.token_hash, first.resume_token);
+
+    const second = rpcResult(await db.query(
+      'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', session.site.site_session_id, session.login.user_session_id, session.clientSessionId]
+    ));
+    assert.notEqual(second.resume_token, first.resume_token);
+    const counts = (await db.query(`
+      select
+        count(*) filter(where purpose='site' and consumed_at is null and revoked_at is null)::int as active_site,
+        count(*) filter(where purpose='user' and consumed_at is null and revoked_at is null)::int as active_user,
+        count(*) filter(where purpose='user')::int as total_user
+      from public.monthly_v7_resume_tokens where trusted_device_id=$1
+    `, [siteMarker.trusted_device_id])).rows[0];
+    assert.deepEqual(counts, { active_site: 1, active_user: 1, total_user: 2 });
+
+    const untrusted = await openAndLogin(
+      db,
+      '22222222-2222-4222-8222-222222222222',
+      'operator',
+      'operator-pass',
+      'tab-user-no-device'
+    );
+    const denied = rpcResult(await db.query(
+      'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', untrusted.site.site_session_id, untrusted.login.user_session_id, untrusted.clientSessionId]
+    ));
+    assert.deepEqual(denied, { ok: false, error: 'TRUSTED_DEVICE_REQUIRED' });
+  } finally {
+    await db.close();
+  }
+});
+
+test('user resume token 只在已恢復 site session 下交換並輪替為 fresh user session', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    const source = await openAndLogin(db, uid, 'owner', 'owner-pass', 'tab-user-source');
+    const siteMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', source.site.site_session_id, source.clientSessionId]
+    ));
+    const userMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', source.site.site_session_id, source.login.user_session_id, source.clientSessionId]
+    ));
+
+    const restoredSite = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', siteMarker.resume_token, 'tab-user-restored']
+    ));
+    const restoredUser = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', restoredSite.site_session_id, userMarker.resume_token, 'tab-user-restored']
+    ));
+    assert.equal(restoredUser.ok, true);
+    assert.notEqual(restoredUser.user_session_id, source.login.user_session_id);
+    assert.match(restoredUser.resume_token, /^[a-f0-9]{64}$/);
+    assert.notEqual(restoredUser.resume_token, userMarker.resume_token);
+    assert.deepEqual(restoredUser.user, source.login.user);
+    assert.equal(JSON.stringify(restoredUser).includes('password'), false);
+    assert.equal(JSON.stringify(restoredUser).includes('hash'), false);
+
+    const sessionRow = (await db.query(`
+      select us.site_session_id,us.client_session_id,us.user_version,
+        ss.trusted_device_id
+      from public.monthly_v7_user_sessions us
+      join public.monthly_v7_site_sessions ss on ss.id=us.site_session_id
+      where us.id=$1
+    `, [restoredUser.user_session_id])).rows[0];
+    assert.equal(sessionRow.site_session_id, restoredSite.site_session_id);
+    assert.equal(sessionRow.client_session_id, 'tab-user-restored');
+    assert.equal(sessionRow.user_version, source.login.user.version);
+    assert.equal(sessionRow.trusted_device_id, siteMarker.trusted_device_id);
+
+    const replayCountBefore = (await db.query('select count(*)::int as count from public.monthly_v7_user_sessions')).rows[0].count;
+    const replay = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', restoredSite.site_session_id, userMarker.resume_token, 'tab-user-restored']
+    ));
+    assert.deepEqual(replay, { ok: false, error: 'USER_RESUME_INVALID' });
+    const replayCountAfter = (await db.query('select count(*)::int as count from public.monthly_v7_user_sessions')).rows[0].count;
+    assert.equal(replayCountAfter, replayCountBefore);
+
+    const rotatedRows = await db.query(`
+      select token_hash,consumed_at,replaced_by_token_id
+      from public.monthly_v7_resume_tokens
+      where trusted_device_id=$1 and purpose='user'
+      order by issued_at,id
+    `, [siteMarker.trusted_device_id]);
+    assert.equal(rotatedRows.rows.length, 2);
+    assert.notEqual(rotatedRows.rows[0].consumed_at, null);
+    assert.notEqual(rotatedRows.rows[0].replaced_by_token_id, null);
+    assert.equal(rotatedRows.rows[1].token_hash, sha256(restoredUser.resume_token));
+  } finally {
+    await db.close();
+  }
+});
+
+test('user logout 同交易撤銷 user resume，但保留 trusted site resume 與 site session', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    const source = await openAndLogin(db, uid, 'owner', 'owner-pass', 'tab-user-logout-resume');
+    const siteMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', source.site.site_session_id, source.clientSessionId]
+    ));
+    const userMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', source.site.site_session_id, source.login.user_session_id, source.clientSessionId]
+    ));
+
+    const logout = rpcResult(await db.query(
+      'select public.monthly_v7_logout_user($1,$2,$3) as result',
+      ['workspace-test', source.site.site_session_id, source.login.user_session_id]
+    ));
+    assert.equal(logout.ok, true);
+    assert.equal(logout.revoked, true);
+
+    const tokenState = (await db.query(`
+      select
+        count(*) filter(where purpose='site' and consumed_at is null and revoked_at is null)::int as active_site,
+        count(*) filter(where purpose='user' and consumed_at is null and revoked_at is null)::int as active_user
+      from public.monthly_v7_resume_tokens
+      where trusted_device_id=$1
+    `, [siteMarker.trusted_device_id])).rows[0];
+    assert.deepEqual(tokenState, { active_site: 1, active_user: 0 });
+
+    const siteOnly = rpcResult(await db.query(
+      'select public.monthly_v7_get_snapshot($1,$2,$3::uuid) as result',
+      ['workspace-test', source.site.site_session_id, null]
+    ));
+    assert.equal(siteOnly.ok, true);
+
+    const restoredSite = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', siteMarker.resume_token, 'tab-user-logout-restored']
+    ));
+    assert.equal(restoredSite.ok, true);
+    const restoredUser = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', restoredSite.site_session_id, userMarker.resume_token, 'tab-user-logout-restored']
+    ));
+    assert.deepEqual(restoredUser, { ok: false, error: 'USER_RESUME_INVALID' });
+  } finally {
+    await db.close();
+  }
+});
+
+test('full site logout 同交易撤銷整個 trusted device、所有 markers 與衍生 sessions', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    const source = await openAndLogin(db, uid, 'owner', 'owner-pass', 'tab-site-logout-source');
+    const siteMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', source.site.site_session_id, source.clientSessionId]
+    ));
+    const userMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', source.site.site_session_id, source.login.user_session_id, source.clientSessionId]
+    ));
+    const sibling = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', siteMarker.resume_token, 'tab-site-logout-sibling']
+    ));
+    const activeSiteToken = sibling.resume_token;
+
+    const logout = rpcResult(await db.query(
+      'select public.monthly_v7_logout($1,$2,$3) as result',
+      ['workspace-test', source.site.site_session_id, source.login.user_session_id]
+    ));
+    assert.equal(logout.ok, true);
+    assert.equal(logout.revoked, true);
+
+    const device = (await db.query(`
+      select revoked_at,revoked_reason from public.monthly_v7_trusted_devices where id=$1
+    `, [siteMarker.trusted_device_id])).rows[0];
+    assert.notEqual(device.revoked_at, null);
+    assert.equal(device.revoked_reason, 'site_logout');
+    const tokenCounts = (await db.query(`
+      select count(*) filter(where consumed_at is null and revoked_at is null)::int as active,
+        count(*) filter(where revoked_at is not null)::int as revoked
+      from public.monthly_v7_resume_tokens where trusted_device_id=$1
+    `, [siteMarker.trusted_device_id])).rows[0];
+    assert.equal(tokenCounts.active, 0);
+    assert.equal(tokenCounts.revoked >= 1, true);
+    const sessions = (await db.query(`
+      select count(*)::int as count from public.monthly_v7_site_sessions where trusted_device_id=$1
+    `, [siteMarker.trusted_device_id])).rows[0].count;
+    assert.equal(sessions, 0);
+
+    const siteReplay = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', activeSiteToken, 'tab-site-logout-replay']
+    ));
+    assert.deepEqual(siteReplay, { ok: false, error: 'SITE_RESUME_INVALID' });
+    const userReplay = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', sibling.site_session_id, userMarker.resume_token, 'tab-site-logout-sibling']
+    ));
+    assert.deepEqual(userReplay, { ok: false, error: 'USER_RESUME_INVALID' });
+  } finally {
+    await db.close();
+  }
+});
+
+test('site resume 對 auth、expiry、policy、authority epoch/state 變化一律 fail closed', async () => {
+  const cases = [
+    {
+      name: 'auth_uid mismatch',
+      mutate: async (db) => setAuthUid(db, '22222222-2222-4222-8222-222222222222')
+    },
+    {
+      name: 'token expired',
+      mutate: async (db, marker) => db.query(
+        `update public.monthly_v7_resume_tokens
+         set issued_at=now()-interval '2 hours',expires_at=now()-interval '1 hour'
+         where token_hash=$1`,
+        [sha256(marker.resume_token)]
+      )
+    },
+    {
+      name: 'device expired',
+      mutate: async (db, marker) => db.query(
+        `update public.monthly_v7_trusted_devices
+         set created_at=now()-interval '2 hours',expires_at=now()-interval '1 hour'
+         where id=$1`,
+        [marker.trusted_device_id]
+      )
+    },
+    {
+      name: 'site policy generation changed',
+      mutate: async (db) => db.exec(`update public.monthly_v7_site_access set generation=generation+1`)
+    },
+    {
+      name: 'authority epoch changed',
+      mutate: async (db) => db.exec(`update public.monthly_v7_workspaces set authority_epoch=authority_epoch+1`)
+    },
+    {
+      name: 'authority state not active',
+      mutate: async (db) => db.exec(`update public.monthly_v7_workspaces set authority_state='LEGACY_ACTIVE'`)
+    }
+  ];
+
+  for (const scenario of cases) {
+    const db = await createLegacyDatabase();
+    try {
+      await applyV7(db);
+      await applyTrustedDeviceResume(db);
+      await activateNormalizedAuthority(db);
+      const uid = '11111111-1111-4111-8111-111111111111';
+      const source = await openAndLogin(db, uid, 'owner', 'owner-pass', `tab-${scenario.name}`);
+      const marker = rpcResult(await db.query(
+        'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+        ['workspace-test', source.site.site_session_id, source.clientSessionId]
+      ));
+      const before = (await db.query('select count(*)::int as count from public.monthly_v7_site_sessions')).rows[0].count;
+      await scenario.mutate(db, marker);
+      if (scenario.name === 'authority epoch changed') {
+        const devicesBefore = (await db.query(
+          'select count(*)::int as count from public.monthly_v7_trusted_devices'
+        )).rows[0].count;
+        await assert.rejects(
+          db.query(
+            'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+            ['workspace-test', source.site.site_session_id, source.clientSessionId]
+          ),
+          /SITE_SESSION_INVALID/
+        );
+        const devicesAfter = (await db.query(
+          'select count(*)::int as count from public.monthly_v7_trusted_devices'
+        )).rows[0].count;
+        assert.equal(devicesAfter, devicesBefore, 'epoch change must not mint a replacement device');
+      }
+      if (scenario.name === 'authority state not active') {
+        const siteIssue = rpcResult(await db.query(
+          'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+          ['workspace-test', source.site.site_session_id, source.clientSessionId]
+        ));
+        const userIssue = rpcResult(await db.query(
+          'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+          ['workspace-test', source.site.site_session_id, source.login.user_session_id, source.clientSessionId]
+        ));
+        assert.deepEqual(siteIssue, { ok: false, error: 'AUTHORITY_NOT_ACTIVE' });
+        assert.deepEqual(userIssue, { ok: false, error: 'AUTHORITY_NOT_ACTIVE' });
+      }
+      const result = rpcResult(await db.query(
+        'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+        ['workspace-test', marker.resume_token, `restored-${scenario.name}`]
+      ));
+      assert.deepEqual(result, { ok: false, error: 'SITE_RESUME_INVALID' }, scenario.name);
+      const after = (await db.query('select count(*)::int as count from public.monthly_v7_site_sessions')).rows[0].count;
+      assert.equal(after, before, `${scenario.name} must not create a session`);
+    } finally {
+      await db.close();
+    }
+  }
+});
+
+
+test('user resume 對 password/version、role、active 與 token expiry 變化失效，但 site resume 保留', async () => {
+  const cases = [
+    {
+      name: 'password and version changed',
+      mutate: async (db, owner, target) => rpcResult(await db.query(
+        'select public.monthly_v7_update_user($1,$2,$3,$4,$5,$6,$7,$8,$9) as result',
+        ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(),
+          target.id, target.username, target.displayName, target.role, 'operator-new-pass']
+      ))
+    },
+    {
+      name: 'role changed',
+      mutate: async (db, owner, target) => rpcResult(await db.query(
+        'select public.monthly_v7_update_user($1,$2,$3,$4,$5,$6,$7,$8,$9) as result',
+        ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(),
+          target.id, target.username, target.displayName, 'admin', null]
+      ))
+    },
+    {
+      name: 'user inactive',
+      mutate: async (db, owner, target) => rpcResult(await db.query(
+        'select public.monthly_v7_delete_user($1,$2,$3,$4,$5) as result',
+        ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(), target.id]
+      ))
+    },
+    {
+      name: 'user token expired',
+      mutate: async (db, _owner, _target, marker) => {
+        await db.query(
+          `update public.monthly_v7_resume_tokens
+           set issued_at=now()-interval '2 hours',expires_at=now()-interval '1 hour'
+           where token_hash=$1`,
+          [sha256(marker.resume_token)]
+        );
+        return { ok: true };
+      }
+    }
+  ];
+
+  for (const scenario of cases) {
+    const db = await createLegacyDatabase();
+    try {
+      await applyV7(db);
+      await applyTrustedDeviceResume(db);
+      await activateNormalizedAuthority(db);
+      const operatorUid = '33333333-3333-4333-8333-333333333333';
+      const operator = await openAndLogin(db, operatorUid, 'operator', 'operator-pass', `operator-${scenario.name}`);
+      const siteMarker = rpcResult(await db.query(
+        'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+        ['workspace-test', operator.site.site_session_id, operator.clientSessionId]
+      ));
+      const userMarker = rpcResult(await db.query(
+        'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+        ['workspace-test', operator.site.site_session_id, operator.login.user_session_id, operator.clientSessionId]
+      ));
+
+      const owner = await openAndLogin(
+        db,
+        '11111111-1111-4111-8111-111111111111',
+        'owner',
+        'owner-pass',
+        `owner-${scenario.name}`
+      );
+      const changed = await scenario.mutate(db, owner, operator.login.user, userMarker);
+      assert.equal(changed.ok, true, `${scenario.name} mutation`);
+
+      await setAuthUid(db, operatorUid);
+      const restoredSite = rpcResult(await db.query(
+        'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+        ['workspace-test', siteMarker.resume_token, `restored-${scenario.name}`]
+      ));
+      assert.equal(restoredSite.ok, true, `${scenario.name} must preserve site resume`);
+      const before = (await db.query('select count(*)::int as count from public.monthly_v7_user_sessions')).rows[0].count;
+      const restoredUser = rpcResult(await db.query(
+        'select public.monthly_v7_exchange_user_resume($1,$2,$3,$4) as result',
+        ['workspace-test', restoredSite.site_session_id, userMarker.resume_token, `restored-${scenario.name}`]
+      ));
+      assert.deepEqual(restoredUser, { ok: false, error: 'USER_RESUME_INVALID' }, scenario.name);
+      const after = (await db.query('select count(*)::int as count from public.monthly_v7_user_sessions')).rows[0].count;
+      assert.equal(after, before, `${scenario.name} must not create a user session`);
+    } finally {
+      await db.close();
+    }
+  }
+});
+
+
+test('site password rotation 實體撤銷 trusted devices 與所有 resume markers', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const owner = await openAndLogin(
+      db,
+      '11111111-1111-4111-8111-111111111111',
+      'owner',
+      'owner-pass',
+      'tab-site-password-rotation'
+    );
+    const siteMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', owner.site.site_session_id, owner.clientSessionId]
+    ));
+    const userMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', owner.site.site_session_id, owner.login.user_session_id, owner.clientSessionId]
+    ));
+
+    const changed = rpcResult(await db.query(
+      'select public.monthly_v7_update_site_password($1,$2,$3,$4,$5) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(), 'rotated-site-password']
+    ));
+    assert.equal(changed.ok, true);
+    assert.equal(changed.requiresReauth, true);
+
+    const device = (await db.query(`
+      select revoked_at,revoked_reason
+      from public.monthly_v7_trusted_devices
+      where id=$1
+    `, [siteMarker.trusted_device_id])).rows[0];
+    assert.notEqual(device.revoked_at, null);
+    assert.equal(device.revoked_reason, 'site_policy_changed');
+
+    const tokens = (await db.query(`
+      select purpose,revoked_at
+      from public.monthly_v7_resume_tokens
+      where trusted_device_id=$1
+      order by purpose
+    `, [siteMarker.trusted_device_id])).rows;
+    assert.equal(tokens.length, 2);
+    assert.equal(tokens.every((token) => token.revoked_at !== null), true);
+
+    const siteReplay = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', siteMarker.resume_token, 'tab-site-password-replay']
+    ));
+    assert.deepEqual(siteReplay, { ok: false, error: 'SITE_RESUME_INVALID' });
+    const userReplay = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', owner.site.site_session_id, userMarker.resume_token, owner.clientSessionId]
+    ));
+    assert.deepEqual(userReplay, { ok: false, error: 'USER_RESUME_INVALID' });
+  } finally {
+    await db.close();
+  }
+});
+
+test('trusted-device RPC ACL 逐一禁止 anon 且只允许 authenticated 執行', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    const signatures = [
+      'public.monthly_v7_issue_site_resume(text,uuid,text)',
+      'public.monthly_v7_exchange_site_resume(text,text,text)',
+      'public.monthly_v7_forget_trusted_device(text,uuid,text)',
+      'public.monthly_v7_issue_user_resume(text,uuid,uuid,text)',
+      'public.monthly_v7_exchange_user_resume(text,uuid,text,text)',
+      'public.monthly_v7_logout_user(text,uuid,uuid)',
+      'public.monthly_v7_logout(text,uuid,uuid)',
+      'public.monthly_v7_update_site_password(text,uuid,text,uuid,text)'
+    ];
+    for (const signature of signatures) {
+      const acl = (await db.query(`
+        select
+          has_function_privilege('anon',$1,'EXECUTE') as anon_allowed,
+          has_function_privilege('authenticated',$1,'EXECUTE') as authenticated_allowed
+      `, [signature])).rows[0];
+      assert.deepEqual(acl, { anon_allowed: false, authenticated_allowed: true }, signature);
+    }
+    for (const signature of [
+      'public.monthly_v7_bind_site_session_authority_epoch()',
+      'public.monthly_v7_lock_resume_mutex(uuid)'
+    ]) {
+      const acl = (await db.query(`
+        select
+          has_function_privilege('anon',$1,'EXECUTE') as anon_allowed,
+          has_function_privilege('authenticated',$1,'EXECUTE') as authenticated_allowed
+      `, [signature])).rows[0];
+      assert.deepEqual(acl, { anon_allowed: false, authenticated_allowed: false }, signature);
+    }
+    for (const table of [
+      'monthly_v7_trusted_devices',
+      'monthly_v7_resume_tokens',
+      'monthly_v7_resume_mutexes'
+    ]) {
+      const acl = (await db.query(`
+        select
+          has_table_privilege('anon','public.'||$1,'SELECT') as anon_allowed,
+          has_table_privilege('authenticated','public.'||$1,'SELECT') as authenticated_allowed
+      `, [table])).rows[0];
+      assert.deepEqual(acl, { anon_allowed: false, authenticated_allowed: false }, table);
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+
+test('同一 trusted device 切換帳號時只保留一個 active user marker', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    const owner = await openAndLogin(db, uid, 'owner', 'owner-pass', 'tab-user-switch');
+    const siteMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', owner.site.site_session_id, owner.clientSessionId]
+    ));
+    const ownerMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', owner.site.site_session_id, owner.login.user_session_id, owner.clientSessionId]
+    ));
+
+    const operatorLogin = rpcResult(await db.query(
+      'select public.monthly_v7_login_user($1,$2,$3,$4,$5) as result',
+      ['workspace-test', owner.site.site_session_id, 'operator', 'operator-pass', owner.clientSessionId]
+    ));
+    const operatorMarker = rpcResult(await db.query(
+      'select public.monthly_v7_issue_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', owner.site.site_session_id, operatorLogin.user_session_id, owner.clientSessionId]
+    ));
+    assert.equal(operatorMarker.ok, true);
+
+    const active = (await db.query(`
+      select user_id
+      from public.monthly_v7_resume_tokens
+      where trusted_device_id=$1 and purpose='user'
+        and consumed_at is null and revoked_at is null
+    `, [siteMarker.trusted_device_id])).rows;
+    assert.equal(active.length, 1);
+    assert.equal(active[0].user_id, operatorLogin.user.id);
+
+    const restoredSite = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', siteMarker.resume_token, 'tab-user-switch-restored']
+    ));
+    const ownerReplay = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', restoredSite.site_session_id, ownerMarker.resume_token, 'tab-user-switch-restored']
+    ));
+    assert.deepEqual(ownerReplay, { ok: false, error: 'USER_RESUME_INVALID' });
+    const operatorRestored = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_user_resume($1,$2,$3,$4) as result',
+      ['workspace-test', restoredSite.site_session_id, operatorMarker.resume_token, 'tab-user-switch-restored']
+    ));
+    assert.equal(operatorRestored.ok, true);
+    assert.equal(operatorRestored.user.id, operatorLogin.user.id);
+  } finally {
+    await db.close();
+  }
+});
+
+
+test('未关联 device 的旧 site session 在 authority epoch 变化后不得首次铸造 marker', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    await setAuthUid(db, uid);
+    const site = rpcResult(await db.query(
+      'select public.monthly_v7_open_site($1,$2,$3) as result',
+      ['workspace-test', 'site-pass', 'tab-pre-epoch']
+    ));
+    const before = (await db.query('select count(*)::int as count from public.monthly_v7_trusted_devices')).rows[0].count;
+    await db.exec(`update public.monthly_v7_workspaces set authority_epoch=authority_epoch+1`);
+    await assert.rejects(
+      db.query(
+        'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+        ['workspace-test', site.site_session_id, 'tab-pre-epoch']
+      ),
+      /SITE_SESSION_INVALID/
+    );
+    const after = (await db.query('select count(*)::int as count from public.monthly_v7_trusted_devices')).rows[0].count;
+    assert.equal(after, before);
+  } finally {
+    await db.close();
+  }
+});
+
+
+test('trusted device 12 小時為絕對上限，重發與交換都不得滑動延長', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyV7(db);
+    await applyTrustedDeviceResume(db);
+    await activateNormalizedAuthority(db);
+    const uid = '11111111-1111-4111-8111-111111111111';
+    await setAuthUid(db, uid);
+    const site = rpcResult(await db.query(
+      'select public.monthly_v7_open_site($1,$2,$3) as result',
+      ['workspace-test', 'site-pass', 'tab-absolute-expiry']
+    ));
+    const first = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', site.site_session_id, 'tab-absolute-expiry']
+    ));
+    const initial = (await db.query(`
+      select created_at,expires_at,
+        extract(epoch from (expires_at-created_at))::int as lifetime_seconds
+      from public.monthly_v7_trusted_devices where id=$1
+    `, [first.trusted_device_id])).rows[0];
+    assert.ok(initial.lifetime_seconds > 0);
+    assert.ok(initial.lifetime_seconds <= 12 * 60 * 60);
+
+    const shortened = (await db.query(`
+      update public.monthly_v7_trusted_devices
+      set expires_at=now()+interval '1 hour'
+      where id=$1
+      returning expires_at
+    `, [first.trusted_device_id])).rows[0].expires_at;
+
+    const second = rpcResult(await db.query(
+      'select public.monthly_v7_issue_site_resume($1,$2,$3) as result',
+      ['workspace-test', site.site_session_id, 'tab-absolute-expiry']
+    ));
+    assert.equal(new Date(second.expires_at).getTime(), new Date(shortened).getTime());
+    const afterIssue = (await db.query(
+      'select expires_at from public.monthly_v7_trusted_devices where id=$1',
+      [first.trusted_device_id]
+    )).rows[0].expires_at;
+    assert.equal(new Date(afterIssue).getTime(), new Date(shortened).getTime());
+
+    const restored = rpcResult(await db.query(
+      'select public.monthly_v7_exchange_site_resume($1,$2,$3) as result',
+      ['workspace-test', second.resume_token, 'tab-absolute-expiry-restored']
+    ));
+    assert.equal(restored.ok, true);
+    assert.ok(new Date(restored.expires_at).getTime() <= new Date(shortened).getTime());
+    const afterExchange = (await db.query(`
+      select d.expires_at as device_expires_at,
+        s.expires_at as session_expires_at,
+        t.expires_at as token_expires_at
+      from public.monthly_v7_trusted_devices d
+      join public.monthly_v7_site_sessions s on s.trusted_device_id=d.id and s.id=$2
+      join public.monthly_v7_resume_tokens t on t.trusted_device_id=d.id
+        and t.purpose='site' and t.consumed_at is null and t.revoked_at is null
+      where d.id=$1
+    `, [first.trusted_device_id, restored.site_session_id])).rows[0];
+    assert.equal(new Date(afterExchange.device_expires_at).getTime(), new Date(shortened).getTime());
+    assert.ok(new Date(afterExchange.session_expires_at) <= new Date(shortened));
+    assert.ok(new Date(afterExchange.token_expires_at) <= new Date(shortened));
+  } finally {
+    await db.close();
+  }
+});
+
+
+test('trusted-device SQL 统一 lock order，避免 issue/exchange/logout/password rotation 死锁环', async () => {
+  const sql = (await readFile(
+    join(ROOT, 'docs', 'supabase-schema-v7-trusted-device-resume.sql'),
+    'utf8'
+  )).replace(/\r\n/g, '\n');
+  function body(name) {
+    const start = sql.indexOf(`create or replace function public.${name}(`);
+    assert.notEqual(start, -1, name);
+    const end = sql.indexOf('\n$$;', start);
+    assert.notEqual(end, -1, name);
+    return sql.slice(start, end);
+  }
+  const mutexBody = body('monthly_v7_lock_resume_mutex');
+  assert.match(mutexBody, /insert into public\.monthly_v7_resume_mutexes/);
+  assert.match(mutexBody, /from public\.monthly_v7_resume_mutexes[\s\S]+for update;/);
+
+  for (const name of [
+    'monthly_v7_issue_site_resume',
+    'monthly_v7_exchange_site_resume',
+    'monthly_v7_forget_trusted_device',
+    'monthly_v7_issue_user_resume',
+    'monthly_v7_exchange_user_resume',
+    'monthly_v7_logout_user',
+    'monthly_v7_logout',
+    'monthly_v7_update_site_password'
+  ]) {
+    const source = body(name);
+    assert.doesNotMatch(source, /where legacy_workspace_key=p_workspace_key\s+for update;/);
+    const mutexLock = source.indexOf('perform public.monthly_v7_lock_resume_mutex(workspace_row.id);');
+    assert.notEqual(mutexLock, -1, `${name}: resume mutex`);
+    const workspaceRefresh = source.indexOf('where id=workspace_row.id\n  for update;', mutexLock + 1);
+    assert.notEqual(workspaceRefresh, -1, `${name}: refresh and lock workspace after mutex`);
+    assert.ok(mutexLock < workspaceRefresh, `${name}: mutex before workspace refresh`);
+    const nextLock = source.indexOf('for update;', workspaceRefresh + 1);
+    assert.ok(nextLock === -1 || workspaceRefresh < nextLock, `${name}: workspace refresh must precede other locks`);
   }
 });
