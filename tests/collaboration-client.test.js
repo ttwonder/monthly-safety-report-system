@@ -1266,7 +1266,7 @@ test('metadata 舊保存成功不得刪除同 session 後繼 lease', async () =>
 });
 
 test('report metadata 對 revision、lease 與 authority failure 發出對應保存阻斷 callback', async () => {
-  for (const code of ['REVISION_CONFLICT', 'LEASE_LOST', 'AUTHORITY_CHANGED']) {
+  for (const code of ['REVISION_CONFLICT', 'LEASE_LOST', 'AUTHORITY_CHANGED', 'AUTHORITY_NOT_ACTIVE']) {
     const conflicts = [];
     const drafts = memoryStorage();
     const client = new MonthlyV7Client({
@@ -3999,10 +3999,36 @@ test('既有 pending 以同 operation 對帳成功時 receipt 標示 pending-rep
 });
 
 test('operation receipt 將 conflict、lease、authority 與 session invalid 分類成明確狀態', async () => {
+  const authorityEvents = [];
+  const directAuthorityClient = new MonthlyV7Client({
+    transport: { async rpc() { return { ok: false, error: 'AUTHORITY_NOT_ACTIVE', authorityState: 'LEGACY_ACTIVE' }; } },
+    sessionStorage: memoryStorage(), draftStorage: memoryStorage(),
+    idFactory: () => 'tab-authority',
+    operationIdFactory: () => '00000000-0000-4000-8000-000000000928',
+    host: { onAuthorityFailure(info) { authorityEvents.push(info); } }
+  });
+  directAuthorityClient.status = { mode: 'v7' };
+  directAuthorityClient.config = { workspaceKey: 'workspace-test' };
+  directAuthorityClient.siteSession = { id: 'site-current' };
+  directAuthorityClient.userSession = { id: 'session-current' };
+  directAuthorityClient.user = { id: 'u-current' };
+  await directAuthorityClient.executeOperation(
+    'monthly_v7_delete_user',
+    { p_workspace_key: 'workspace-test', p_user_session_id: 'session-current' },
+    'delete_user:authority',
+    { saveOrigin: 'manual' }
+  );
+  assert.deepEqual(authorityEvents, [{
+    code: 'AUTHORITY_NOT_ACTIVE',
+    rpcName: 'monthly_v7_delete_user',
+    authorityState: 'LEGACY_ACTIVE'
+  }]);
+
   const responseCases = [
     ['REVISION_CONFLICT', 'REVISION_CONFLICT_BLOCKED'],
     ['LEASE_LOST', 'LEASE_LOST_BLOCKED'],
-    ['AUTHORITY_CHANGED', 'AUTHORITY_CHANGED_BLOCKED']
+    ['AUTHORITY_CHANGED', 'AUTHORITY_CHANGED_BLOCKED'],
+    ['AUTHORITY_NOT_ACTIVE', 'AUTHORITY_CHANGED_BLOCKED']
   ];
   for (const [code, state] of responseCases) {
     const client = new MonthlyV7Client({
@@ -4065,10 +4091,58 @@ test('operation receipt 將 conflict、lease、authority 與 session invalid 分
   assert.ok(drafts.getItem('monthly_v7_pending:save_module:session-invalid'));
 });
 
+test('SQLSTATE 55000 的 AUTHORITY_CHANGED exception 一次即全頁阻斷且不得重試', async () => {
+  let calls = 0;
+  const events = [];
+  const drafts = memoryStorage();
+  const client = new MonthlyV7Client({
+    transport: {
+      async rpc() {
+        calls += 1;
+        const error = new Error('AUTHORITY_CHANGED');
+        error.code = '55000';
+        error.details = 'AUTHORITY_CHANGED';
+        throw error;
+      }
+    },
+    sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-authority-exception',
+    operationIdFactory: () => '00000000-0000-4000-8000-000000000929',
+    host: { onAuthorityFailure(info) { events.push(info); } }
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-current' };
+  client.userSession = { id: 'session-current' };
+  client.user = { id: 'u-current' };
+
+  await assert.rejects(
+    client.executeOperation(
+      'monthly_v7_save_module',
+      { p_workspace_key: 'workspace-test', p_user_session_id: 'session-current' },
+      'save_module:authority-exception',
+      { saveOrigin: 'autosave' }
+    ),
+    (error) => error.code === '55000' && error.message === 'AUTHORITY_CHANGED'
+  );
+
+  assert.equal(calls, 1);
+  assert.equal(client.lastOperationReceipt().state, 'AUTHORITY_CHANGED_BLOCKED');
+  assert.equal(client.lastOperationReceipt().errorCode, 'AUTHORITY_CHANGED');
+  assert.deepEqual(events, [{
+    code: 'AUTHORITY_CHANGED',
+    rpcName: 'monthly_v7_save_module',
+    authorityState: ''
+  }]);
+  assert.ok(drafts.getItem('monthly_v7_pending:save_module:authority-exception'));
+  assert.doesNotMatch(JSON.stringify(events), /workspace-test|site-current|session-current/);
+});
+
 test('active save 的 lease 或 authority failure 進 blocked 後背景保存不再 dispatch', async () => {
   for (const [code, expectedState] of [
     ['LEASE_LOST', 'LEASE_LOST_BLOCKED'],
-    ['AUTHORITY_CHANGED', 'AUTHORITY_CHANGED_BLOCKED']
+    ['AUTHORITY_CHANGED', 'AUTHORITY_CHANGED_BLOCKED'],
+    ['AUTHORITY_NOT_ACTIVE', 'AUTHORITY_CHANGED_BLOCKED']
   ]) {
     const statuses = [];
     let saveCalls = 0;
@@ -4112,6 +4186,57 @@ test('active save 的 lease 或 authority failure 進 blocked 後背景保存不
     assert.equal(statuses.at(-1).kind, 'error');
     assert.match(statuses.at(-1).text, code === 'LEASE_LOST' ? /編輯權.*失效/ : /authority.*變更/i);
   }
+});
+
+test('queue 內 AUTHORITY_NOT_ACTIVE 即使沒有 conflict callback 也建立全頁 blocker並阻止後續 dispatch', async () => {
+  const statuses = [];
+  let saveCalls = 0;
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  app.status = { mode: 'v7' };
+  app.setHost({ setStatus(text, kind) { statuses.push({ text, kind }); } });
+  app.client = {
+    snapshot: {
+      report: { id: 'report-1', revision: 1 },
+      modules: [{ id: 'm1', revision: 1, payload: { title: '雲端原始內容' } }],
+      records: []
+    },
+    isActive: () => true,
+    isWriteReady: () => true,
+    sessionErrorCode: () => '',
+    currentUser: () => ({ id: 'u-current' }),
+    currentReport: () => ({ id: 'report-1', revision: 1 }),
+    modulePayload(item) { return { title: item.title }; },
+    pendingOperationTargets: () => new Set(),
+    hasPendingOperation: () => false,
+    readDraft: () => ({
+      entityType: 'module', entityId: 'm1', baseRevision: 1,
+      payload: { title: '待保存本機內容' }
+    }),
+    clearDraft: () => {},
+    getLease: () => null,
+    async saveModule() { saveCalls += 1; return { ok: true }; }
+  };
+  const authorityError = Object.assign(new Error('AUTHORITY_NOT_ACTIVE'), {
+    code: 'AUTHORITY_NOT_ACTIVE',
+    result: { ok: false, error: 'AUTHORITY_NOT_ACTIVE' }
+  });
+
+  await assert.rejects(
+    app.enqueue(async () => { throw authorityError; }, 'claim-module-lease', { saveOrigin: 'autosave' }),
+    (error) => error.code === 'AUTHORITY_NOT_ACTIVE'
+  );
+  const result = await app.persistReportData(
+    [{ _v7Id: 'm1', _v7Revision: 1, title: '待保存本機內容' }],
+    { saveOrigin: 'autosave' }
+  );
+
+  assert.equal(saveCalls, 0);
+  assert.equal(result.localOnly, true);
+  assert.equal(result.state, 'AUTHORITY_CHANGED_BLOCKED');
+  assert.equal(result.code, 'AUTHORITY_NOT_ACTIVE');
+  assert.equal(app.isWriteFailureBlocked('module', 'm1'), true);
+  assert.equal(statuses.at(-1).kind, 'error');
+  assert.match(statuses.at(-1).text, /authority.*變更/i);
 });
 
 test('heartbeat lease lost 進唯讀 blocker，使用者重新取得 lease 後才解除', async () => {

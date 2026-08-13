@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.17';
+  const buildId = '7.0.18';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -217,6 +217,19 @@
           if (revisionBlocked) this.publishRevisionConflictStatus();
           else if (writeBlocked && !this.isRevisionConflictBlocked()) this.publishWriteFailureStatus(info);
         },
+        onAuthorityFailure: (info) => {
+          const blockInfo = {
+            result: {
+              ok: false,
+              error: String(info && info.code || ''),
+              authorityState: String(info && info.authorityState || ''),
+              rpcName: String(info && info.rpcName || '')
+            }
+          };
+          if (this.markWriteFailureBlock(blockInfo) && !this.isRevisionConflictBlocked()) {
+            this.publishWriteFailureStatus();
+          }
+        },
         onRemoteChangeWhileEditing: (entity, event) => {
           if (typeof this.host.onRemoteChangeWhileEditing === 'function') this.host.onRemoteChangeWhileEditing(entity, event);
           if (this.isRevisionConflictBlocked()) this.publishRevisionConflictStatus();
@@ -419,6 +432,20 @@
       });
       this.persistChain = run;
       return run.catch((error) => {
+        const authorityCode = this.authorityFailureCode(error);
+        if (authorityCode) {
+          this.markWriteFailureBlock({
+            result: {
+              ok: false,
+              error: authorityCode,
+              rpcName: String(error && error.rpcName || operationName || ''),
+              authorityState: String(error && error.result
+                && (error.result.authorityState || error.result.authority_state) || '')
+            }
+          });
+          if (!this.isRevisionConflictBlocked()) this.publishWriteFailureStatus();
+          try { error.silent = true; } catch (_error) { /* global blocker already published */ }
+        }
         if (this.markPendingRecoveryBlock(error, {
           operationName,
           saveOrigin: options.saveOrigin
@@ -483,7 +510,8 @@
     markWriteFailureBlock(info = {}) {
       const result = info.result || {};
       const code = String(result.error || '');
-      if (!['LEASE_LOST', 'AUTHORITY_CHANGED'].includes(code)) return false;
+      const authorityCode = this.authorityFailureCode(code);
+      if (code !== 'LEASE_LOST' && !authorityCode) return false;
       const block = {
         state: code === 'LEASE_LOST' ? 'LEASE_LOST_BLOCKED' : 'AUTHORITY_CHANGED_BLOCKED',
         code,
@@ -493,11 +521,29 @@
         result: clone(result),
         detectedAt: new Date().toISOString()
       };
-      if (code === 'AUTHORITY_CHANGED') this.authorityWriteBlock = block;
+      if (authorityCode) this.authorityWriteBlock = block;
       else if (block.entityType && block.entityId) {
         this.writeFailureBlocks.set(this.revisionConflictKey(block.entityType, block.entityId), block);
       }
       return true;
+    }
+
+    authorityFailureCode(code) {
+      const candidates = [];
+      const sources = [code, code && code.result, code && code.cause];
+      for (const source of sources) {
+        if (typeof source === 'string') candidates.push(source);
+        else if (source && typeof source === 'object') {
+          candidates.push(source.code, source.error, source.message, source.details, source.hint);
+        }
+      }
+      for (const candidate of candidates) {
+        const text = String(candidate || '');
+        const sentinel = ['AUTHORITY_CHANGED', 'AUTHORITY_NOT_ACTIVE']
+          .find((value) => text.includes(value));
+        if (sentinel) return sentinel;
+      }
+      return '';
     }
 
     isWriteFailureBlocked(entityType, entityId) {
@@ -517,7 +563,7 @@
     }
 
     writeFailureStatusText(block = this.authorityWriteBlock) {
-      if (block && block.code === 'AUTHORITY_CHANGED') {
+      if (block && this.authorityFailureCode(block.code)) {
         return '雲端 authority 已變更；已停止保存且不會降級舊版，本機草稿仍完整保留。請重新載入以完成安全驗證。';
       }
       return '編輯權已失效；本機草稿已保留為唯讀，已停止此項目的背景保存。請重新取得編輯權後再人工保存。';
@@ -1457,6 +1503,20 @@
       if (typeof this.host.onTransportError === 'function') this.host.onTransportError(error);
       else if (root.console) root.console.error(error);
       if (this.client && this.client.sessionErrorCode(error)) return;
+      const authorityCode = this.authorityFailureCode(error);
+      if (authorityCode) {
+        this.markWriteFailureBlock({
+          result: {
+            ok: false,
+            error: authorityCode,
+            rpcName: String(error && error.rpcName || ''),
+            authorityState: String(error && error.result
+              && (error.result.authorityState || error.result.authority_state) || '')
+          }
+        });
+        this.publishWriteFailureStatus();
+        return;
+      }
       if (this.markPendingRecoveryBlock(error)) {
         this.publishPendingRecoveryStatus();
         return;

@@ -54,9 +54,9 @@ test('正式 HTML 對所有 startup-coupled 本機 script 使用同一 build cac
 });
 
 test('page、config、core、client 與 V7 宣告同一 build ID 並提供 mixed-build 安全重載', async () => {
-  const buildId = '7.0.17';
+  const buildId = '7.0.18';
   const html = await readFile(join(root, 'index.html'), 'utf8');
-  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.0\.17'/);
+  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.0\.18'/);
   for (const [file, asset] of [
     ['supabase-config.js', 'config'],
     ['monthly-collaboration-core.js', 'core'],
@@ -70,6 +70,22 @@ test('page、config、core、client 與 V7 宣告同一 build ID 並提供 mixed
   assert.match(html, /MIXED_ASSET_BLOCKED/);
   assert.match(html, /id="site-safe-reload"/);
   assert.match(html, /function v7SafeReloadFromGate\(\)/);
+});
+
+test('登入便利功能只保存用戶名，不把密碼或權限資料寫入 app-managed storage', async () => {
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  assert.match(html, /id="v5-remember-username"[^>]+type="checkbox"/);
+  assert.match(html, /記住上次用戶名/);
+  assert.match(html, /V5_REMEMBERED_USERNAME_KEY = 'monthly_report_remembered_username'/);
+  assert.match(html, /V5_REMEMBER_USERNAME_ENABLED_KEY = 'monthly_report_remember_username_enabled'/);
+  assert.match(html, /autocomplete="username"/);
+  assert.match(html, /id="v5-login-password" type="password" autocomplete="current-password"/);
+  assert.doesNotMatch(html, /id="v5-login-password"[^>]+value=/);
+  const rememberStart = html.indexOf('function v5RememberSuccessfulUsername');
+  const rememberEnd = html.indexOf('function v5GetFormDrafts', rememberStart);
+  assert.ok(rememberStart > 0 && rememberEnd > rememberStart);
+  const rememberBlock = html.slice(rememberStart, rememberEnd);
+  assert.doesNotMatch(rememberBlock, /password|hash|role|session|displayName/i);
 });
 
 test('進站與登入後共用使用者指定的本機 FPMC Logo，工具列控制具無障礙狀態', async () => {

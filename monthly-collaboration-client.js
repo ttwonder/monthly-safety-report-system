@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.17';
+  const buildId = '7.0.18';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
@@ -80,13 +80,48 @@
       if (this.sessionErrorCode(options.error || errorCode)) return 'SESSION_INVALID_LOCAL_ONLY';
       if (errorCode === 'REVISION_CONFLICT') return 'REVISION_CONFLICT_BLOCKED';
       if (errorCode === 'LEASE_LOST') return 'LEASE_LOST_BLOCKED';
-      if (errorCode === 'AUTHORITY_CHANGED') return 'AUTHORITY_CHANGED_BLOCKED';
+      if (this.isAuthorityFailureCode(errorCode)) return 'AUTHORITY_CHANGED_BLOCKED';
       if ([
         'PENDING_OPERATION_UNRESOLVED',
         'PENDING_OPERATION_ACTOR_MISMATCH',
         'PENDING_OPERATION_ACTOR_UNRESOLVED'
       ].includes(errorCode)) return 'PENDING_OPERATION_BLOCKED';
       return 'LOCAL_DIRTY';
+    }
+
+    authorityFailureCode(value) {
+      const candidates = [];
+      const sources = [value, value && value.error, value && value.cause];
+      for (const source of sources) {
+        if (typeof source === 'string') candidates.push(source);
+        else if (source && typeof source === 'object') {
+          candidates.push(source.code, source.error, source.message, source.details, source.hint);
+        }
+      }
+      for (const candidate of candidates) {
+        const text = String(candidate || '');
+        const code = ['AUTHORITY_CHANGED', 'AUTHORITY_NOT_ACTIVE']
+          .find((sentinel) => text.includes(sentinel));
+        if (code) return code;
+      }
+      return '';
+    }
+
+    isAuthorityFailureCode(value) {
+      return !!this.authorityFailureCode(value);
+    }
+
+    publishAuthorityFailure(result, rpcName = '') {
+      const code = this.authorityFailureCode(result);
+      if (!this.isAuthorityFailureCode(code)) return false;
+      if (typeof this.host.onAuthorityFailure === 'function') {
+        this.host.onAuthorityFailure({
+          code,
+          rpcName: String(rpcName || ''),
+          authorityState: String(result && (result.authorityState || result.authority_state) || '')
+        });
+      }
+      return true;
     }
 
     sessionErrorCode(value) {
@@ -181,6 +216,7 @@
           error.silent = true;
           throw error;
         }
+        this.publishAuthorityFailure(result, name);
         return result;
       } catch (error) {
         if (error && (error.staleSessionResponse === true || error.sessionInvalidHandled === true)) throw error;
@@ -188,6 +224,11 @@
           throw this.staleSessionResponseError(name, requestGeneration, this.sessionErrorCode(error));
         }
         this.handleSessionError(error, requestGeneration);
+        const authorityCode = this.authorityFailureCode(error);
+        if (authorityCode) {
+          this.publishAuthorityFailure({ error: authorityCode }, name);
+          try { error.authorityFailureCode = authorityCode; } catch (_error) { /* original transport error remains authoritative */ }
+        }
         throw error;
       }
     }
@@ -1503,7 +1544,8 @@
           return result;
         } catch (error) {
           lastError = error;
-          const code = String(error && (error.code || error.message) || '');
+          const authorityCode = this.authorityFailureCode(error);
+          const code = authorityCode || String(error && (error.code || error.message) || '');
           const message = String(error && error.message || error || '');
           const resultUnknown = code === 'RPC_TIMEOUT'
             || /failed to fetch|networkerror|network request failed/i.test(message);
@@ -1512,7 +1554,7 @@
             errorCode: code,
             updatedAt: new Date().toISOString()
           }));
-          if (this.sessionErrorCode(error) || error?.code === 'STALE_SESSION_RESPONSE') throw error;
+          if (authorityCode || this.sessionErrorCode(error) || error?.code === 'STALE_SESSION_RESPONSE') throw error;
         }
       }
       throw lastError;
@@ -1578,7 +1620,7 @@
         if (releaseCurrent) {
           await this.releaseCapturedLease(operationLease || replayLease || supersededLease, operationContext);
           this.assertSessionContext(operationContext, 'save_module_cleanup');
-        } else if (['LEASE_LOST', 'REVISION_CONFLICT', 'AUTHORITY_CHANGED'].includes(code)) {
+        } else if (code === 'LEASE_LOST' || code === 'REVISION_CONFLICT' || this.isAuthorityFailureCode(code)) {
           this.forgetCapturedLease(operationLease);
         }
         const error = new Error(code);
@@ -1643,7 +1685,8 @@
         try {
           return this.commandResult(result, 'SAVE_REPORT_META_FAILED');
         } catch (error) {
-          if (error && ['REVISION_CONFLICT', 'LEASE_LOST', 'AUTHORITY_CHANGED'].includes(error.code)) {
+          if (error && (['REVISION_CONFLICT', 'LEASE_LOST'].includes(error.code)
+            || this.isAuthorityFailureCode(error.code))) {
             if (['REVISION_CONFLICT', 'LEASE_LOST'].includes(error.code)) {
               this.forgetCapturedLease(operationLease || replayLease || supersededLease);
             }
@@ -1989,7 +2032,8 @@
         }
       } catch (error) {
         await this.releaseCapturedLease(operationLease, operationContext);
-        if (['REVISION_CONFLICT', 'LEASE_LOST', 'AUTHORITY_CHANGED'].includes(error.code)
+        if ((['REVISION_CONFLICT', 'LEASE_LOST'].includes(error.code)
+          || this.isAuthorityFailureCode(error.code))
           && typeof this.host.onConflict === 'function') {
           this.host.onConflict({
             entityType: 'module_batch',
@@ -2125,7 +2169,8 @@
         }, `save_record:${entityId}`), 'SAVE_RECORD_FAILED');
         this.assertSessionContext(operationContext, 'save_record');
       } catch (error) {
-        if (['LEASE_LOST', 'REVISION_CONFLICT', 'AUTHORITY_CHANGED'].includes(error.code)) {
+        if (['LEASE_LOST', 'REVISION_CONFLICT'].includes(error.code)
+          || this.isAuthorityFailureCode(error.code)) {
           this.forgetCapturedLease(operationLease);
         }
         if (this.isSessionContextCurrent(operationContext) && typeof this.host.onConflict === 'function') {

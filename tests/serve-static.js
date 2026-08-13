@@ -488,7 +488,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/supabase-config.js') {
     res.writeHead(200, { 'Content-Type': mime['.js'] });
-    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace'};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.0.17'});`);
+    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace'};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.0.18'});`);
   }
   if (url.pathname === '/vendor/supabase-2.112.2.js') { res.writeHead(200, { 'Content-Type': mime['.js'] }); return res.end(fakeSdk); }
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;

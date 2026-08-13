@@ -279,7 +279,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.17';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.18';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +319,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.17'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.18'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +522,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.0.17', config: '7.0.17', core: '7.0.17', client: '7.0.17', v7: '7.0.17'
+      page: '7.0.18', config: '7.0.18', core: '7.0.18', client: '7.0.18', v7: '7.0.18'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -1084,6 +1084,120 @@ test('雲端 module title 保留安全格式但不得建立或執行持久型 XS
   ))).toBe(false);
   await page.waitForTimeout(150);
   expect(await page.evaluate(() => window.__v7TitleXssExecuted)).toBe(0);
+});
+
+test('成功登入只記住用戶名，登出後預填且永不保存密碼或權限資料', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.getByRole('button', { name: '登出', exact: true }).click();
+
+  const remember = page.locator('#v5-remember-username');
+  await expect(remember).toBeChecked();
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+
+  const stored = await page.evaluate(() => ({
+    username: localStorage.getItem('monthly_report_remembered_username'),
+    preference: localStorage.getItem('monthly_report_remember_username_enabled'),
+    convenienceEntries: Object.keys(localStorage)
+      .filter((key) => key.startsWith('monthly_report_remember'))
+      .map((key) => [key, localStorage.getItem(key)])
+  }));
+  expect(stored.username).toBe('owner');
+  expect(stored.preference).toBe('1');
+  const serialized = JSON.stringify(stored.convenienceEntries);
+  expect(serialized).not.toContain('owner-pass');
+  expect(serialized).not.toContain('Owner A');
+  expect(serialized).not.toContain('owner-id');
+  expect(serialized).not.toMatch(/password|hash|role|session/i);
+
+  await page.getByRole('button', { name: '登出', exact: true }).click();
+  await expect(page.locator('#v5-login-username')).toHaveValue('owner');
+  await expect(page.locator('#v5-login-password')).toHaveValue('');
+
+  await page.reload({ waitUntil: 'load' });
+  await expect(page.locator('#v5-login-username')).toHaveValue('owner');
+  await expect(page.locator('#v5-login-password')).toHaveValue('');
+});
+
+test('失敗登入不改寫已記住用戶名，取消後成功登入也不保存且密碼保持空白', async ({ page }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.getByRole('button', { name: '登出', exact: true }).click();
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+  await page.getByRole('button', { name: '登出', exact: true }).click();
+  expect(await page.evaluate(() => localStorage.getItem('monthly_report_remembered_username'))).toBe('owner');
+
+  await page.locator('#v5-login-username').fill('operator');
+  await page.locator('#v5-login-password').fill('wrong-password');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect.poll(() => dialogs.length).toBeGreaterThan(0);
+  expect(await page.evaluate(() => localStorage.getItem('monthly_report_remembered_username'))).toBe('owner');
+  await expect(page.locator('#v5-login-password')).toHaveValue('');
+
+  await page.locator('#v5-remember-username').uncheck();
+  expect(await page.evaluate(() => ({
+    preference: localStorage.getItem('monthly_report_remember_username_enabled'),
+    username: localStorage.getItem('monthly_report_remembered_username')
+  }))).toEqual({ preference: '0', username: null });
+  await page.locator('#v5-login-username').fill('operator');
+  await page.locator('#v5-login-password').fill('operator-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Operator B');
+  await page.getByRole('button', { name: '登出', exact: true }).click();
+  await expect(page.locator('#v5-login-username')).toHaveValue('');
+  await expect(page.locator('#v5-login-password')).toHaveValue('');
+  expect(await page.evaluate(() => localStorage.getItem('monthly_report_remembered_username'))).toBeNull();
+
+  await page.reload({ waitUntil: 'load' });
+  await expect(page.locator('#v5-login-username')).toHaveValue('');
+  await expect(page.locator('#v5-login-password')).toHaveValue('');
+  const storageText = await page.evaluate(() => JSON.stringify(Object.fromEntries(
+    Object.keys(localStorage).map((key) => [key, localStorage.getItem(key)])
+  )));
+  expect(storageText).not.toContain('wrong-password');
+  expect(storageText).not.toContain('operator-pass');
+});
+
+test('用戶名便利 storage 寫入失敗不得把已成功的雲端登入誤報為失敗', async ({ page }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.getByRole('button', { name: '登出', exact: true }).click();
+  await page.evaluate(() => {
+    localStorage.removeItem('monthly_report_remembered_username');
+    localStorage.removeItem('monthly_report_remember_username_enabled');
+    const originalSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (String(key).startsWith('monthly_report_remember')) {
+        throw new DOMException('remember storage unavailable', 'QuotaExceededError');
+      }
+      return originalSetItem.call(this, key, value);
+    };
+  });
+
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+  expect(await page.evaluate(() => ({
+    currentUser: window.MonthlyV7App.currentUser()?.username || '',
+    writeReady: window.MonthlyV7App.isWriteReady(),
+    remembered: localStorage.getItem('monthly_report_remembered_username')
+  }))).toEqual({ currentUser: 'owner', writeReady: true, remembered: null });
+  expect(dialogs).toEqual([]);
 });
 
 test('登出帳號保留 site session 並立即移除 Owner 身份，不退回進站 gate', async ({ page }) => {
@@ -2865,7 +2979,8 @@ test('active save 失去 lease 後保留唯讀草稿並停止背景重送', asyn
   expect(after.modules[0].payload.title).toBe(before.modules[0].payload.title);
 });
 
-test('authority changed 後全頁停止寫入、不降級 legacy 並保留草稿', async ({ page, request }) => {
+for (const authorityCode of ['AUTHORITY_CHANGED', 'AUTHORITY_NOT_ACTIVE']) {
+test(`${authorityCode} 後全頁停止寫入、不降級 legacy 並保留草稿`, async ({ page, request }) => {
   await page.addInitScript(() => {
     window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 500;
   });
@@ -2879,7 +2994,7 @@ test('authority changed 後全頁停止寫入、不降級 legacy 並保留草稿
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ ok: false, error: 'AUTHORITY_CHANGED' })
+        body: JSON.stringify({ ok: false, error: authorityCode })
       });
       return;
     }
@@ -2898,7 +3013,7 @@ test('authority changed 後全頁停止寫入、不降級 legacy 並保留草稿
     state: 'AUTHORITY_CHANGED_BLOCKED',
     requestedOrigin: 'autosave',
     saveOrigin: 'autosave',
-    errorCode: 'AUTHORITY_CHANGED'
+    errorCode: authorityCode
   });
   const second = await page.evaluate(() => v4UploadToCloud({
     silent: true,
@@ -2920,6 +3035,7 @@ test('authority changed 後全頁停止寫入、不降級 legacy 並保留草稿
   expect(Number(state.rpcCounts.upsert_monthly_report_cloud_data || 0)).toBe(0);
   expect(Number(state.rpcCounts.get_monthly_report_cloud_data || 0)).toBe(0);
 });
+}
 
 test('保存已提交但回覆遺失時，刷新後重播舊 operation 不重複增加 revision', async ({ page, request, browser }) => {
   const dialogs = [];

@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.17';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.18';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -7556,6 +7556,38 @@
         const V5_SESSION_KEY = 'monthly_report_v5_session';
         const V5_REMEMBERED_SESSION_KEY = 'monthly_report_v5_remembered_session';
         const V5_FORM_DRAFTS_KEY = 'monthly_report_v5_form_drafts';
+        const V5_REMEMBER_USERNAME_ENABLED_KEY = 'monthly_report_remember_username_enabled';
+        const V5_REMEMBERED_USERNAME_KEY = 'monthly_report_remembered_username';
+
+        function v5RememberUsernameEnabled() {
+            try { return localStorage.getItem(V5_REMEMBER_USERNAME_ENABLED_KEY) !== '0'; }
+            catch (_error) { return true; }
+        }
+        function v5RememberedUsername() {
+            if (!v5RememberUsernameEnabled()) return '';
+            try { return String(localStorage.getItem(V5_REMEMBERED_USERNAME_KEY) || '').trim(); }
+            catch (_error) { return ''; }
+        }
+        function v5SetRememberUsernameEnabled(enabled) {
+            const remember = enabled === true;
+            try {
+                localStorage.setItem(V5_REMEMBER_USERNAME_ENABLED_KEY, remember ? '1' : '0');
+                if (!remember) localStorage.removeItem(V5_REMEMBERED_USERNAME_KEY);
+            } catch (_error) {
+                // Remembering a username is optional convenience only. Storage denial
+                // must never alter or misreport an already validated sign-in.
+            }
+            return remember;
+        }
+        function v5RememberSuccessfulUsername(username, enabled) {
+            const remember = v5SetRememberUsernameEnabled(enabled === true);
+            const clean = String(username || '').trim();
+            if (remember && clean) {
+                try { localStorage.setItem(V5_REMEMBERED_USERNAME_KEY, clean); }
+                catch (_error) { /* optional convenience remains unavailable */ }
+            }
+            return remember ? clean : '';
+        }
 
         function v5GetFormDrafts() {
             try { return JSON.parse(localStorage.getItem(V5_FORM_DRAFTS_KEY) || '{}'); } catch { return {}; }
@@ -7871,11 +7903,13 @@
         async function v5Login() {
             const username = (document.getElementById('v5-login-username')?.value || '').trim();
             const password = document.getElementById('v5-login-password')?.value || '';
+            const rememberUsername = document.getElementById('v5-remember-username')?.checked === true;
             if (v4RejectUnsafeCloudFallback({ alert: true })) return;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!username || !password) return alert('請填寫用戶名和密碼。');
                 try {
                     const user = await window.MonthlyV7App.login(username, password);
+                    v5RememberSuccessfulUsername(username, rememberUsername);
                     renderV5SessionBar();
                     renderV4CloudPane();
                     renderTable();
@@ -7905,6 +7939,7 @@
             const hash = await v5HashPassword(password);
             const user = users.find(u => u.username === username && u.passwordHash === hash);
             if (!user) return alert('用戶名或密碼不正確。若這是新瀏覽器，請先點「同步最新」。');
+            v5RememberSuccessfulUsername(username, document.getElementById('v5-remember-username')?.checked === true);
             v5SetSession(user);
             showToast(`已登入：${user.displayName || user.username}`);
         }
@@ -7968,6 +8003,9 @@
                 : (users.length ? '未登入' : '尚未建立 owner');
             const sessionControlsDisabled = authorityMode === 'blocked' || (isV7 && !v7UsersKnown);
             const disabledAttr = sessionControlsDisabled ? ' disabled aria-disabled="true"' : '';
+            const rememberUsername = v5RememberUsernameEnabled();
+            const rememberedUsername = rememberUsername ? v5RememberedUsername() : '';
+            const rememberCheckedAttr = rememberUsername ? ' checked' : '';
             const configReady = v4ConfigReady();
             root.innerHTML = user ? `
                 <div class="v5-session-bar">
@@ -7980,8 +8018,12 @@
                 </div>` : `
                 <div class="v5-session-bar">
                     <span class="v5-role-pill"><i class="fas fa-lock"></i>${signedOutLabel}</span>
-                    <input id="v5-login-username" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="用戶名"${disabledAttr}>
-                    <input id="v5-login-password" type="password" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="密碼" onkeydown="if(event.key==='Enter') v5Login()"${disabledAttr}>
+                    <input id="v5-login-username" autocomplete="username" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="用戶名" value="${v1EscapeAttr(rememberedUsername)}"${disabledAttr}>
+                    <input id="v5-login-password" type="password" autocomplete="current-password" class="border border-sky-200 rounded px-2 py-1 text-xs" placeholder="密碼" onkeydown="if(event.key==='Enter') v5Login()"${disabledAttr}>
+                    <label class="inline-flex items-center gap-1 text-[11px] text-slate-600 whitespace-nowrap">
+                        <input id="v5-remember-username" type="checkbox" class="accent-sky-600" onchange="v5SetRememberUsernameEnabled(this.checked)"${rememberCheckedAttr}${disabledAttr}>
+                        記住上次用戶名
+                    </label>
                     <button class="v5-sync-btn" onclick="v5Login()"${disabledAttr}>登入</button>
                     <button class="v5-sync-btn" onclick="v5SyncLatest()"${disabledAttr}><i class="fas fa-rotate mr-1"></i>同步最新</button>
                     ${v4CloudStatusHtml()}
@@ -8330,7 +8372,7 @@
                     showToast('此項目未覆蓋雲端；本機草稿已保留。');
                 } else if (code === 'LEASE_LOST') {
                     v4SetCloudRuntimeStatus('編輯權已失效；內容保留為本機草稿，禁止直接覆蓋。', 'error');
-                } else if (code === 'AUTHORITY_CHANGED') {
+                } else if (code === 'AUTHORITY_CHANGED' || code === 'AUTHORITY_NOT_ACTIVE') {
                     v4SetCloudRuntimeStatus('雲端 authority 已變更；已停止保存，本機草稿仍保留。', 'error');
                 }
             },
