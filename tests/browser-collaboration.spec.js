@@ -247,6 +247,299 @@ test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
 });
 
+for (const mixedAsset of [
+  { name: 'config', url: '**/supabase-config.js*', declaration: "config: 'stale-build'" },
+  { name: 'core', url: '**/monthly-collaboration-core.js*', declaration: "core: 'stale-build'" },
+  { name: 'client', url: '**/monthly-collaboration-client.js*', declaration: "client: 'stale-build'" },
+  { name: 'V7', url: '**/monthly-collaboration-v7.js*', declaration: "v7: 'stale-build'" }
+]) {
+  test(`混合 ${mixedAsset.name} 資源必須在第一個 RPC 前鎖住並顯示 MIXED_ASSET_BLOCKED`, async ({ page, request }) => {
+    await page.route(mixedAsset.url, async (route) => {
+      const response = await route.fetch();
+      const body = await response.text();
+      await route.fulfill({
+        response,
+        body: `${body}\nwindow.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { ${mixedAsset.declaration} });`
+      });
+    });
+
+    await page.goto('/', { waitUntil: 'load' });
+
+    const state = await (await request.get('/__fake_state')).json();
+    expect(state.rpcCounts.monthly_v7_get_status || 0).toBe(0);
+    await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+    await expect(page.locator('#site-access-error')).toContainText('MIXED_ASSET_BLOCKED');
+  });
+}
+
+test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封鎖', async ({ page, request }) => {
+  await page.route('**/', async (route) => {
+    const response = await route.fetch();
+    const body = await response.text();
+    await route.fulfill({
+      response,
+      body: body
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.17';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
+    });
+  });
+
+  await page.goto('/', { waitUntil: 'load' });
+
+  expect(await page.evaluate(() => window.__pageBuildAssertBypassed === true)).toBe(true);
+  expect(await page.evaluate(() => window.MonthlyV7App?.client || null)).toBeNull();
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.rpcCounts.monthly_v7_get_status || 0).toBe(0);
+  await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+  await expect(page.locator('#site-access-error')).toContainText('MIXED_ASSET_BLOCKED');
+});
+
+async function openMixedBuildWithOneFreshReload(page) {
+  let coreRequests = 0;
+  const coreUrls = [];
+  await page.route('**/monthly-collaboration-core.js*', async (route) => {
+    coreRequests += 1;
+    coreUrls.push(route.request().url());
+    const response = await route.fetch();
+    const body = await response.text();
+    await route.fulfill({
+      response,
+      body: coreRequests === 1
+        ? `${body}\nwindow.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { core: 'stale-build' });`
+        : body
+    });
+  });
+  await page.goto('/', { waitUntil: 'load' });
+  await expect(page.locator('#site-access-error')).toContainText('MIXED_ASSET_BLOCKED');
+  return { count: () => coreRequests, urls: coreUrls };
+}
+
+test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-busting URL', async ({ page, request }) => {
+  const coreTrace = await openMixedBuildWithOneFreshReload(page);
+  await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
+
+  await Promise.all([
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.17'
+      && Boolean(url.searchParams.get('monthly-reload'))),
+    page.locator('#site-safe-reload').click()
+  ]);
+
+  expect(coreTrace.count()).toBeGreaterThanOrEqual(2);
+  const reloadNonce = new URL(page.url()).searchParams.get('monthly-reload');
+  expect(reloadNonce).toBeTruthy();
+  expect(new URL(coreTrace.urls.at(-1)).searchParams.get('reload')).toBe(reloadNonce);
+  expect(await page.evaluate(() => localStorage.getItem('monthly_safe_reload_sentinel'))).toBe('keep-clean');
+  await expect.poll(async () => {
+    const state = await (await request.get('/__fake_state')).json();
+    return Number(state.rpcCounts.monthly_v7_get_status || 0);
+  }).toBe(1);
+});
+
+test('有 durable draft 或 conflict 時安全重載必須先確認證據，第二次才導航且不刪除草稿', async ({ page, request }) => {
+  await openMixedBuildWithOneFreshReload(page);
+  const draftKey = 'monthly_v7_draft:module:safe-reload-draft';
+  const durableDraft = JSON.stringify({
+    entityType: 'module', entityId: 'safe-reload-draft', baseRevision: 4,
+    payload: { title: '安全重載必須保留的草稿' }, savedAt: '2026-08-13T12:00:00.000Z'
+  });
+  await page.evaluate(({ key, value }) => {
+    localStorage.setItem(key, value);
+    window.MonthlyV7App.revisionConflictBlocks.set('module:safe-reload-draft', {
+      state: 'REVISION_CONFLICT_BLOCKED', entityType: 'module', entityId: 'safe-reload-draft'
+    });
+  }, { key: draftKey, value: durableDraft });
+  const originalUrl = page.url();
+
+  await page.locator('#site-safe-reload').click();
+
+  expect(page.url()).toBe(originalUrl);
+  await expect(page.locator('#site-safe-reload-status')).toContainText('再次');
+  expect(await page.evaluate((key) => localStorage.getItem(key), draftKey)).toBe(durableDraft);
+  let state = await (await request.get('/__fake_state')).json();
+  expect(state.rpcCounts.monthly_v7_save_module || 0).toBe(0);
+
+  await Promise.all([
+    page.waitForURL((url) => Boolean(url.searchParams.get('monthly-reload'))),
+    page.locator('#site-safe-reload').click()
+  ]);
+
+  expect(await page.evaluate((key) => localStorage.getItem(key), draftKey)).toBe(durableDraft);
+  state = await (await request.get('/__fake_state')).json();
+  expect(state.rpcCounts.monthly_v7_save_module || 0).toBe(0);
+});
+
+test('unknown pending 安全重載不得建立新保存且原 operation evidence 必須原封不動', async ({ page, request }) => {
+  await openMixedBuildWithOneFreshReload(page);
+  const pendingKey = 'monthly_v7_pending:save_module:safe-reload-pending';
+  const pending = JSON.stringify({
+    operationId: 'safe-reload-operation-1', signature: '{}',
+    createdAt: '2026-08-13T12:00:00.000Z', actorUserId: 'owner-id'
+  });
+  await page.evaluate(({ key, value }) => {
+    localStorage.setItem(key, value);
+    window.MonthlyV7App.client = {
+      lastOperationReceipt: () => ({
+        state: 'RESULT_UNKNOWN_PENDING_RECONCILIATION', operationId: 'safe-reload-operation-1',
+        rpcName: 'monthly_v7_save_module', requestedOrigin: 'autosave', saveOrigin: 'autosave'
+      })
+    };
+  }, { key: pendingKey, value: pending });
+  const originalUrl = page.url();
+
+  await page.locator('#site-safe-reload').click();
+
+  expect(page.url()).toBe(originalUrl);
+  await expect(page.locator('#site-safe-reload-status')).toContainText(/待對帳|operation/);
+  expect(await page.evaluate((key) => localStorage.getItem(key), pendingKey)).toBe(pending);
+  let state = await (await request.get('/__fake_state')).json();
+  expect(state.rpcCounts.monthly_v7_save_module || 0).toBe(0);
+
+  await Promise.all([
+    page.waitForURL((url) => Boolean(url.searchParams.get('monthly-reload'))),
+    page.locator('#site-safe-reload').click()
+  ]);
+
+  expect(await page.evaluate((key) => localStorage.getItem(key), pendingKey)).toBe(pending);
+  state = await (await request.get('/__fake_state')).json();
+  expect(state.rpcCounts.monthly_v7_save_module || 0).toBe(0);
+});
+
+test('in-flight 保存期間安全重載必須停止，不得人為製造 lost-ACK', async ({ page }) => {
+  await openMixedBuildWithOneFreshReload(page);
+  const draftKey = 'monthly_v7_draft:module:in-flight-module';
+  const durableDraft = JSON.stringify({
+    entityType: 'module', entityId: 'in-flight-module', baseRevision: 2,
+    payload: { title: '保存仍在途的草稿' }, savedAt: '2026-08-13T12:00:00.000Z'
+  });
+  const result = await page.evaluate(({ key, value }) => {
+    localStorage.setItem(key, value);
+    V7_CLOUD_SAVE_PROMISE = new Promise(() => {});
+    V4_CLOUD_SAVING = true;
+    return {
+      firstAttempt: v7SafeReloadFromGate(),
+      secondAttempt: v7SafeReloadFromGate(),
+      draft: localStorage.getItem(key),
+      status: document.getElementById('site-safe-reload-status')?.textContent || ''
+    };
+  }, { key: draftKey, value: durableDraft });
+
+  expect(result).toMatchObject({
+    firstAttempt: false,
+    secondAttempt: false,
+    draft: durableDraft
+  });
+  expect(result.status).toContain('保存仍在進行');
+  expect(new URL(page.url()).searchParams.get('monthly-reload')).toBeNull();
+});
+
+test('conflict 安全重載不得以其他 entity 的 draft 冒充 durable 證據', async ({ page }) => {
+  await openMixedBuildWithOneFreshReload(page);
+  const unrelatedKey = 'monthly_v7_draft:module:unrelated-module';
+  const unrelatedDraft = JSON.stringify({
+    entityType: 'module', entityId: 'unrelated-module', baseRevision: 1,
+    payload: { title: '不相關草稿' }, savedAt: '2026-08-13T12:00:00.000Z'
+  });
+  const result = await page.evaluate(({ key, value }) => {
+    localStorage.setItem(key, value);
+    window.MonthlyV7App.revisionConflictBlocks.set('module:missing-draft-module', {
+      state: 'REVISION_CONFLICT_BLOCKED',
+      entityType: 'module',
+      entityId: 'missing-draft-module'
+    });
+    const evidence = v7SafeReloadEvidence();
+    return {
+      durableEvidenceConfirmed: evidence.durableEvidenceConfirmed,
+      firstAttempt: v7SafeReloadFromGate(),
+      secondAttempt: v7SafeReloadFromGate(),
+      unrelatedDraft: localStorage.getItem(key),
+      status: document.getElementById('site-safe-reload-status')?.textContent || ''
+    };
+  }, { key: unrelatedKey, value: unrelatedDraft });
+
+  expect(result).toMatchObject({
+    durableEvidenceConfirmed: false,
+    firstAttempt: false,
+    secondAttempt: false,
+    unrelatedDraft
+  });
+  expect(result.status).toContain('durable');
+  expect(new URL(page.url()).searchParams.get('monthly-reload')).toBeNull();
+});
+
+test('unknown result 安全重載只接受相同 operation ID 的 pending 證據', async ({ page }) => {
+  await openMixedBuildWithOneFreshReload(page);
+  const unrelatedPendingKey = 'monthly_v7_pending:save_module:unrelated-operation';
+  const unrelatedPending = JSON.stringify({
+    operationId: 'operation-b', signature: '{}',
+    createdAt: '2026-08-13T12:00:00.000Z', actorUserId: 'owner-id'
+  });
+  const result = await page.evaluate(({ key, value }) => {
+    localStorage.setItem(key, value);
+    window.MonthlyV7App.client = {
+      lastOperationReceipt: () => ({
+        state: 'RESULT_UNKNOWN_PENDING_RECONCILIATION',
+        operationId: 'operation-a',
+        rpcName: 'monthly_v7_save_module',
+        requestedOrigin: 'autosave',
+        saveOrigin: 'autosave'
+      })
+    };
+    const evidence = v7SafeReloadEvidence();
+    return {
+      durableEvidenceConfirmed: evidence.durableEvidenceConfirmed,
+      firstAttempt: v7SafeReloadFromGate(),
+      secondAttempt: v7SafeReloadFromGate(),
+      unrelatedPending: localStorage.getItem(key),
+      status: document.getElementById('site-safe-reload-status')?.textContent || ''
+    };
+  }, { key: unrelatedPendingKey, value: unrelatedPending });
+
+  expect(result).toMatchObject({
+    durableEvidenceConfirmed: false,
+    firstAttempt: false,
+    secondAttempt: false,
+    unrelatedPending
+  });
+  expect(result.status).toContain('durable');
+  expect(new URL(page.url()).searchParams.get('monthly-reload')).toBeNull();
+});
+
+test('診斷收據包含 build、authority、workspace hash、last RPC 與 save origin 且不洩漏秘密', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    window.MonthlyV7App.client.setOperationReceipt({
+      state: 'RESULT_UNKNOWN_PENDING_RECONCILIATION',
+      rpcName: 'monthly_v7_save_module',
+      operationId: 'diagnostic-operation-1',
+      requestedOrigin: 'manual',
+      saveOrigin: 'manual',
+      errorCode: 'RPC_TIMEOUT',
+      updatedAt: '2026-08-13T12:00:00.000Z'
+    });
+  });
+
+  const receipt = await page.evaluate(() => window.MonthlyV7App.diagnosticReceipt());
+  expect(receipt).toMatchObject({
+    state: 'NORMALIZED_READY',
+    builds: {
+      page: '7.0.17', config: '7.0.17', core: '7.0.17', client: '7.0.17', v7: '7.0.17'
+    },
+    authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
+    lastRpc: 'monthly_v7_get_snapshot',
+    save: {
+      origin: 'manual', operationId: 'diagnostic-operation-1',
+      state: 'RESULT_UNKNOWN_PENDING_RECONCILIATION'
+    }
+  });
+  expect(receipt.workspaceHashPrefix).toMatch(/^[a-f0-9]{12}$/);
+  const serialized = JSON.stringify(receipt);
+  expect(serialized).not.toContain('browser-workspace');
+  expect(serialized).not.toContain('fake-anon-key');
+  expect(serialized).not.toContain('http://127.0.0.1:4187');
+  expect(serialized).not.toContain('site_session');
+  expect(serialized).not.toContain('user_session');
+});
+
 test('configured workspace 的未知 authority 必須鎖住啟動且不得呼叫 legacy cloud read', async ({ page, request }) => {
   await request.post('/__fake_status?kind=unknown');
   await page.addInitScript(() => {
@@ -396,7 +689,7 @@ test('已驗證 authority 不得沿用到未重新驗證的新雲端配置或 un
 });
 
 test('從未保存雲端 identity 時仍維持純本機 unconfigured 模式', async ({ page }) => {
-  await page.route('**/supabase-config.js', async (route) => {
+  await page.route('**/supabase-config.js*', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/javascript; charset=utf-8',

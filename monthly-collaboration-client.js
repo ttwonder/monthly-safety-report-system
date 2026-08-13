@@ -1,10 +1,15 @@
 (function (root, factory) {
+  const buildId = '7.0.17';
   const api = factory(
-    typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore
+    typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
+    buildId
   );
   if (typeof module === 'object' && module.exports) module.exports = api;
-  if (root) root.MonthlyCollaborationClient = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (core) {
+  if (root) {
+    root.MonthlyCollaborationClient = api;
+    root.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, root.MONTHLY_REPORT_ASSET_BUILDS, { client: buildId });
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (core, buildId) {
   'use strict';
 
   class MonthlyV7Client {
@@ -40,6 +45,11 @@
       this.snapshotCommitQueue = Promise.resolve();
       this.operationReceipt = null;
       this.operationReceiptHistory = [];
+      this.lastRpcName = '';
+    }
+
+    lastRpc() {
+      return String(this.lastRpcName || '');
     }
 
     lastOperationReceipt() {
@@ -156,6 +166,7 @@
     }
 
     async rpc(name, params) {
+      this.lastRpcName = String(name || '');
       const requestGeneration = this.sessionGeneration;
       try {
         const result = await this.transport.rpc(name, params);
@@ -2377,5 +2388,5 @@
     }
   }
 
-  return Object.freeze({ MonthlyV7Client });
+  return Object.freeze({ BUILD_ID: buildId, MonthlyV7Client });
 });

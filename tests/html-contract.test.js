@@ -24,16 +24,21 @@ test('兩份正式 HTML 保持完全一致且所有 inline JavaScript 可解析'
   scripts.forEach((source, index) => assert.doesNotThrow(() => new Script(source, { filename: `inline-${index + 1}.js` }), `inline script ${index + 1}`));
 });
 
-test('正式 HTML 載入固定 Supabase bundle 與 V7 三層 client，並保留 authority 分流', async () => {
+test('正式 HTML 對所有 startup-coupled 本機 script 使用同一 build cache key，並保留 authority 分流', async () => {
   const html = await readFile(join(root, 'index.html'), 'utf8');
-  for (const src of [
-    './vendor/supabase-2.112.2.js'
-  ]) assert.match(html, new RegExp(`<script src="${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
-  for (const src of [
-    './monthly-collaboration-core.js?v=7.0.16',
-    './monthly-collaboration-client.js?v=7.0.16',
-    './monthly-collaboration-v7.js?v=7.0.16'
-  ]) assert.match(html, new RegExp(`<script src="${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
+  for (const [name, src] of [
+    ['config', './supabase-config.js'],
+    ['vendor', './vendor/supabase-2.112.2.js'],
+    ['core', './monthly-collaboration-core.js'],
+    ['client', './monthly-collaboration-client.js'],
+    ['v7', './monthly-collaboration-v7.js']
+  ]) {
+    assert.match(html, new RegExp(`${name}: '${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
+    assert.match(html, new RegExp(`monthlyReportWriteStartupScript\\('${name}'\\)`));
+  }
+  assert.match(html, /url\.searchParams\.set\('v', window\.MONTHLY_REPORT_PAGE_BUILD\)/);
+  assert.match(html, /url\.searchParams\.set\('reload', reloadNonce\)/);
+  assert.doesNotMatch(html, /monthly-collaboration-(?:core|client|v7)\.js\?v=7\.0\.16/);
   const uploadStart = html.indexOf('async function v4UploadToCloud');
   const activeBranch = html.indexOf('window.MonthlyV7App?.isActive?.()', uploadStart);
   const legacyWriter = html.indexOf("rpc/upsert_monthly_report_cloud_data", uploadStart);
@@ -46,6 +51,25 @@ test('正式 HTML 載入固定 Supabase bundle 與 V7 三層 client，並保留 
   assert.match(html, /window\.MonthlyV7App\?\.isWriteReady\?\.\(\)/);
   assert.match(html, /confirmLegacyRecovery:\s*!silent/);
   assert.match(html, /帳號驗證已通過，但雲端資料載入失敗/);
+});
+
+test('page、config、core、client 與 V7 宣告同一 build ID 並提供 mixed-build 安全重載', async () => {
+  const buildId = '7.0.17';
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.0\.17'/);
+  for (const [file, asset] of [
+    ['supabase-config.js', 'config'],
+    ['monthly-collaboration-core.js', 'core'],
+    ['monthly-collaboration-client.js', 'client'],
+    ['monthly-collaboration-v7.js', 'v7']
+  ]) {
+    const source = await readFile(join(root, file), 'utf8');
+    assert.match(source, new RegExp(buildId.replace(/\./g, '\\.')), file);
+    assert.match(source, new RegExp(`${asset}: (?:buildId|'${buildId.replace(/\./g, '\\.')}')`), file);
+  }
+  assert.match(html, /MIXED_ASSET_BLOCKED/);
+  assert.match(html, /id="site-safe-reload"/);
+  assert.match(html, /function v7SafeReloadFromGate\(\)/);
 });
 
 test('進站與登入後共用使用者指定的本機 FPMC Logo，工具列控制具無障礙狀態', async () => {

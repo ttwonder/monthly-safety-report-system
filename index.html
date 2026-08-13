@@ -14,7 +14,36 @@
     <!-- Chart.js 動態趨勢圖 -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
-    <script src="./supabase-config.js"></script>
+    <script>
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.17';
+        window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
+        window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
+            config: './supabase-config.js',
+            vendor: './vendor/supabase-2.112.2.js',
+            core: './monthly-collaboration-core.js',
+            client: './monthly-collaboration-client.js',
+            v7: './monthly-collaboration-v7.js'
+        });
+        window.monthlyReportStartupAssetUrl = function(name) {
+            const path = window.MONTHLY_REPORT_STARTUP_ASSETS[name];
+            if (!path) throw new Error('UNKNOWN_STARTUP_ASSET');
+            const url = new URL(path, document.baseURI);
+            url.searchParams.set('v', window.MONTHLY_REPORT_PAGE_BUILD);
+            const reloadNonce = new URL(window.location.href).searchParams.get('monthly-reload');
+            if (reloadNonce) url.searchParams.set('reload', reloadNonce);
+            return url.href;
+        };
+        window.monthlyReportWriteStartupScript = function(name) {
+            const source = window.monthlyReportStartupAssetUrl(name);
+            // Parser-blocking is intentional: the following inline application requires
+            // these classic scripts synchronously. `name` resolves only through the
+            // frozen same-origin allowlist above, and URL/SearchParams serializes the
+            // build/reload values before this markup is written; arbitrary script URLs
+            // or caller-supplied HTML are never accepted here.
+            document.write('<script src="' + source + '"><\/script>');
+        };
+        window.monthlyReportWriteStartupScript('config');
+    </script>
 
     
     <!-- 系統保留節點 -->
@@ -1970,6 +1999,13 @@
             <input id="site-access-password" type="password" class="site-access-input mb-3" placeholder="網站密碼" autocomplete="current-password" onkeydown="if(event.key==='Enter') siteAccessUnlockFromForm()">
             <button class="site-access-btn" onclick="siteAccessUnlockFromForm()"><i class="fas fa-right-to-bracket mr-1"></i>進入系統</button>
             <div id="site-access-error" class="text-sm text-rose-600 font-bold mt-3 min-h-[20px]"></div>
+            <div id="site-safe-reload-panel" class="hidden mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-left">
+                <button id="site-safe-reload" type="button" class="site-access-btn !bg-amber-600 hover:!bg-amber-700" onclick="v7SafeReloadFromGate()">
+                    <i class="fas fa-rotate mr-1"></i>安全重載
+                </button>
+                <div id="site-safe-reload-status" class="mt-2 text-xs font-bold leading-5 text-amber-900"></div>
+                <pre id="site-build-diagnostic" class="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-slate-600"></pre>
+            </div>
             <div class="text-xs text-slate-400 mt-4 leading-5">密碼可由 owner / 管理員在「數據管理」頁修改。</div>
         </div>
     </div>
@@ -2265,10 +2301,12 @@
         <div class="text-indigo-600 text-lg font-bold"><i class="fas fa-spinner fa-spin mr-2"></i>處理中...</div>
     </div>
 
-    <script src="./vendor/supabase-2.112.2.js"></script>
-    <script src="./monthly-collaboration-core.js?v=7.0.16"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.16"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.16"></script>
+    <script>
+        window.monthlyReportWriteStartupScript('vendor');
+        window.monthlyReportWriteStartupScript('core');
+        window.monthlyReportWriteStartupScript('client');
+        window.monthlyReportWriteStartupScript('v7');
+    </script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont(options = {}) {
@@ -6018,6 +6056,8 @@
         const V4_CLOUD_TABLE = 'monthly_report_cloud_data';
         const V4_LEGACY_LOCAL_SCOPE_KEY = 'monthly_report_legacy_local_authority_scope';
         const V4_LEGACY_SESSION_SCOPE_KEY = 'monthly_report_legacy_session_authority_scope';
+        const V7_REQUIRED_BUILD_ASSETS = Object.freeze(['page', 'config', 'core', 'client', 'v7']);
+        const V7_SAFE_RELOAD_CONFIRM_MS = 30000;
         let V4_CLOUD_APPLYING = false;
         let V4_CLOUD_SAVING = false;
         let V4_AUTO_SAVE_TIMER = null;
@@ -6038,7 +6078,193 @@
         let V4_CLOUD_STATUS_KIND = 'muted';
         let V4_CLOUD_STATUS_OVER_RECOVERY = false;
         let V7_INITIALIZATION_ERROR = null;
+        let V7_SAFE_RELOAD_ARMED = null;
         window.MonthlyV7App = window.MonthlyV7Browser ? new window.MonthlyV7Browser.MonthlyV7BrowserApp() : null;
+
+        function v7StartupBuildReceipt() {
+            const pageBuild = String(window.MONTHLY_REPORT_PAGE_BUILD || '').trim();
+            const declared = window.MONTHLY_REPORT_ASSET_BUILDS && typeof window.MONTHLY_REPORT_ASSET_BUILDS === 'object'
+                ? window.MONTHLY_REPORT_ASSET_BUILDS
+                : {};
+            const assets = {};
+            V7_REQUIRED_BUILD_ASSETS.forEach(name => { assets[name] = String(declared[name] || '').trim(); });
+            const mismatches = V7_REQUIRED_BUILD_ASSETS.filter(name => !pageBuild || assets[name] !== pageBuild);
+            return Object.freeze({ pageBuild, assets: Object.freeze(assets), mismatches: Object.freeze(mismatches) });
+        }
+
+        function v7AssertStartupBuild() {
+            const receipt = v7StartupBuildReceipt();
+            if (receipt.mismatches.length === 0) return receipt;
+            const error = new Error('MIXED_ASSET_BLOCKED');
+            error.code = 'MIXED_ASSET_BLOCKED';
+            error.buildReceipt = receipt;
+            throw error;
+        }
+
+        function v7SafeReloadEvidence() {
+            try {
+                if (typeof v7PreserveVisibleEditorDrafts === 'function') v7PreserveVisibleEditorDrafts();
+            } catch (_error) {
+                // A mixed startup may stop before report boot. Existing durable
+                // evidence is still inspected below and is never removed.
+            }
+            const values = {};
+            let storageReadable = true;
+            try {
+                for (let index = 0; index < localStorage.length; index += 1) {
+                    const key = String(localStorage.key(index) || '');
+                    if (!key.startsWith('monthly_v7_draft:') && !key.startsWith('monthly_v7_pending:')) continue;
+                    values[key] = localStorage.getItem(key);
+                }
+            } catch (_error) {
+                storageReadable = false;
+            }
+            const keys = Object.keys(values).sort();
+            const draftKeys = keys.filter(key => key.startsWith('monthly_v7_draft:'));
+            const pendingKeys = keys.filter(key => key.startsWith('monthly_v7_pending:'));
+            const app = window.MonthlyV7App;
+            const operation = app?.client?.lastOperationReceipt?.() || null;
+            const operationState = String(operation?.state || '');
+            const operationId = String(operation?.operationId || '');
+            const unknownResult = operationState === 'RESULT_UNKNOWN_PENDING_RECONCILIATION';
+            const conflictBlocks = Array.from(app?.revisionConflictBlocks?.values?.() || []);
+            const writeBlocks = [
+                ...Array.from(app?.writeFailureBlocks?.values?.() || []),
+                ...(app?.authorityWriteBlock ? [app.authorityWriteBlock] : [])
+            ];
+            const conflictBlocked = app?.isRevisionConflictBlocked?.() === true;
+            const recoveryBlocked = app?.isPendingRecoveryBlocked?.() === true;
+            const writeBlocked = app?.isWriteFailureBlocked?.() === true;
+            const dirty = typeof v7HasUnsyncedCloudChanges === 'function' && v7HasUnsyncedCloudChanges();
+            const inFlight = Boolean(V7_CLOUD_SAVE_PROMISE || V4_CLOUD_SAVING);
+            const targetKey = (block) => {
+                const entityType = String(block?.entityType || '');
+                const entityId = String(block?.entityId || '');
+                return entityType && entityId ? `monthly_v7_draft:${entityType}:${entityId}` : '';
+            };
+            const conflictTargets = conflictBlocks.map(targetKey);
+            const writeTargets = writeBlocks.map(targetKey);
+            const allTargetDraftsDurable = [...conflictTargets, ...writeTargets]
+                .every(key => key && Object.prototype.hasOwnProperty.call(values, key));
+            const pendingOperationIds = pendingKeys.map(key => {
+                try { return String(JSON.parse(values[key])?.operationId || ''); }
+                catch (_error) { return ''; }
+            });
+            const matchingPendingOperation = !unknownResult
+                || (operationId && pendingOperationIds.includes(operationId));
+            const blockerTargetsKnown = (!conflictBlocked || conflictTargets.length > 0)
+                && (!writeBlocked || writeTargets.length > 0);
+            const dirtyDraftDurable = !dirty || draftKeys.length > 0;
+            const recoveryPendingDurable = !recoveryBlocked || pendingKeys.length > 0;
+            const needsConfirmation = keys.length > 0 || conflictBlocked || recoveryBlocked
+                || writeBlocked || dirty || unknownResult;
+            const durableEvidenceConfirmed = storageReadable
+                && blockerTargetsKnown
+                && allTargetDraftsDurable
+                && dirtyDraftDurable
+                && recoveryPendingDurable
+                && matchingPendingOperation;
+            const stateFingerprint = {
+                conflictTargets: conflictTargets.slice().sort(),
+                writeTargets: writeTargets.slice().sort(),
+                operationState,
+                operationId,
+                dirty,
+                recoveryBlocked,
+                inFlight
+            };
+            return Object.freeze({
+                fingerprint: JSON.stringify({
+                    storage: keys.map(key => [key, values[key]]),
+                    state: stateFingerprint
+                }),
+                draftKeys: Object.freeze(draftKeys),
+                pendingKeys: Object.freeze(pendingKeys),
+                operationState,
+                operationId,
+                unknownResult,
+                conflictBlocked,
+                recoveryBlocked,
+                writeBlocked,
+                dirty,
+                inFlight,
+                needsConfirmation,
+                durableEvidenceConfirmed
+            });
+        }
+
+        function v7SafeReloadUrl() {
+            const url = new URL(window.location.href);
+            url.searchParams.set('monthly-build', String(window.MONTHLY_REPORT_PAGE_BUILD || 'latest'));
+            const nonce = typeof window.crypto?.randomUUID === 'function'
+                ? window.crypto.randomUUID()
+                : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            url.searchParams.set('monthly-reload', nonce);
+            return url.href;
+        }
+
+        function v7SafeReloadStatus(text) {
+            const status = document.getElementById('site-safe-reload-status');
+            if (status) status.textContent = String(text || '');
+        }
+
+        function v7NavigateSafeReload() {
+            V7_SAFE_RELOAD_ARMED = null;
+            window.location.replace(v7SafeReloadUrl());
+        }
+
+        function v7SafeReloadFromGate() {
+            const evidence = v7SafeReloadEvidence();
+            if (evidence.inFlight) {
+                V7_SAFE_RELOAD_ARMED = null;
+                v7SafeReloadStatus('雲端保存仍在進行，已停止重載以免製造結果不明。請等待保存完成或進入待對帳狀態。');
+                return false;
+            }
+            if (!evidence.durableEvidenceConfirmed) {
+                V7_SAFE_RELOAD_ARMED = null;
+                v7SafeReloadStatus('尚無法確認目前內容與待對帳操作已寫入 durable 本機證據；已停止重載，沒有清除或上傳任何資料。');
+                return false;
+            }
+            if (!evidence.needsConfirmation) {
+                v7SafeReloadStatus('本機沒有待保存證據，正在以新 cache key 安全重載。');
+                v7NavigateSafeReload();
+                return true;
+            }
+            const now = Date.now();
+            const armed = V7_SAFE_RELOAD_ARMED;
+            const sameEvidence = armed
+                && armed.fingerprint === evidence.fingerprint
+                && now - armed.armedAt <= V7_SAFE_RELOAD_CONFIRM_MS;
+            if (!sameEvidence) {
+                V7_SAFE_RELOAD_ARMED = { fingerprint: evidence.fingerprint, armedAt: now };
+                const evidenceText = evidence.unknownResult || evidence.pendingKeys.length > 0
+                    ? `待對帳 operation${evidence.operationId ? ` ${evidence.operationId}` : ''} 與原始 pending 已保留；重載後只可用原 operation 對帳，不會在目前混版頁建立新保存。`
+                    : 'durable 本機草稿／衝突證據已確認寫入，沒有清除或上傳任何資料。';
+                v7SafeReloadStatus(`${evidenceText} 請在 30 秒內再次點擊「安全重載」確認。`);
+                return false;
+            }
+            v7SafeReloadStatus('證據未變更，正在安全重載；本機草稿與 pending 將原封不動保留。');
+            v7NavigateSafeReload();
+            return true;
+        }
+
+        function v7ShowMixedAssetBlock(error) {
+            V7_INITIALIZATION_ERROR = error;
+            document.body.classList.add('site-access-locked');
+            const gateError = document.getElementById('site-access-error');
+            if (gateError) gateError.textContent = '啟動資源版本不一致，已停止載入資料：' + String(error?.code || error?.message || 'MIXED_ASSET_BLOCKED');
+            const panel = document.getElementById('site-safe-reload-panel');
+            if (panel) panel.classList.remove('hidden');
+            const receipt = error?.buildReceipt || v7StartupBuildReceipt();
+            const diagnostic = document.getElementById('site-build-diagnostic');
+            if (diagnostic) diagnostic.textContent = JSON.stringify({
+                state: 'MIXED_ASSET_BLOCKED',
+                pageBuild: receipt.pageBuild,
+                assetBuilds: receipt.assets,
+                mismatches: receipt.mismatches
+            }, null, 2);
+            v7SafeReloadStatus('尚未送出雲端 RPC。請使用安全重載取得同一版本資源。');
+        }
 
         function v4GetDefaultCloudConfig() {
             const cfg = window.MONTHLY_REPORT_SUPABASE_CONFIG || {};
@@ -8171,6 +8397,12 @@
         }
 
         window.onload = async function() {
+            try {
+                v7AssertStartupBuild();
+            } catch (error) {
+                v7ShowMixedAssetBlock(error);
+                return;
+            }
             const config = v4GetCloudConfig();
             if (v4ConfigReady(config)) {
                 try {
@@ -8180,6 +8412,10 @@
                         v4BindExistingLegacyAuthorityScope(config);
                     }
                 } catch (error) {
+                    if (String(error?.code || error?.message || '') === 'MIXED_ASSET_BLOCKED') {
+                        v7ShowMixedAssetBlock(error);
+                        return;
+                    }
                     V7_INITIALIZATION_ERROR = error;
                     document.body.classList.add('site-access-locked');
                     const gateError = document.getElementById('site-access-error');

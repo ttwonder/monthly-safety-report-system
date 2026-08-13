@@ -1,8 +1,12 @@
 (function (root, factory) {
-  const api = factory();
+  const buildId = '7.0.17';
+  const api = factory(buildId);
   if (typeof module === 'object' && module.exports) module.exports = api;
-  if (root) root.MonthlyCollaborationCore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  if (root) {
+    root.MonthlyCollaborationCore = api;
+    root.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, root.MONTHLY_REPORT_ASSET_BUILDS, { core: buildId });
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (buildId) {
   'use strict';
 
   function requiredText(value, label) {
@@ -276,6 +280,7 @@
   }
 
   return Object.freeze({
+    BUILD_ID: buildId,
     entityKey,
     orderedTargets,
     leaseCanWrite,

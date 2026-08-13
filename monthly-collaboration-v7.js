@@ -1,12 +1,41 @@
 (function (root, factory) {
+  const buildId = '7.0.17';
+  const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
-    typeof module === 'object' && module.exports ? require('./monthly-collaboration-client.js') : root.MonthlyCollaborationClient
+    commonJs ? require('./monthly-collaboration-client.js') : root.MonthlyCollaborationClient,
+    buildId,
+    !commonJs
   );
-  if (typeof module === 'object' && module.exports) module.exports = api;
-  if (root) root.MonthlyV7Browser = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (root, clientApi) {
+  if (commonJs) module.exports = api;
+  if (root) {
+    root.MonthlyV7Browser = api;
+    root.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, root.MONTHLY_REPORT_ASSET_BUILDS, { v7: buildId });
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (root, clientApi, buildId, browserBuildHandshakeRequired) {
   'use strict';
+
+  const REQUIRED_BUILD_ASSETS = Object.freeze(['page', 'config', 'core', 'client', 'v7']);
+
+  function startupBuildReceipt() {
+    const pageBuild = String(root && root.MONTHLY_REPORT_PAGE_BUILD || '').trim();
+    const declared = root && root.MONTHLY_REPORT_ASSET_BUILDS && typeof root.MONTHLY_REPORT_ASSET_BUILDS === 'object'
+      ? root.MONTHLY_REPORT_ASSET_BUILDS
+      : {};
+    const assets = {};
+    for (const name of REQUIRED_BUILD_ASSETS) assets[name] = String(declared[name] || '').trim();
+    const mismatches = REQUIRED_BUILD_ASSETS.filter((name) => !pageBuild || assets[name] !== pageBuild);
+    return Object.freeze({ pageBuild, assets: Object.freeze(assets), mismatches: Object.freeze(mismatches) });
+  }
+
+  function assertStartupBuild() {
+    const receipt = startupBuildReceipt();
+    if (receipt.mismatches.length === 0) return receipt;
+    const error = new Error('MIXED_ASSET_BLOCKED');
+    error.code = 'MIXED_ASSET_BLOCKED';
+    error.buildReceipt = receipt;
+    throw error;
+  }
 
   function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -209,6 +238,7 @@
     }
 
     async initialize(config, host) {
+      if (browserBuildHandshakeRequired) assertStartupBuild();
       if (host) this.setHost(host);
       if (!config || !config.workspaceKey) throw new Error('SUPABASE_CONFIG_REQUIRED');
       this.client = new clientApi.MonthlyV7Client({
@@ -243,6 +273,60 @@
     }
     currentUser() { return this.client ? this.client.currentUser() : null; }
     currentReport() { return this.client ? this.client.currentReport() : null; }
+
+    diagnosticState() {
+      const buildReceipt = startupBuildReceipt();
+      if (buildReceipt.mismatches.length > 0) return 'MIXED_ASSET_BLOCKED';
+      if (this.status && this.status.mode === 'v7') return 'NORMALIZED_READY';
+      if (this.status && this.status.mode === 'legacy') return 'EXPLICIT_LEGACY_READY';
+      if (String(this.status && this.status.errorCode || '') === 'V7_CLIENT_VERSION_UNSUPPORTED') {
+        return 'INCOMPATIBLE_CLIENT';
+      }
+      if (this.status && this.status.mode === 'error') return 'UNAVAILABLE';
+      return 'UNINITIALIZED';
+    }
+
+    async workspaceHashPrefix() {
+      const workspaceKey = String(this.client && this.client.config && this.client.config.workspaceKey || '');
+      const subtle = root && root.crypto && root.crypto.subtle;
+      const Encoder = root && root.TextEncoder;
+      if (!workspaceKey || !subtle || typeof subtle.digest !== 'function' || typeof Encoder !== 'function') return '';
+      const digest = await subtle.digest('SHA-256', new Encoder().encode(workspaceKey));
+      return Array.from(new Uint8Array(digest))
+        .map((value) => value.toString(16).padStart(2, '0'))
+        .join('')
+        .slice(0, 12);
+    }
+
+    async diagnosticReceipt() {
+      const buildReceipt = startupBuildReceipt();
+      const status = this.status || {};
+      const operation = this.client && typeof this.client.lastOperationReceipt === 'function'
+        ? this.client.lastOperationReceipt()
+        : null;
+      return Object.freeze({
+        state: this.diagnosticState(),
+        builds: Object.freeze({
+          page: buildReceipt.pageBuild,
+          config: buildReceipt.assets.config,
+          core: buildReceipt.assets.core,
+          client: buildReceipt.assets.client,
+          v7: buildReceipt.assets.v7
+        }),
+        authority: Object.freeze({
+          state: String(status.authorityState || ''),
+          epoch: Number(status.authorityEpoch || 0)
+        }),
+        workspaceHashPrefix: await this.workspaceHashPrefix(),
+        lastRpc: this.client && typeof this.client.lastRpc === 'function' ? this.client.lastRpc() : '',
+        save: Object.freeze({
+          origin: String(operation && (operation.saveOrigin || operation.requestedOrigin) || ''),
+          requestedOrigin: String(operation && operation.requestedOrigin || ''),
+          operationId: String(operation && operation.operationId || ''),
+          state: String(operation && operation.state || '')
+        })
+      });
+    }
 
     async openSite(password) {
       const result = await this.client.openSite(password);
@@ -1389,5 +1473,13 @@
     }
   }
 
-  return Object.freeze({ SupabaseV7Transport, MonthlyV7BrowserApp, canonical });
+  return Object.freeze({
+    BUILD_ID: buildId,
+    REQUIRED_BUILD_ASSETS,
+    startupBuildReceipt,
+    assertStartupBuild,
+    SupabaseV7Transport,
+    MonthlyV7BrowserApp,
+    canonical
+  });
 });
