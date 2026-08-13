@@ -481,6 +481,99 @@ test('明確清空部署注入的 legacy 雲端 identity 後不得復活舊設�
   expect(afterReload.rpcCounts.upsert_monthly_report_cloud_data || 0).toBe(afterClear.rpcCounts.upsert_monthly_report_cloud_data || 0);
 });
 
+test('恢復的 V7 site session 必須等權威 snapshot 驗證後才解除 Gate，失效時保留草稿', async ({ page }) => {
+  await page.addInitScript(() => {
+    const guardKey = '__restored_site_session_first_boot_intercepted';
+    if (sessionStorage.getItem(guardKey)) return;
+    sessionStorage.setItem(guardKey, '1');
+    let capturedOnload = null;
+    Object.defineProperty(window, 'onload', {
+      configurable: true,
+      get: () => capturedOnload,
+      set: (handler) => {
+        capturedOnload = handler;
+        window.__restoredSiteCapturedOnload = handler;
+      }
+    });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.evaluate(async () => {
+    const boot = window.__restoredSiteCapturedOnload;
+    if (typeof boot !== 'function') throw new Error('PRODUCTION_ONLOAD_NOT_CAPTURED');
+    window.onload = null;
+    window.__restoredSiteCapturedOnload = null;
+    await boot.call(window);
+  });
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect.poll(() => page.evaluate(() => Array.isArray(window.MonthlyV7App?.client?.snapshot?.users))).toBe(true);
+  await expect(page.locator('body')).not.toHaveClass(/site-access-locked/);
+  const originalSiteSession = await page.evaluate(() => sessionStorage.getItem('monthly_v7_site_session'));
+  expect(originalSiteSession).toBeTruthy();
+
+  let snapshotMode = 'delayed-success';
+  let signalSnapshotStarted;
+  let releaseSnapshot;
+  let signalInvalidSnapshotStarted;
+  let releaseInvalidSnapshot;
+  const snapshotStarted = new Promise((resolve) => { signalSnapshotStarted = resolve; });
+  const snapshotGate = new Promise((resolve) => { releaseSnapshot = resolve; });
+  const invalidSnapshotStarted = new Promise((resolve) => { signalInvalidSnapshotStarted = resolve; });
+  const invalidSnapshotGate = new Promise((resolve) => { releaseInvalidSnapshot = resolve; });
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name !== 'monthly_v7_get_snapshot') return route.continue();
+    if (snapshotMode === 'delayed-success') {
+      snapshotMode = 'pass';
+      signalSnapshotStarted();
+      await snapshotGate;
+      await route.continue();
+      return;
+    }
+    if (snapshotMode === 'delayed-invalid') {
+      snapshotMode = 'done';
+      signalInvalidSnapshotStarted();
+      await invalidSnapshotGate;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ok: false, error: 'SITE_SESSION_INVALID' })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await snapshotStarted;
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+  expect(await page.evaluate(() => window.MonthlyV7App?.currentUser?.())).toBeNull();
+  releaseSnapshot();
+  await expect.poll(() => page.evaluate(() => Array.isArray(window.MonthlyV7App?.client?.snapshot?.users))).toBe(true);
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  expect(await page.evaluate(() => sessionStorage.getItem('monthly_v7_site_session'))).toBe(originalSiteSession);
+
+  const durableDraft = JSON.stringify({ payload: { id: 101, title: 'reload 保留草稿' }, baseRevision: 1 });
+  await page.evaluate((value) => {
+    localStorage.setItem('monthly_v7_draft:module:m1', value);
+    const config = v4GetCloudConfig();
+    localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify({ ...config, autoSyncOnOpen: false }));
+  }, durableDraft);
+  snapshotMode = 'delayed-invalid';
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await invalidSnapshotStarted;
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+  releaseInvalidSnapshot();
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+  await expect(page.locator('#site-access-error')).toContainText('雲端帳號資料讀取失敗');
+  expect(await page.evaluate(() => sessionStorage.getItem('monthly_v7_site_session'))).toBeNull();
+  expect(await page.evaluate(() => localStorage.getItem('monthly_v7_draft:module:m1'))).toBe(durableDraft);
+});
+
 test('權威帳號名冊等待與失敗期間禁止登入同步，logout 失敗仍回 Gate 並可重試', async ({ page, request }) => {
   let signalSnapshotStarted;
   let releaseSnapshot;

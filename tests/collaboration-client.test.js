@@ -274,24 +274,71 @@ test('登入 RPC 成功但 snapshot 失敗時不得留下半登入身份或啟�
   assert.equal(sessions.getItem('monthly_v7_user_projection'), null);
 });
 
-test('恢復的舊 session 在 snapshot 驗證完成前不得被視為已登入', async () => {
+test('恢復的舊 site/user session 在 snapshot 驗證完成前不得解鎖或被視為已登入', async () => {
   const sessions = memoryStorage();
   sessions.setItem('monthly_v7_site_session', JSON.stringify({ id: 'site-old' }));
   sessions.setItem('monthly_v7_user_session', JSON.stringify({ id: 'user-old' }));
   sessions.setItem('monthly_v7_user_projection', JSON.stringify({ id: 'u1', username: 'owner', role: 'owner' }));
+  const sessionEvents = [];
   const client = new MonthlyV7Client({
     transport: fakeTransport({
-      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 }
+      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+      monthly_v7_get_snapshot: {
+        ok: true,
+        watermark: 1,
+        report: { id: 'r1', legacyFileId: 'legacy', title: '月報', period: {}, revision: 1 },
+        modules: [], records: [], users: [{ id: 'u1', username: 'owner', role: 'owner' }]
+      }
     }),
     sessionStorage: sessions,
-    draftStorage: memoryStorage()
+    draftStorage: memoryStorage(),
+    host: { onSessionStateChanged: (event) => sessionEvents.push(event) }
   });
 
   await client.initialize({ workspaceKey: 'workspace-test' });
 
+  assert.equal(client.isSiteSessionPendingValidation(), true);
+  assert.equal(client.isSiteUnlocked(), false);
   assert.equal(client.currentUser(), null);
   assert.equal(client.isWriteReady(), false);
   assert.equal(client.userSession.id, 'user-old');
+  await assert.rejects(client.login('owner', 'pass'), /SITE_SESSION_REQUIRED/);
+
+  await client.loadSnapshot();
+
+  assert.equal(client.isSiteSessionPendingValidation(), false);
+  assert.equal(client.isSiteUnlocked(), true);
+  assert.equal(client.currentUser().role, 'owner');
+  assert.equal(client.isWriteReady(), true);
+  assert.equal(sessionEvents.at(-1).reason, 'user-session-validated');
+});
+
+test('恢復的 site session 驗證失效時清除 session 並保留本機草稿', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const sessionEvents = [];
+  sessions.setItem('monthly_v7_site_session', JSON.stringify({ id: 'site-old' }));
+  const client = new MonthlyV7Client({
+    transport: fakeTransport({
+      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+      monthly_v7_get_snapshot: { ok: false, error: 'SITE_SESSION_INVALID' }
+    }),
+    sessionStorage: sessions,
+    draftStorage: drafts,
+    host: { onSessionStateChanged: (event) => sessionEvents.push(event) }
+  });
+
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  client.saveDraft('module', 'm1', { title: '保留草稿' }, 1);
+
+  await assert.rejects(client.loadSnapshot(), /SITE_SESSION_INVALID/);
+
+  assert.equal(client.siteSession, null);
+  assert.equal(client.isSiteSessionPendingValidation(), false);
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(sessions.getItem('monthly_v7_site_session'), null);
+  assert.equal(client.readDraft('module', 'm1').payload.title, '保留草稿');
+  assert.equal(sessionEvents.at(-1).code, 'SITE_SESSION_INVALID');
 });
 
 test('首次 V7 只恢復來源一致且較新的既有項目，本機獨有項隔離且登入後仍不進 live bundle', async () => {

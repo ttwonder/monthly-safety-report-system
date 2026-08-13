@@ -34,6 +34,7 @@
       this.status = { mode: 'unknown', authorityState: '', authorityEpoch: 0, minimumClientVersion: 0 };
       this.heartbeatTimer = null;
       this.sessionGeneration = 0;
+      this.siteSessionPendingValidation = false;
       this.userSessionPendingValidation = false;
       this.loginAttemptEpoch = 0;
       this.snapshotCommitQueue = Promise.resolve();
@@ -193,13 +194,16 @@
         try { this.siteSession = JSON.parse(this.sessionStorage.getItem('monthly_v7_site_session') || 'null'); } catch { this.siteSession = null; }
         try { this.userSession = JSON.parse(this.sessionStorage.getItem('monthly_v7_user_session') || 'null'); } catch { this.userSession = null; }
         try { this.user = JSON.parse(this.sessionStorage.getItem('monthly_v7_user_projection') || 'null'); } catch { this.user = null; }
+        this.siteSessionPendingValidation = !!(this.siteSession && this.siteSession.id);
         this.userSessionPendingValidation = !!(this.userSession && this.userSession.id && this.user);
       }
       return Object.assign({}, this.status);
     }
 
     isActive() { return this.status.mode === 'v7'; }
-    isSiteUnlocked() { return this.isActive() && !!(this.siteSession && this.siteSession.id); }
+    hasSiteSession() { return this.isActive() && !!(this.siteSession && this.siteSession.id); }
+    isSiteSessionPendingValidation() { return this.hasSiteSession() && this.siteSessionPendingValidation === true; }
+    isSiteUnlocked() { return this.hasSiteSession() && !this.siteSessionPendingValidation; }
     isWriteReady() {
       return !!(this.userSession && this.userSession.id && this.user && !this.userSessionPendingValidation);
     }
@@ -242,6 +246,7 @@
       });
       if (!result || result.ok !== true) throw new Error(result && result.error || 'SITE_LOGIN_FAILED');
       this.siteSession = { id: result.site_session_id || result.siteSessionId, expiresAt: result.expires_at || result.expiresAt || '' };
+      this.siteSessionPendingValidation = false;
       if (this.sessionStorage) this.sessionStorage.setItem('monthly_v7_site_session', JSON.stringify(this.siteSession));
       this.sessionGeneration += 1;
       return Object.assign({}, this.siteSession);
@@ -466,7 +471,7 @@
     }
 
     async loadSnapshot(options = {}) {
-      if (!this.isSiteUnlocked()) throw new Error('SITE_SESSION_REQUIRED');
+      if (!this.hasSiteSession()) throw new Error('SITE_SESSION_REQUIRED');
       const retryTransient = options.retryTransient === true;
       const loginAttempt = options.loginAttempt || null;
       const assertLoadOwnership = () => {
@@ -611,9 +616,13 @@
       this.watermark = Number(snapshot.watermark || 0);
       if (typeof this.host.applyBundle === 'function') await this.host.applyBundle(bundle, merged);
       assertLoadOwnership();
+      const siteSessionWasPendingValidation = this.siteSessionPendingValidation === true;
+      this.siteSessionPendingValidation = false;
       if (this.userSession && this.user && this.userSessionPendingValidation) {
         this.userSessionPendingValidation = false;
         this.notifySessionStateChanged('user-session-validated');
+      } else if (siteSessionWasPendingValidation) {
+        this.notifySessionStateChanged('site-session-validated');
       }
       return merged;
     }
@@ -2257,6 +2266,7 @@
     clearSessions(reason = '', code = '') {
       this.clearUserSession();
       this.siteSession = null;
+      this.siteSessionPendingValidation = false;
       if (this.sessionStorage) {
         this.sessionStorage.removeItem('monthly_v7_site_session');
       }

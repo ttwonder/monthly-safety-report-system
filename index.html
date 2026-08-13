@@ -2266,9 +2266,9 @@
     </div>
 
     <script src="./vendor/supabase-2.112.2.js"></script>
-    <script src="./monthly-collaboration-core.js?v=7.0.13"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.13"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.13"></script>
+    <script src="./monthly-collaboration-core.js?v=7.0.14"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.14"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.14"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont(options = {}) {
@@ -6705,7 +6705,8 @@
             const silent = options.silent !== false;
             if (v4RejectUnsafeCloudFallback({ silent, alert: !silent })) return false;
             if (window.MonthlyV7App?.isActive?.()) {
-                if (!window.MonthlyV7App.isSiteUnlocked()) return false;
+                const restoringSiteSession = window.MonthlyV7App.isSiteSessionPendingValidation?.() === true;
+                if (!window.MonthlyV7App.isSiteUnlocked() && !restoringSiteSession) return false;
                 try {
                     if (v5CurrentUser()) await window.MonthlyV7App.syncLatest();
                     else await window.MonthlyV7App.loadSnapshot();
@@ -6805,7 +6806,9 @@
             V4_STARTUP_SYNC_DONE = true;
             if (v4RejectUnsafeCloudFallback({ silent: true })) return false;
             const config = v4GetCloudConfig();
-            if (config.autoSyncOnOpen === false) return true;
+            const restoringSiteSession = window.MonthlyV7App?.isActive?.()
+                && window.MonthlyV7App.isSiteSessionPendingValidation?.() === true;
+            if (config.autoSyncOnOpen === false && !restoringSiteSession) return true;
             return await v4AutoSyncLatestFromCloud({ silent: true, source: '打開系統，自動同步雲端資料...' });
         }
 
@@ -7980,6 +7983,9 @@
                     renderTable();
                     if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
                 }
+                if (['site-session-validated', 'user-session-validated'].includes(String(event?.reason || ''))) {
+                    siteAccessRenderGate();
+                }
             },
             onItemSaved: () => renderV5SessionBar(),
             onUsersChanged: () => setTimeout(() => window.MonthlyV7App?.loadSnapshot?.().catch(console.warn), 0)
@@ -7993,6 +7999,7 @@
             v5SetupFormDraftPersistence();
             if (!window.MonthlyV7App?.isActive?.()) v6SetupEditLockGuards();
             const synced = await v4AutoSyncOnStartup();
+            if (window.MonthlyV7App?.isActive?.()) siteAccessRenderGate();
             if (window.MonthlyV7App?.isActive?.() && !synced) {
                 SITE_ACCESS_BOOTED = false;
                 V4_STARTUP_SYNC_DONE = false;
@@ -8029,7 +8036,9 @@
                 }
             }
             siteAccessRenderGate();
-            if (siteAccessIsUnlocked()) await monthlyReportBoot();
+            if (siteAccessIsUnlocked() || window.MonthlyV7App?.isSiteSessionPendingValidation?.()) {
+                await monthlyReportBoot();
+            }
         };
     </script>
 </body>

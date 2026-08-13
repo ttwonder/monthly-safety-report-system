@@ -214,6 +214,10 @@
 
     isActive() { return !!(this.client && this.client.isActive()); }
     isSiteUnlocked() { return !!(this.client && this.client.isSiteUnlocked()); }
+    isSiteSessionPendingValidation() {
+      return !!(this.client && typeof this.client.isSiteSessionPendingValidation === 'function'
+        && this.client.isSiteSessionPendingValidation());
+    }
     isWriteReady() {
       if (!this.client) return false;
       return typeof this.client.isWriteReady === 'function'
