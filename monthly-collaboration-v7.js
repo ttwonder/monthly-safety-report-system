@@ -135,6 +135,9 @@
       this.claimPromises = new Map();
       this.moduleReleaseTimers = new Map();
       this.revisionConflictBlocks = new Map();
+      this.pendingRecoveryBlock = null;
+      this.writeFailureBlocks = new Map();
+      this.authorityWriteBlock = null;
       this.initialized = false;
       this.guardsInstalled = false;
     }
@@ -169,14 +172,21 @@
           if (typeof this.host.onLease === 'function') this.host.onLease(lease);
         },
         onLeaseLost: (info) => {
+          const blockInfo = Object.assign({}, info, {
+            result: Object.assign({ ok: false, error: 'LEASE_LOST' }, info && info.result || {})
+          });
+          this.markWriteFailureBlock(blockInfo);
           this.decorateEditorRows();
           if (typeof this.host.onLeaseLost === 'function') this.host.onLeaseLost(info);
+          if (!this.isRevisionConflictBlocked()) this.publishWriteFailureStatus(blockInfo);
         },
         onConflict: (info) => {
           const revisionBlocked = this.markRevisionConflict(info);
+          const writeBlocked = this.markWriteFailureBlock(info);
           this.decorateEditorRows();
           if (typeof this.host.onConflict === 'function') this.host.onConflict(info);
           if (revisionBlocked) this.publishRevisionConflictStatus();
+          else if (writeBlocked && !this.isRevisionConflictBlocked()) this.publishWriteFailureStatus(info);
         },
         onRemoteChangeWhileEditing: (entity, event) => {
           if (typeof this.host.onRemoteChangeWhileEditing === 'function') this.host.onRemoteChangeWhileEditing(entity, event);
@@ -315,7 +325,7 @@
       return context;
     }
 
-    enqueue(task, operationName = 'queued-persist') {
+    enqueue(task, operationName = 'queued-persist', options = {}) {
       const operationContext = this.captureOperationContext();
       const run = this.persistChain.catch(() => undefined).then(async () => {
         this.assertOperationContext(operationContext, operationName);
@@ -325,11 +335,126 @@
       });
       this.persistChain = run;
       return run.catch((error) => {
+        if (this.markPendingRecoveryBlock(error, {
+          operationName,
+          saveOrigin: options.saveOrigin
+        })) {
+          this.publishPendingRecoveryStatus();
+          try { error.silent = true; } catch (_error) { /* status already published */ }
+        }
         if (!['REVISION_CONFLICT', 'REVISION_CONFLICT_CANCELLED'].includes(error && error.code) && !error?.silent) {
           this.reportError(error);
         }
         throw error;
       });
+    }
+
+    pendingRecoveryErrorCode(error) {
+      const code = String(error && error.code || '');
+      return [
+        'PENDING_OPERATION_UNRESOLVED',
+        'PENDING_OPERATION_ACTOR_MISMATCH',
+        'PENDING_OPERATION_ACTOR_UNRESOLVED'
+      ].includes(code) ? code : '';
+    }
+
+    markPendingRecoveryBlock(error, context = {}) {
+      const code = this.pendingRecoveryErrorCode(error);
+      if (!code) return false;
+      if (!this.pendingRecoveryBlock) {
+        this.pendingRecoveryBlock = {
+          state: 'PENDING_OPERATION_BLOCKED',
+          code,
+          operationName: String(context.operationName || error?.rpcName || ''),
+          saveOrigin: String(context.saveOrigin || error?.saveOrigin || ''),
+          detectedAt: new Date().toISOString()
+        };
+      }
+      return true;
+    }
+
+    isPendingRecoveryBlocked() {
+      return !!this.pendingRecoveryBlock;
+    }
+
+    pendingRecoveryStatusText() {
+      return '偵測到無法安全辨識的待對帳操作；原始證據與本機草稿均已保留，已停止背景自動保存。請由管理員人工檢查後重新載入。';
+    }
+
+    publishPendingRecoveryStatus() {
+      if (!this.isPendingRecoveryBlocked()) return false;
+      this.setStatus(this.pendingRecoveryStatusText(), 'error', { preferOverRecovery: true });
+      return true;
+    }
+
+    pendingRecoveryBlockedResult() {
+      this.publishPendingRecoveryStatus();
+      return {
+        mode: 'v7', localOnly: true, recoveryBlocked: true,
+        state: 'PENDING_OPERATION_BLOCKED',
+        code: this.pendingRecoveryBlock && this.pendingRecoveryBlock.code
+      };
+    }
+
+    markWriteFailureBlock(info = {}) {
+      const result = info.result || {};
+      const code = String(result.error || '');
+      if (!['LEASE_LOST', 'AUTHORITY_CHANGED'].includes(code)) return false;
+      const block = {
+        state: code === 'LEASE_LOST' ? 'LEASE_LOST_BLOCKED' : 'AUTHORITY_CHANGED_BLOCKED',
+        code,
+        entityType: String(info.entityType || ''),
+        entityId: String(info.entityId || ''),
+        draft: clone(info.draft || {}),
+        result: clone(result),
+        detectedAt: new Date().toISOString()
+      };
+      if (code === 'AUTHORITY_CHANGED') this.authorityWriteBlock = block;
+      else if (block.entityType && block.entityId) {
+        this.writeFailureBlocks.set(this.revisionConflictKey(block.entityType, block.entityId), block);
+      }
+      return true;
+    }
+
+    isWriteFailureBlocked(entityType, entityId) {
+      if (this.authorityWriteBlock) return true;
+      if (entityType && entityId) {
+        return this.writeFailureBlocks.has(this.revisionConflictKey(entityType, entityId));
+      }
+      return this.writeFailureBlocks.size > 0;
+    }
+
+    writeFailureBlockFor(entityType, entityId) {
+      if (this.authorityWriteBlock) return this.authorityWriteBlock;
+      if (entityType && entityId) {
+        return this.writeFailureBlocks.get(this.revisionConflictKey(entityType, entityId)) || null;
+      }
+      return this.writeFailureBlocks.values().next().value || null;
+    }
+
+    writeFailureStatusText(block = this.authorityWriteBlock) {
+      if (block && block.code === 'AUTHORITY_CHANGED') {
+        return '雲端 authority 已變更；已停止保存且不會降級舊版，本機草稿仍完整保留。請重新載入以完成安全驗證。';
+      }
+      return '編輯權已失效；本機草稿已保留為唯讀，已停止此項目的背景保存。請重新取得編輯權後再人工保存。';
+    }
+
+    publishWriteFailureStatus(info = {}) {
+      const block = this.writeFailureBlockFor(info.entityType, info.entityId);
+      if (!block) return false;
+      this.setStatus(this.writeFailureStatusText(block), 'error', { preferOverRecovery: true });
+      return true;
+    }
+
+    writeFailureBlockedResult(entityType, entityId) {
+      const block = this.writeFailureBlockFor(entityType, entityId);
+      if (!block) return null;
+      this.publishWriteFailureStatus({ entityType, entityId });
+      return {
+        mode: 'v7', localOnly: true, writeBlocked: true,
+        state: block.state, code: block.code,
+        entityType: block.entityType, entityId: block.entityId
+      };
     }
 
     revisionConflictKey(entityType, entityId) {
@@ -545,8 +670,8 @@
           : `save_module:${changed[0] && changed[0]._v7Id}`;
         let cloudConfirmed = false;
         try {
-          if (!isBatch) await this.client.saveModule(changed[0]);
-          else await this.client.saveModuleBatch(changed);
+          if (!isBatch) await this.client.saveModule(changed[0], options);
+          else await this.client.saveModuleBatch(changed, options);
           this.assertOperationContext(operationContext, 'save_changed_modules');
           cloudConfirmed = true;
           submitted.forEach(({ item, payload }) => this.syncModuleBaseline(item, payload));
@@ -634,11 +759,19 @@
 
     async persistReportData(items, options = {}) {
       if (!this.isActive()) return { mode: 'legacy' };
+      if (this.isPendingRecoveryBlocked()) return this.pendingRecoveryBlockedResult();
+      if (this.authorityWriteBlock) return this.writeFailureBlockedResult('', '');
       if (!this.isWriteReady()) {
         this.setStatus('本機草稿已保存；請登入後再提交逐項變更。', 'warn');
         return { mode: 'v7', localOnly: true };
       }
       const liveItems = Array.isArray(items) ? items : [];
+      const writeBlockedModule = liveItems.find((item) => (
+        item && item._v7Id && this.isWriteFailureBlocked('module', item._v7Id)
+      ));
+      if (writeBlockedModule) {
+        return this.writeFailureBlockedResult('module', writeBlockedModule._v7Id);
+      }
       if (this.client.snapshot?.legacyLocalRecovery && options.confirmLegacyRecovery !== true) {
         const baseline = this.baselineModuleMap();
         for (const item of liveItems) {
@@ -758,13 +891,18 @@
         this.decorateEditorRows();
         this.scheduleInactiveCleanModuleReleases();
         return { mode: 'v7', saved: true, watermark: this.client.watermark };
-      });
+      }, 'persist-report-data', options);
     }
 
     async persistReportMeta(meta, options = {}) {
       if (!this.isActive()) return { mode: 'legacy' };
+      if (this.isPendingRecoveryBlocked()) return this.pendingRecoveryBlockedResult();
+      if (this.authorityWriteBlock) return this.writeFailureBlockedResult('', '');
       if (!this.isWriteReady()) return { mode: 'v7', localOnly: true };
       const report = this.currentReport();
+      if (report && this.isWriteFailureBlocked('report_meta', report.id)) {
+        return this.writeFailureBlockedResult('report_meta', report.id);
+      }
       const nextMeta = {
         title: String(meta && meta.title || report && report.title || ''),
         date: String(meta && meta.date || report && report.date || ''),
@@ -804,13 +942,13 @@
         try {
           let result;
           try {
-            result = await this.client.saveReportMeta(nextMeta);
+            result = await this.client.saveReportMeta(nextMeta, options);
           } catch (error) {
             if (error && error.code === 'REVISION_CONFLICT'
               && options.resolveRevisionConflict === true) {
               await this.rebaseReportMetaForConfirmedRetry(nextMeta, error, operationContext);
               this.assertOperationContext(operationContext, 'persist_report_meta');
-              result = await this.client.saveReportMeta(nextMeta);
+              result = await this.client.saveReportMeta(nextMeta, options);
             } else {
               throw error;
             }
@@ -849,7 +987,7 @@
             }
           }
         }
-      }, 'persist-report-meta');
+      }, 'persist-report-meta', options);
     }
 
     recordGroupsFromSnapshot() {
@@ -875,6 +1013,8 @@
 
     async persistRecords(records) {
       if (!this.isActive()) return { mode: 'legacy' };
+      if (this.isPendingRecoveryBlocked()) return this.pendingRecoveryBlockedResult();
+      if (this.authorityWriteBlock) return this.writeFailureBlockedResult('', '');
       if (!this.isWriteReady()) {
         this.setStatus('資料記錄只保存為本機草稿；請先登入。', 'warn');
         return { mode: 'v7', localOnly: true };
@@ -934,6 +1074,7 @@
       if (this.client.getLease('module', entityId)) return this.client.getLease('module', entityId);
       if (this.claimPromises.has(key)) return this.claimPromises.get(key);
       const request = this.client.claimLease('module', entityId).then((lease) => {
+        this.writeFailureBlocks.delete(this.revisionConflictKey('module', entityId));
         this.decorateLease(lease);
         return lease;
       }).finally(() => this.claimPromises.delete(key));
@@ -1216,7 +1357,9 @@
     async updateUser(id, profile) { return this.client.updateUser(id, profile); }
     async deleteUser(id) { return this.client.deleteUser(id); }
     async updateSitePassword(password) { return this.client.updateSitePassword(password); }
-    async createReportSnapshot(kind) { return this.client.createReportSnapshot(kind); }
+    async createReportSnapshot(kind, options = {}) {
+      return this.client.createReportSnapshot(kind, options);
+    }
 
     setStatus(text, kind, options) {
       if (typeof this.host.setStatus === 'function') this.host.setStatus(text, kind, options);
@@ -1230,6 +1373,10 @@
       if (typeof this.host.onTransportError === 'function') this.host.onTransportError(error);
       else if (root.console) root.console.error(error);
       if (this.client && this.client.sessionErrorCode(error)) return;
+      if (this.markPendingRecoveryBlock(error)) {
+        this.publishPendingRecoveryStatus();
+        return;
+      }
       const code = String(error && error.code || '');
       const message = String(error && error.message || error || '');
       const responseUnavailable = code === 'RPC_TIMEOUT'

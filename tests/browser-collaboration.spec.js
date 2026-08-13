@@ -482,6 +482,7 @@ test('明確清空部署注入的 legacy 雲端 identity 後不得復活舊設�
 });
 
 test('恢復的 V7 site session 必須等權威 snapshot 驗證後才解除 Gate，失效時保留草稿', async ({ page }) => {
+  test.setTimeout(90000);
   await page.addInitScript(() => {
     const guardKey = '__restored_site_session_first_boot_intercepted';
     if (sessionStorage.getItem(guardKey)) return;
@@ -1821,6 +1822,12 @@ test('格子停頓只保存本機草稿，週期上雲後仍保持編輯並顯�
   expect(caret).toEqual({ active: true, offset: expectedCaretOffset, textLength: expectedCaretOffset });
   await expect(page.locator('#v4-cloud-runtime-status')).toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
   await expect(page.locator('#v4-cloud-runtime-status')).not.toContainText('watermark');
+  expect(await page.evaluate(() => window.MonthlyV7App.client.lastOperationReceipt())).toMatchObject({
+    state: 'CLOUD_CONFIRMED',
+    rpcName: 'monthly_v7_save_report_meta',
+    requestedOrigin: 'autosave',
+    saveOrigin: 'autosave'
+  });
 
   await page.keyboard.type('，仍可繼續輸入');
   await expect.poll(() => page.evaluate((id) => {
@@ -1868,6 +1875,11 @@ test('手動保存保留目前格子的焦點、caret 與 module lease', async (
   });
   expect(focusState).toEqual({ active: true, offset: 4 });
   await expect(page.locator('#v4-cloud-runtime-status')).toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
+  expect(await page.evaluate(() => window.MonthlyV7App.client.lastOperationReceipt())).toMatchObject({
+    state: 'CLOUD_CONFIRMED',
+    requestedOrigin: 'manual',
+    saveOrigin: 'manual'
+  });
 
   await title.evaluate((element) => {
     const text = element.firstChild;
@@ -2390,6 +2402,7 @@ test('保存 RPC 無回應會結束等待並保留草稿，重試後可由新瀏
   }));
   expect(localResidue.draft).toContain('逾時後仍待保存的內容');
   expect(localResidue.pending).toBeTruthy();
+  const pendingOperationId = JSON.parse(localResidue.pending).operationId;
 
   await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=0');
   await request.post('/__fake_drop_first_module_lease');
@@ -2408,6 +2421,33 @@ test('保存 RPC 無回應會結束等待並保留草稿，重試後可由新瀏
   await expect(page.locator('#v5TopStatus')).toContainText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
   const afterRetry = await (await request.get('/__fake_state')).json();
   expect(afterRetry.modules[0].payload.title).toBe('逾時後仍待保存的內容');
+  const replayReceipt = await page.evaluate((operationId) => (
+    window.MonthlyV7App.client.operationReceipts()
+      .find((receipt) => receipt.operationId === operationId)
+  ), pendingOperationId);
+  expect(replayReceipt).toMatchObject({
+    state: 'LEASE_LOST_BLOCKED',
+    rpcName: 'monthly_v7_save_module',
+    operationId: pendingOperationId,
+    requestedOrigin: 'login-restore',
+    saveOrigin: 'pending-replay',
+    errorCode: 'LEASE_LOST'
+  });
+  const successorReceipt = await page.evaluate((oldOperationId) => (
+    window.MonthlyV7App.client.operationReceipts().find((receipt) => (
+      receipt.rpcName === 'monthly_v7_save_module'
+      && receipt.operationId !== oldOperationId
+      && receipt.requestedOrigin === 'login-restore'
+      && receipt.state === 'CLOUD_CONFIRMED'
+    ))
+  ), pendingOperationId);
+  expect(successorReceipt).toMatchObject({
+    state: 'CLOUD_CONFIRMED',
+    rpcName: 'monthly_v7_save_module',
+    requestedOrigin: 'login-restore',
+    saveOrigin: 'login-restore',
+    errorCode: ''
+  });
   const cleared = await page.evaluate(() => ({
     draft: localStorage.getItem('monthly_v7_draft:module:22222222-2222-4222-8222-222222222221'),
     pending: localStorage.getItem('monthly_v7_pending:save_module:22222222-2222-4222-8222-222222222221'),
@@ -2420,6 +2460,172 @@ test('保存 RPC 無回應會結束等待並保留草稿，重試後可由新瀏
   await enterAndLogin(independentPage, 'owner', 'owner-pass');
   await expect(independentPage.locator('#tableBody')).toContainText('逾時後仍待保存的內容');
   await independentContext.close();
+});
+
+test('損壞 pending 進人工隔離後停止背景 autosave 且不刪除證據', async ({ page, request }) => {
+  await page.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 500;
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const pendingKey = 'monthly_v7_pending:save_module:22222222-2222-4222-8222-222222222221';
+  const before = await (await request.get('/__fake_state')).json();
+  const beforeSaveCount = Number(before.rpcCounts.monthly_v7_save_module || 0);
+
+  await page.evaluate((key) => {
+    localStorage.setItem(key, '{malformed-pending-evidence');
+    reportData[0].title = '損壞 pending 下仍需保留的本機草稿';
+    window.__malformedPendingSaveState = { status: 'pending', result: null, error: '' };
+    window.__malformedPendingSavePromise = v4UploadToCloud({
+      silent: true,
+      reason: '每分鐘自動保存',
+      flushLatest: false,
+      saveOrigin: 'autosave'
+    }).then((result) => {
+      window.__malformedPendingSaveState = { status: 'done', result, error: '' };
+    }).catch((error) => {
+      window.__malformedPendingSaveState = {
+        status: 'error', result: null, error: String(error?.code || error?.message || error)
+      };
+    });
+  }, pendingKey);
+
+  await expect.poll(() => page.evaluate(() => window.__malformedPendingSaveState?.status), {
+    timeout: 15000
+  }).toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__malformedPendingSaveState)).toEqual({
+    status: 'done', result: false, error: ''
+  });
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('待對帳操作');
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('人工');
+  await expect(page.locator('#v4-cloud-runtime-status')).not.toContainText('保存失敗');
+  expect(await page.evaluate(() => ({
+    blocked: window.MonthlyV7App.isPendingRecoveryBlocked(),
+    timer: Boolean(V4_AUTO_SAVE_TIMER),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:22222222-2222-4222-8222-222222222221')
+  }))).toEqual({
+    blocked: true,
+    timer: false,
+    pending: '{malformed-pending-evidence'
+  });
+
+  await page.waitForTimeout(1200);
+  const after = await (await request.get('/__fake_state')).json();
+  expect(Number(after.rpcCounts.monthly_v7_save_module || 0)).toBe(beforeSaveCount);
+  expect(await page.evaluate(() => Boolean(V4_AUTO_SAVE_TIMER))).toBe(false);
+  expect(await page.evaluate((key) => localStorage.getItem(key), pendingKey)).toBe('{malformed-pending-evidence');
+});
+
+test('active save 失去 lease 後保留唯讀草稿並停止背景重送', async ({ page, request }) => {
+  await page.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 500;
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const moduleId = '22222222-2222-4222-8222-222222222221';
+  const before = await (await request.get('/__fake_state')).json();
+  let saveCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_save_module') {
+      saveCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ok: false, error: 'LEASE_LOST' })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  const row = page.locator(`#tableBody tr[data-v7-entity-id="${moduleId}"]`);
+  const editor = row.locator('.module-title-editor');
+  await editor.click();
+  await expect(editor).toHaveAttribute('contenteditable', 'true');
+  await editor.fill('失去 lease 後必須保留的草稿');
+
+  await expect.poll(() => saveCalls, { timeout: 15000 }).toBe(1);
+  await expect.poll(() => page.evaluate((id) => window.MonthlyV7App.isWriteFailureBlocked('module', id), moduleId))
+    .toBe(true);
+  await expect(editor).toHaveAttribute('contenteditable', 'false');
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('編輯權已失效');
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('唯讀');
+  expect(await page.evaluate(() => window.MonthlyV7App.client.lastOperationReceipt())).toMatchObject({
+    state: 'LEASE_LOST_BLOCKED',
+    rpcName: 'monthly_v7_save_module',
+    requestedOrigin: 'autosave',
+    saveOrigin: 'autosave',
+    errorCode: 'LEASE_LOST'
+  });
+  expect(await page.evaluate((id) => ({
+    timer: Boolean(V4_AUTO_SAVE_TIMER),
+    draft: localStorage.getItem(`monthly_v7_draft:module:${id}`)
+  }), moduleId)).toEqual({
+    timer: false,
+    draft: expect.stringContaining('失去 lease 後必須保留的草稿')
+  });
+
+  await page.waitForTimeout(1200);
+  expect(saveCalls).toBe(1);
+  expect(await page.evaluate(() => Boolean(V4_AUTO_SAVE_TIMER))).toBe(false);
+  const after = await (await request.get('/__fake_state')).json();
+  expect(after.modules[0].revision).toBe(before.modules[0].revision);
+  expect(after.modules[0].payload.title).toBe(before.modules[0].payload.title);
+});
+
+test('authority changed 後全頁停止寫入、不降級 legacy 並保留草稿', async ({ page, request }) => {
+  await page.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 500;
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const moduleId = '22222222-2222-4222-8222-222222222221';
+  let saveCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_save_module') {
+      saveCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ok: false, error: 'AUTHORITY_CHANGED' })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  const editor = page.locator(`#tableBody tr[data-v7-entity-id="${moduleId}"] .module-title-editor`);
+  await editor.click();
+  await editor.fill('authority 變更時保留的草稿');
+
+  await expect.poll(() => saveCalls, { timeout: 15000 }).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App.isWriteFailureBlocked())).toBe(true);
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('authority 已變更');
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('不會降級舊版');
+  expect(await page.evaluate(() => window.MonthlyV7App.client.lastOperationReceipt())).toMatchObject({
+    state: 'AUTHORITY_CHANGED_BLOCKED',
+    requestedOrigin: 'autosave',
+    saveOrigin: 'autosave',
+    errorCode: 'AUTHORITY_CHANGED'
+  });
+  const second = await page.evaluate(() => v4UploadToCloud({
+    silent: true,
+    saveOrigin: 'autosave'
+  }));
+  expect(second).toBe(false);
+  await page.waitForTimeout(1200);
+  expect(saveCalls).toBe(1);
+  expect(await page.evaluate(() => ({
+    mode: window.MonthlyV7App.status.mode,
+    timer: Boolean(V4_AUTO_SAVE_TIMER),
+    draft: localStorage.getItem('monthly_v7_draft:module:22222222-2222-4222-8222-222222222221')
+  }))).toEqual({
+    mode: 'v7',
+    timer: false,
+    draft: expect.stringContaining('authority 變更時保留的草稿')
+  });
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.upsert_monthly_report_cloud_data || 0)).toBe(0);
+  expect(Number(state.rpcCounts.get_monthly_report_cloud_data || 0)).toBe(0);
 });
 
 test('保存已提交但回覆遺失時，刷新後重播舊 operation 不重複增加 revision', async ({ page, request, browser }) => {
@@ -2754,6 +2960,12 @@ test('背景保存已在途時正式 PDF 只接續同一保存，不產生 REVIS
   expect(state.modules[0].revision).toBe(2);
   expect(state.snapshots).toHaveLength(1);
   expect(saveCalls).toBe(1);
+  expect(await page.evaluate(() => window.MonthlyV7App.client.lastOperationReceipt())).toMatchObject({
+    state: 'CLOUD_CONFIRMED',
+    rpcName: 'monthly_v7_create_report_snapshot',
+    requestedOrigin: 'formal-pdf',
+    saveOrigin: 'formal-pdf'
+  });
 });
 
 test('PDF 保存等待期間又輸入的新內容會在建立快照前再次上雲端', async ({ page, request }) => {

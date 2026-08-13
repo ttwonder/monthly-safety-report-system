@@ -2266,9 +2266,9 @@
     </div>
 
     <script src="./vendor/supabase-2.112.2.js"></script>
-    <script src="./monthly-collaboration-core.js?v=7.0.15"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.15"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.15"></script>
+    <script src="./monthly-collaboration-core.js?v=7.0.16"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.16"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.16"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont(options = {}) {
@@ -2504,14 +2504,17 @@
                     }
                     if (window.MonthlyV7App?.isActive?.() && !V4_CLOUD_APPLYING && options.deferCloud !== true) {
                         try {
+                            const saveOrigin = String(options.saveOrigin || 'manual');
                             const cloud = await window.MonthlyV7App.persistReportData(reportData, {
-                                resolveRevisionConflict: options.resolveRevisionConflict === true
+                                resolveRevisionConflict: options.resolveRevisionConflict === true,
+                                saveOrigin
                             });
                             let meta = null;
                             let cloudSaved = false;
                             if (cloud?.saved === true) {
                                 meta = await window.MonthlyV7App.flush(v7CurrentReportMeta(), {
-                                    resolveRevisionConflict: options.resolveRevisionConflict === true
+                                    resolveRevisionConflict: options.resolveRevisionConflict === true,
+                                    saveOrigin
                                 });
                                 if (meta?.conflictBlocked !== true && meta?.localOnly !== true) {
                                     v7AcknowledgeCloudSave(cloudTargetGeneration);
@@ -4865,7 +4868,7 @@
         async function v7CreateFreshFormalSnapshot(kind, floor) {
             let formal = null;
             for (let attempt = 0; attempt < 2; attempt += 1) {
-                formal = await window.MonthlyV7App.createReportSnapshot(kind);
+                formal = await window.MonthlyV7App.createReportSnapshot(kind, { saveOrigin: 'formal-pdf' });
                 if (v7FormalSnapshotCoversFloor(formal, floor)) {
                     V7_CRITICAL_STATUS_UNTIL = 0;
                     return formal;
@@ -5154,14 +5157,20 @@
             if (!app?.isActive?.() || !v5CurrentUser()) return null;
             for (let attempt = 0; attempt < 3; attempt += 1) {
                 const intentSignature = v7FormalSnapshotIntentSignature();
-                const saved = await saveToDB(reportData, Date.now(), { resolveRevisionConflict: true });
+                const saved = await saveToDB(reportData, Date.now(), {
+                    resolveRevisionConflict: true,
+                    saveOrigin: 'formal-pdf'
+                });
                 if (saved?.error) throw saved.error;
                 if (saved?.cloudSaved !== true) {
                     const error = new Error('CLOUD_SAVE_NOT_CONFIRMED');
                     error.code = 'CLOUD_SAVE_NOT_CONFIRMED';
                     throw error;
                 }
-                const meta = await app.flush(v7CurrentReportMeta(), { resolveRevisionConflict: true });
+                const meta = await app.flush(v7CurrentReportMeta(), {
+                    resolveRevisionConflict: true,
+                    saveOrigin: 'formal-pdf'
+                });
                 if (meta?.conflictBlocked === true || meta?.localOnly === true) {
                     const error = new Error('CLOUD_SAVE_NOT_CONFIRMED');
                     error.code = 'CLOUD_SAVE_NOT_CONFIRMED';
@@ -6161,22 +6170,66 @@
             return true;
         }
 
+        function v7IsPendingRecoveryBlocked() {
+            return window.MonthlyV7App?.isPendingRecoveryBlocked?.() === true;
+        }
+
+        function v7PublishPendingRecoveryBlocked() {
+            if (!v7IsPendingRecoveryBlocked()) return false;
+            v7ClearCloudAutoSaveTimer();
+            if (window.MonthlyV7App?.publishPendingRecoveryStatus?.()) return true;
+            v4SetCloudRuntimeStatus(
+                '偵測到無法安全辨識的待對帳操作；原始證據與本機草稿均已保留，已停止背景自動保存。請由管理員人工檢查後重新載入。',
+                'error',
+                { preferOverRecovery: true }
+            );
+            return true;
+        }
+
+        function v7IsWriteFailureBlocked() {
+            return window.MonthlyV7App?.isWriteFailureBlocked?.() === true;
+        }
+
+        function v7PublishWriteFailureBlocked() {
+            if (!v7IsWriteFailureBlocked()) return false;
+            v7ClearCloudAutoSaveTimer();
+            if (window.MonthlyV7App?.publishWriteFailureStatus?.({})) return true;
+            v4SetCloudRuntimeStatus(
+                '雲端保存上下文已失效；本機草稿已保留為唯讀，已停止背景自動保存。',
+                'error',
+                { preferOverRecovery: true }
+            );
+            return true;
+        }
+
         function v7ClearCloudAutoSaveTimer() {
             clearTimeout(V4_AUTO_SAVE_TIMER);
             V4_AUTO_SAVE_TIMER = null;
         }
 
-        function v7ScheduleCloudAutoSave(delayMs = v7CloudAutoSaveIntervalMs()) {
+        function v7ScheduleCloudAutoSave(delayMs = v7CloudAutoSaveIntervalMs(), saveOrigin = 'autosave') {
             if (V4_CLOUD_APPLYING || V4_AUTO_SAVE_TIMER || !v7HasUnsyncedCloudChanges()) return;
             if (!window.MonthlyV7App?.isActive?.() || !window.MonthlyV7App?.isWriteReady?.()) return;
             if (window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery) return;
+            if (v7PublishPendingRecoveryBlocked()) return;
+            if (v7PublishWriteFailureBlocked()) return;
             if (v7PublishRevisionConflictBlocked()) return;
             V4_AUTO_SAVE_TIMER = setTimeout(async () => {
                 V4_AUTO_SAVE_TIMER = null;
                 if (!v7HasUnsyncedCloudChanges() || !window.MonthlyV7App?.isWriteReady?.()) return;
+                if (v7PublishPendingRecoveryBlocked()) return;
+                if (v7PublishWriteFailureBlocked()) return;
                 if (v7PublishRevisionConflictBlocked()) return;
-                await v4UploadToCloud({ silent: true, reason: '每分鐘自動保存', flushLatest: false });
-                if (v7HasUnsyncedCloudChanges() && !v7IsRevisionConflictBlocked()) v7ScheduleCloudAutoSave();
+                await v4UploadToCloud({
+                    silent: true,
+                    reason: '每分鐘自動保存',
+                    flushLatest: false,
+                    saveOrigin
+                });
+                if (v7HasUnsyncedCloudChanges()
+                    && !v7IsRevisionConflictBlocked()
+                    && !v7IsPendingRecoveryBlocked()
+                    && !v7IsWriteFailureBlocked()) v7ScheduleCloudAutoSave();
             }, Math.max(250, Number(delayMs) || v7CloudAutoSaveIntervalMs()));
         }
 
@@ -6188,6 +6241,8 @@
                 v4SetCloudRuntimeStatus(v7LegacyRecoveryStatusText(), 'warn');
                 return V7_CLOUD_DIRTY_GENERATION;
             }
+            if (v7PublishPendingRecoveryBlocked()) return V7_CLOUD_DIRTY_GENERATION;
+            if (v7PublishWriteFailureBlocked()) return V7_CLOUD_DIRTY_GENERATION;
             if (v7PublishRevisionConflictBlocked()) return V7_CLOUD_DIRTY_GENERATION;
             if (!v5CurrentUser()) {
                 v4SetCloudRuntimeStatus(`${reason}已保存為本機草稿；請登入後提交。`, 'warn');
@@ -6519,6 +6574,7 @@
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!v5RequireLogin('請先登入後再保存修改。')) return false;
                 const flushLatest = options.flushLatest === true;
+                const saveOrigin = String(options.saveOrigin || (silent ? 'autosave' : 'manual'));
                 if (V7_CLOUD_SAVE_PROMISE) {
                     const inFlightResult = await V7_CLOUD_SAVE_PROMISE;
                     if (inFlightResult && flushLatest && options.followUp !== false && v7HasUnsyncedCloudChanges()) {
@@ -6533,21 +6589,40 @@
                         v4SetCloudRuntimeStatus('正在保存到雲端...', 'muted', { allowPendingFailureOverride: true });
                         const cloud = await window.MonthlyV7App.persistReportData(reportData, {
                             resolveRevisionConflict: !silent,
-                            confirmLegacyRecovery: !silent
+                            confirmLegacyRecovery: !silent,
+                            saveOrigin
                         });
                         if (cloud?.conflictBlocked === true) {
                             v7PublishRevisionConflictBlocked();
                             return false;
                         }
-                        if (cloud?.recoveryPending === true || cloud?.localOnly === true) {
-                            v4SetCloudRuntimeStatus('切換前救援內容仍只保存在本機；禁止背景上傳，請人工確認後按「保存修改」。', 'warn');
+                        if (cloud?.writeBlocked === true || v7IsWriteFailureBlocked()) {
+                            v7PublishWriteFailureBlocked();
+                            return false;
+                        }
+                        if (cloud?.recoveryPending === true || cloud?.recoveryBlocked === true) {
+                            if (cloud?.recoveryBlocked === true) v7PublishPendingRecoveryBlocked();
+                            else v4SetCloudRuntimeStatus('切換前救援內容仍只保存在本機；禁止背景上傳，請人工確認後按「保存修改」。', 'warn');
+                            return false;
+                        }
+                        if (cloud?.localOnly === true) {
+                            v4SetCloudRuntimeStatus('本機草稿已保留；目前雲端寫入尚未就緒。', 'warn');
                             return false;
                         }
                         const meta = await window.MonthlyV7App.flush(v7CurrentReportMeta(), {
-                            resolveRevisionConflict: !silent
+                            resolveRevisionConflict: !silent,
+                            saveOrigin
                         });
-                        if (meta?.conflictBlocked === true || meta?.localOnly === true) {
+                        if (meta?.conflictBlocked === true) {
                             v7PublishRevisionConflictBlocked();
+                            return false;
+                        }
+                        if (meta?.writeBlocked === true || v7IsWriteFailureBlocked()) {
+                            v7PublishWriteFailureBlocked();
+                            return false;
+                        }
+                        if (meta?.localOnly === true) {
+                            v4SetCloudRuntimeStatus('月報資訊只保存在本機；目前雲端寫入尚未就緒。', 'warn');
                             return false;
                         }
                         const v7Client = window.MonthlyV7App?.client;
@@ -6583,6 +6658,14 @@
                         renderV4CloudPane();
                         return true;
                     } catch (error) {
+                        if (v7IsPendingRecoveryBlocked()) {
+                            v7PublishPendingRecoveryBlocked();
+                            return false;
+                        }
+                        if (v7IsWriteFailureBlocked()) {
+                            v7PublishWriteFailureBlocked();
+                            return false;
+                        }
                         if (error?.code === 'REVISION_CONFLICT_CANCELLED') {
                             v4SetCloudRuntimeStatus('已取消覆蓋；雲端未變更，本機草稿仍完整保留。', 'warn');
                             if (!silent) showToast('已取消覆蓋；本機草稿仍保留。');
@@ -6626,9 +6709,15 @@
                 } finally {
                     if (V7_CLOUD_SAVE_PROMISE === savePromise) V7_CLOUD_SAVE_PROMISE = null;
                     V4_CLOUD_SAVING = false;
-                    if (v7HasUnsyncedCloudChanges() && !v7IsRevisionConflictBlocked()) v7ScheduleCloudAutoSave();
+                    if (v7HasUnsyncedCloudChanges()
+                        && !v7IsRevisionConflictBlocked()
+                        && !v7IsPendingRecoveryBlocked()
+                        && !v7IsWriteFailureBlocked()) v7ScheduleCloudAutoSave();
                 }
-                if (result && flushLatest && options.followUp !== false && v7HasUnsyncedCloudChanges()) {
+                if (result && flushLatest && options.followUp !== false
+                    && v7HasUnsyncedCloudChanges()
+                    && !v7IsPendingRecoveryBlocked()
+                    && !v7IsWriteFailureBlocked()) {
                     return v4UploadToCloud(Object.assign({}, options, { followUp: false }));
                 }
                 return result;
@@ -7624,7 +7713,12 @@
                     await saveToDB(reportData, null, { deferCloud: true });
                 }
                 v7ClearCloudAutoSaveTimer();
-                const saved = await v4UploadToCloud({ silent: false, reason: '手動保存', flushLatest: true });
+                const saved = await v4UploadToCloud({
+                    silent: false,
+                    reason: '手動保存',
+                    flushLatest: true,
+                    saveOrigin: 'manual'
+                });
                 renderV5SessionBar();
                 return saved;
             } finally {
@@ -8037,7 +8131,9 @@
                 // the editor DOM because visible unsaved input must remain untouched.
                 if (String(event?.reason || '') === 'user-session-validated') {
                     renderTable();
-                    if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
+                    if (v7HasUnsyncedCloudChanges()) {
+                        v7ScheduleCloudAutoSave(v7CloudAutoSaveIntervalMs(), 'login-restore');
+                    }
                 }
                 if (['site-session-validated', 'user-session-validated'].includes(String(event?.reason || ''))) {
                     siteAccessRenderGate();

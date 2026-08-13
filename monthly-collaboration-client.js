@@ -38,6 +38,45 @@
       this.userSessionPendingValidation = false;
       this.loginAttemptEpoch = 0;
       this.snapshotCommitQueue = Promise.resolve();
+      this.operationReceipt = null;
+      this.operationReceiptHistory = [];
+    }
+
+    lastOperationReceipt() {
+      return this.operationReceipt ? Object.assign({}, this.operationReceipt) : null;
+    }
+
+    operationReceipts() {
+      return this.operationReceiptHistory.map((receipt) => Object.assign({}, receipt));
+    }
+
+    setOperationReceipt(receipt) {
+      this.operationReceipt = Object.assign({}, receipt || {});
+      const operationId = String(this.operationReceipt.operationId || '');
+      const existingIndex = this.operationReceiptHistory.findIndex((entry) => (
+        String(entry.operationId || '') === operationId
+      ));
+      if (existingIndex >= 0) this.operationReceiptHistory.splice(existingIndex, 1);
+      this.operationReceiptHistory.push(Object.assign({}, this.operationReceipt));
+      if (this.operationReceiptHistory.length > 32) {
+        this.operationReceiptHistory.splice(0, this.operationReceiptHistory.length - 32);
+      }
+      return this.operationReceipt;
+    }
+
+    operationFailureState(code, options = {}) {
+      const errorCode = String(code || '');
+      if (options.resultUnknown === true) return 'RESULT_UNKNOWN_PENDING_RECONCILIATION';
+      if (this.sessionErrorCode(options.error || errorCode)) return 'SESSION_INVALID_LOCAL_ONLY';
+      if (errorCode === 'REVISION_CONFLICT') return 'REVISION_CONFLICT_BLOCKED';
+      if (errorCode === 'LEASE_LOST') return 'LEASE_LOST_BLOCKED';
+      if (errorCode === 'AUTHORITY_CHANGED') return 'AUTHORITY_CHANGED_BLOCKED';
+      if ([
+        'PENDING_OPERATION_UNRESOLVED',
+        'PENDING_OPERATION_ACTOR_MISMATCH',
+        'PENDING_OPERATION_ACTOR_UNRESOLVED'
+      ].includes(errorCode)) return 'PENDING_OPERATION_BLOCKED';
+      return 'LOCAL_DIRTY';
     }
 
     sessionErrorCode(value) {
@@ -1299,7 +1338,7 @@
       return supersedesOperation;
     }
 
-    async reconcileSupersededPending(rpcName, pendingKey, targets) {
+    async reconcileSupersededPending(rpcName, pendingKey, targets, options = {}) {
       if (!this.draftStorage || !Array.isArray(targets) || !targets.length) return null;
       const pendingRaw = this.draftStorage.getItem(`monthly_v7_pending:${pendingKey}`);
       if (pendingRaw === null) return null;
@@ -1347,12 +1386,12 @@
         if (key === 'p_client_session_id') previousParams[key] = this.clientSessionId;
       }
       return {
-        result: await this.executeOperation(rpcName, previousParams, pendingKey),
+        result: await this.executeOperation(rpcName, previousParams, pendingKey, options),
         previousParams
       };
     }
 
-    async replayPendingBeforeLease(rpcName, pendingKey, desiredParams) {
+    async replayPendingBeforeLease(rpcName, pendingKey, desiredParams, options = {}) {
       if (!this.draftStorage) return null;
       const storageKey = `monthly_v7_pending:${pendingKey}`;
       const pendingRaw = this.draftStorage.getItem(storageKey);
@@ -1384,12 +1423,13 @@
         if (Object.prototype.hasOwnProperty.call(desiredParams, key)) previousParams[key] = desiredParams[key];
         else delete previousParams[key];
       }
-      return this.executeOperation(rpcName, previousParams, pendingKey);
+      return this.executeOperation(rpcName, previousParams, pendingKey, options);
     }
 
-    async executeOperation(rpcName, params, pendingKey) {
+    async executeOperation(rpcName, params, pendingKey, options = {}) {
       const storageKey = `monthly_v7_pending:${pendingKey}`;
       const signature = JSON.stringify(params);
+      const requestedOrigin = String(options.saveOrigin || 'unspecified');
       let pending = null;
       if (this.draftStorage) {
         const pendingRaw = this.draftStorage.getItem(storageKey);
@@ -1420,6 +1460,13 @@
         throw error;
       }
       const operationId = pending && pending.operationId ? pending.operationId : this.operationIdFactory();
+      const startedAt = new Date().toISOString();
+      this.setOperationReceipt({
+        state: 'SAVING', rpcName: String(rpcName || ''), pendingKey: String(pendingKey || ''),
+        operationId: String(operationId || ''), requestedOrigin,
+        saveOrigin: pending ? 'pending-replay' : requestedOrigin,
+        attempt: 0, errorCode: '', startedAt, updatedAt: startedAt
+      });
       const storedEnvelope = { operationId, signature: operationSignature, createdAt: new Date().toISOString() };
       if (pending && pending.actorUserId) storedEnvelope.actorUserId = pending.actorUserId;
       else if (!pending && currentActorId) storedEnvelope.actorUserId = currentActorId;
@@ -1427,20 +1474,40 @@
       const request = Object.assign({}, operationParams, { p_operation_id: operationId });
       let lastError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
+        this.setOperationReceipt(Object.assign({}, this.operationReceipt, {
+          state: 'SAVING', attempt: attempt + 1, errorCode: '', updatedAt: new Date().toISOString()
+        }));
         try {
           const result = await this.rpc(rpcName, request);
           const preserveMismatch = result && result.ok === false && result.error === 'IDEMPOTENCY_MISMATCH';
           if (this.draftStorage && !preserveMismatch) this.draftStorage.removeItem(storageKey);
+          const resultCode = result && result.ok === false ? String(result.error || '') : '';
+          this.setOperationReceipt(Object.assign({}, this.operationReceipt, {
+            state: result && result.ok === true
+              ? 'CLOUD_CONFIRMED'
+              : this.operationFailureState(resultCode),
+            errorCode: resultCode,
+            updatedAt: new Date().toISOString()
+          }));
           return result;
         } catch (error) {
           lastError = error;
+          const code = String(error && (error.code || error.message) || '');
+          const message = String(error && error.message || error || '');
+          const resultUnknown = code === 'RPC_TIMEOUT'
+            || /failed to fetch|networkerror|network request failed/i.test(message);
+          this.setOperationReceipt(Object.assign({}, this.operationReceipt, {
+            state: this.operationFailureState(code, { error, resultUnknown }),
+            errorCode: code,
+            updatedAt: new Date().toISOString()
+          }));
           if (this.sessionErrorCode(error) || error?.code === 'STALE_SESSION_RESPONSE') throw error;
         }
       }
       throw lastError;
     }
 
-    async saveModule(item) {
+    async saveModule(item, options = {}) {
       this.requireUserSession();
       const operationContext = this.captureSessionContext();
       this.assertSessionContext(operationContext, 'save_module');
@@ -1452,7 +1519,8 @@
       const supersededLease = this.getLease('module', entityId);
       const superseded = await this.reconcileSupersededPending(
         'monthly_v7_save_module', pendingKey,
-        [{ entityType: 'module', entityId, payload: this.modulePayload(item) }]
+        [{ entityType: 'module', entityId, payload: this.modulePayload(item) }],
+        options
       );
       this.assertSessionContext(operationContext, 'save_module');
       if (superseded) {
@@ -1523,7 +1591,9 @@
       };
 
       replayLease = this.getLease('module', entityId);
-      const replayed = await this.replayPendingBeforeLease('monthly_v7_save_module', pendingKey, desiredParams);
+      const replayed = await this.replayPendingBeforeLease(
+        'monthly_v7_save_module', pendingKey, desiredParams, options
+      );
       this.assertSessionContext(operationContext, 'save_module');
       if (replayed) {
         if (replayed.ok === true) return complete(replayed, false);
@@ -1536,13 +1606,13 @@
       const result = await this.executeOperation('monthly_v7_save_module', Object.assign({}, desiredParams, {
         p_lease_id: operationLease.leaseId,
         p_fencing_token: operationLease.fencingToken
-      }), pendingKey);
+      }), pendingKey, options);
       this.assertSessionContext(operationContext, 'save_module');
       if (!result || result.ok !== true) return fail(result, false);
       return complete(result, false);
     }
 
-    async saveReportMeta(meta) {
+    async saveReportMeta(meta, options = {}) {
       this.requireUserSession();
       const operationContext = this.captureSessionContext();
       this.assertSessionContext(operationContext, 'save_report_meta');
@@ -1562,8 +1632,10 @@
         try {
           return this.commandResult(result, 'SAVE_REPORT_META_FAILED');
         } catch (error) {
-          if (error && error.code === 'REVISION_CONFLICT') {
-            this.forgetCapturedLease(operationLease || replayLease || supersededLease);
+          if (error && ['REVISION_CONFLICT', 'LEASE_LOST', 'AUTHORITY_CHANGED'].includes(error.code)) {
+            if (['REVISION_CONFLICT', 'LEASE_LOST'].includes(error.code)) {
+              this.forgetCapturedLease(operationLease || replayLease || supersededLease);
+            }
             if (typeof this.host.onConflict === 'function') {
               this.host.onConflict({
                 entityType: 'report_meta', entityId: report.id,
@@ -1576,7 +1648,8 @@
       };
       const superseded = await this.reconcileSupersededPending(
         'monthly_v7_save_report_meta', pendingKey,
-        [{ entityType: 'report_meta', entityId: report.id, payload }]
+        [{ entityType: 'report_meta', entityId: report.id, payload }],
+        options
       );
       this.assertSessionContext(operationContext, 'save_report_meta');
       if (superseded) {
@@ -1624,7 +1697,9 @@
         return result;
       };
       replayLease = this.getLease('report_meta', report.id);
-      const replayed = await this.replayPendingBeforeLease('monthly_v7_save_report_meta', pendingKey, desiredParams);
+      const replayed = await this.replayPendingBeforeLease(
+        'monthly_v7_save_report_meta', pendingKey, desiredParams, options
+      );
       this.assertSessionContext(operationContext, 'save_report_meta');
       if (replayed) {
         if (replayed.ok === true) return complete(command(replayed), true);
@@ -1640,7 +1715,7 @@
       const result = command(await this.executeOperation('monthly_v7_save_report_meta', Object.assign({}, desiredParams, {
         p_lease_id: operationLease.leaseId,
         p_fencing_token: operationLease.fencingToken
-      }), pendingKey));
+      }), pendingKey, options));
       this.assertSessionContext(operationContext, 'save_report_meta');
       return complete(result, false);
     }
@@ -1807,7 +1882,7 @@
       return result;
     }
 
-    async saveModuleBatch(items) {
+    async saveModuleBatch(items, options = {}) {
       this.requireUserSession();
       const operationContext = this.captureSessionContext();
       this.assertSessionContext(operationContext, 'save_module_batch');
@@ -1824,7 +1899,8 @@
         'monthly_v7_save_module_batch', pendingKey,
         saveItems.map((item) => ({
           entityType: 'module', entityId: item._v7Id, payload: this.modulePayload(item)
-        }))
+        })),
+        options
       );
       this.assertSessionContext(operationContext, 'save_module_batch');
       if (superseded) {
@@ -1877,7 +1953,9 @@
       let operationLease = null;
       try {
         replayLease = this.getLease('kpi_batch', report.id);
-        const replayed = await this.replayPendingBeforeLease('monthly_v7_save_module_batch', pendingKey, desiredParams);
+        const replayed = await this.replayPendingBeforeLease(
+          'monthly_v7_save_module_batch', pendingKey, desiredParams, options
+        );
         this.assertSessionContext(operationContext, 'save_module_batch');
         if (replayed) {
           if (replayed.ok === true) {
@@ -1895,7 +1973,7 @@
           result = this.commandResult(await this.executeOperation('monthly_v7_save_module_batch', Object.assign({}, desiredParams, {
             p_lease_id: operationLease.leaseId,
             p_fencing_token: operationLease.fencingToken
-          }), pendingKey), 'SAVE_MODULE_BATCH_FAILED');
+          }), pendingKey, options), 'SAVE_MODULE_BATCH_FAILED');
           this.assertSessionContext(operationContext, 'save_module_batch');
         }
       } catch (error) {
@@ -2121,7 +2199,7 @@
       return result;
     }
 
-    async createReportSnapshot(kind = 'pdf') {
+    async createReportSnapshot(kind = 'pdf', options = {}) {
       this.requireUserSession();
       const report = this.currentReport();
       if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
@@ -2131,7 +2209,7 @@
         p_user_session_id: this.userSession.id,
         p_report_id: report.id,
         p_snapshot_kind: kind
-      }, `create_snapshot:${report.id}:${kind}`), 'CREATE_SNAPSHOT_FAILED');
+      }, `create_snapshot:${report.id}:${kind}`, options), 'CREATE_SNAPSHOT_FAILED');
     }
 
     async updateSitePassword(newPassword) {

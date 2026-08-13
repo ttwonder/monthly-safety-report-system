@@ -1265,8 +1265,8 @@ test('metadata 舊保存成功不得刪除同 session 後繼 lease', async () =>
   assert.equal(client.getLease('report_meta', 'r1'), lease2);
 });
 
-test('report metadata 只有 revision conflict 發出版本衝突 callback', async () => {
-  for (const code of ['REVISION_CONFLICT', 'LEASE_LOST']) {
+test('report metadata 對 revision、lease 與 authority failure 發出對應保存阻斷 callback', async () => {
+  for (const code of ['REVISION_CONFLICT', 'LEASE_LOST', 'AUTHORITY_CHANGED']) {
     const conflicts = [];
     const drafts = memoryStorage();
     const client = new MonthlyV7Client({
@@ -1299,11 +1299,12 @@ test('report metadata 只有 revision conflict 發出版本衝突 callback', asy
       () => client.saveReportMeta({ title: '本機新標題', date: '', period: {}, settings: {} }),
       (error) => error.code === code
     );
-    assert.equal(conflicts.length, code === 'REVISION_CONFLICT' ? 1 : 0, code);
+    assert.equal(conflicts.length, 1, code);
+    assert.equal(conflicts[0].entityType, 'report_meta');
+    assert.equal(conflicts[0].entityId, 'r1');
+    assert.equal(conflicts[0].baseRevision, 1);
+    assert.equal(conflicts[0].result.error, code);
     if (code === 'REVISION_CONFLICT') {
-      assert.equal(conflicts[0].entityType, 'report_meta');
-      assert.equal(conflicts[0].entityId, 'r1');
-      assert.equal(conflicts[0].baseRevision, 1);
       assert.equal(conflicts[0].result.currentRevision, 2);
     }
     assert.equal(client.readDraft('report_meta', 'r1').payload.title, '本機新標題');
@@ -3835,4 +3836,343 @@ test('report metadata superseding draft 先對帳 A，再以新 operation 保存
   assert.equal(client.currentReport().revision, 6);
   assert.equal(client.currentReport().title, '新標題 B');
   assert.equal(client.readDraft('report_meta', 'report-1'), null);
+});
+
+test('無法辨識的 pending 一旦被發現就停止背景重送並維持人工處理狀態', async () => {
+  const statuses = [];
+  let saveCalls = 0;
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  app.status = { mode: 'v7' };
+  app.setHost({
+    setStatus(text, kind) { statuses.push({ text, kind }); }
+  });
+  const baseline = { id: 'm1', revision: 1, payload: { title: '雲端原始內容' } };
+  app.client = {
+    snapshot: {
+      report: { id: 'report-1', revision: 1 },
+      modules: [baseline], records: []
+    },
+    isActive: () => true,
+    isWriteReady: () => true,
+    sessionErrorCode: () => '',
+    currentUser: () => ({ id: 'u-current' }),
+    currentReport: () => ({ id: 'report-1', revision: 1 }),
+    modulePayload(item) { return { title: item.title }; },
+    pendingOperationTargets: () => new Set(),
+    hasPendingOperation: (key) => key === 'save_module:m1',
+    readDraft: () => ({
+      entityType: 'module', entityId: 'm1', baseRevision: 1,
+      payload: { title: '待保存本機內容' }
+    }),
+    clearDraft: () => {},
+    async saveModule() {
+      saveCalls += 1;
+      const error = new Error('PENDING_OPERATION_UNRESOLVED');
+      error.code = 'PENDING_OPERATION_UNRESOLVED';
+      throw error;
+    }
+  };
+  const live = [{ _v7Id: 'm1', _v7Revision: 1, title: '待保存本機內容' }];
+
+  await assert.rejects(
+    app.persistReportData(live, { saveOrigin: 'autosave' }),
+    (error) => error.code === 'PENDING_OPERATION_UNRESOLVED'
+  );
+  const blocked = await app.persistReportData(live, { saveOrigin: 'autosave' });
+
+  assert.equal(saveCalls, 1);
+  assert.equal(blocked.recoveryBlocked, true);
+  assert.equal(blocked.state, 'PENDING_OPERATION_BLOCKED');
+  assert.equal(statuses.at(-1).kind, 'error');
+  assert.match(statuses.at(-1).text, /待對帳操作/);
+  assert.match(statuses.at(-1).text, /本機草稿.*保留/);
+  assert.match(statuses.at(-1).text, /停止.*自動保存/);
+});
+
+test('autosave timeout receipt 標示結果未知且不觸發人工 pending blocker', async () => {
+  const drafts = memoryStorage();
+  const operationId = '00000000-0000-4000-8000-000000000921';
+  const client = new MonthlyV7Client({
+    transport: {
+      async rpc() {
+        const error = new Error('RPC_TIMEOUT');
+        error.code = 'RPC_TIMEOUT';
+        error.rpcName = 'monthly_v7_save_module';
+        error.elapsedMs = 2500;
+        throw error;
+      }
+    },
+    sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-current', operationIdFactory: () => operationId
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-current' };
+  client.userSession = { id: 'session-current' };
+  client.user = { id: 'u-current' };
+
+  await assert.rejects(
+    client.executeOperation(
+      'monthly_v7_save_module',
+      { p_workspace_key: 'workspace-test', p_user_session_id: 'session-current', p_payload: { title: 'A' } },
+      'save_module:m1',
+      { saveOrigin: 'autosave' }
+    ),
+    (error) => error.code === 'RPC_TIMEOUT'
+  );
+
+  assert.deepEqual(client.lastOperationReceipt(), {
+    state: 'RESULT_UNKNOWN_PENDING_RECONCILIATION',
+    rpcName: 'monthly_v7_save_module',
+    pendingKey: 'save_module:m1',
+    operationId,
+    requestedOrigin: 'autosave',
+    saveOrigin: 'autosave',
+    attempt: 2,
+    errorCode: 'RPC_TIMEOUT',
+    startedAt: client.lastOperationReceipt().startedAt,
+    updatedAt: client.lastOperationReceipt().updatedAt
+  });
+  assert.ok(Date.parse(client.lastOperationReceipt().startedAt));
+  assert.ok(Date.parse(client.lastOperationReceipt().updatedAt));
+  assert.equal(drafts.getItem('monthly_v7_pending:save_module:m1') !== null, true);
+
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  app.status = { mode: 'v7' };
+  app.client = client;
+  assert.equal(app.isPendingRecoveryBlocked(), false);
+  assert.equal(app.markPendingRecoveryBlock(Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' })), false);
+});
+
+test('既有 pending 以同 operation 對帳成功時 receipt 標示 pending-replay', async () => {
+  const drafts = memoryStorage();
+  const operationId = '00000000-0000-4000-8000-000000000922';
+  const params = {
+    p_workspace_key: 'workspace-test',
+    p_user_session_id: 'session-old',
+    p_payload: { title: 'A' }
+  };
+  drafts.setItem('monthly_v7_pending:save_module:m1', JSON.stringify({
+    operationId,
+    signature: JSON.stringify(params),
+    createdAt: '2026-08-13T00:00:00.000Z',
+    actorUserId: 'u-current'
+  }));
+  const calls = [];
+  const client = new MonthlyV7Client({
+    transport: {
+      async rpc(name, request) {
+        calls.push({ name, request });
+        return { ok: true, operationId, revision: 2, watermark: 3 };
+      }
+    },
+    sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-current',
+    operationIdFactory: () => { throw new Error('replay must not create a new operation'); }
+  });
+  client.status = { mode: 'v7' };
+  client.config = { workspaceKey: 'workspace-test' };
+  client.siteSession = { id: 'site-current' };
+  client.userSession = { id: 'session-old' };
+  client.user = { id: 'u-current' };
+
+  const result = await client.executeOperation(
+    'monthly_v7_save_module', params, 'save_module:m1', { saveOrigin: 'login-restore' }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].request.p_operation_id, operationId);
+  assert.equal(drafts.getItem('monthly_v7_pending:save_module:m1'), null);
+  assert.deepEqual(client.lastOperationReceipt(), {
+    state: 'CLOUD_CONFIRMED',
+    rpcName: 'monthly_v7_save_module',
+    pendingKey: 'save_module:m1',
+    operationId,
+    requestedOrigin: 'login-restore',
+    saveOrigin: 'pending-replay',
+    attempt: 1,
+    errorCode: '',
+    startedAt: client.lastOperationReceipt().startedAt,
+    updatedAt: client.lastOperationReceipt().updatedAt
+  });
+});
+
+test('operation receipt 將 conflict、lease、authority 與 session invalid 分類成明確狀態', async () => {
+  const responseCases = [
+    ['REVISION_CONFLICT', 'REVISION_CONFLICT_BLOCKED'],
+    ['LEASE_LOST', 'LEASE_LOST_BLOCKED'],
+    ['AUTHORITY_CHANGED', 'AUTHORITY_CHANGED_BLOCKED']
+  ];
+  for (const [code, state] of responseCases) {
+    const client = new MonthlyV7Client({
+      transport: { async rpc() { return { ok: false, error: code }; } },
+      sessionStorage: memoryStorage(), draftStorage: memoryStorage(),
+      idFactory: () => 'tab-current',
+      operationIdFactory: () => `00000000-0000-4000-8000-${code.length.toString().padStart(12, '0')}`
+    });
+    client.status = { mode: 'v7' };
+    client.config = { workspaceKey: 'workspace-test' };
+    client.siteSession = { id: 'site-current' };
+    client.userSession = { id: 'session-current' };
+    client.user = { id: 'u-current' };
+
+    const result = await client.executeOperation(
+      'monthly_v7_save_module',
+      { p_workspace_key: 'workspace-test', p_user_session_id: 'session-current', p_payload: { title: code } },
+      `save_module:${code}`,
+      { saveOrigin: 'autosave' }
+    );
+
+    assert.equal(result.error, code);
+    assert.equal(client.lastOperationReceipt().state, state);
+    assert.equal(client.lastOperationReceipt().errorCode, code);
+    assert.equal(client.lastOperationReceipt().saveOrigin, 'autosave');
+  }
+
+  const drafts = memoryStorage();
+  const sessionClient = new MonthlyV7Client({
+    transport: {
+      async rpc() {
+        const error = new Error('USER_SESSION_INVALID');
+        error.code = 'USER_SESSION_INVALID';
+        throw error;
+      }
+    },
+    sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-current',
+    operationIdFactory: () => '00000000-0000-4000-8000-000000000923'
+  });
+  sessionClient.status = { mode: 'v7' };
+  sessionClient.config = { workspaceKey: 'workspace-test' };
+  sessionClient.siteSession = { id: 'site-current' };
+  sessionClient.userSession = { id: 'session-current' };
+  sessionClient.user = { id: 'u-current' };
+
+  await assert.rejects(
+    sessionClient.executeOperation(
+      'monthly_v7_save_module',
+      { p_workspace_key: 'workspace-test', p_user_session_id: 'session-current', p_payload: { title: 'session' } },
+      'save_module:session-invalid',
+      { saveOrigin: 'manual' }
+    ),
+    (error) => sessionClient.sessionErrorCode(error) === 'USER_SESSION_INVALID'
+  );
+  assert.equal(sessionClient.lastOperationReceipt().state, 'SESSION_INVALID_LOCAL_ONLY');
+  assert.equal(sessionClient.lastOperationReceipt().errorCode, 'USER_SESSION_INVALID');
+  assert.equal(sessionClient.currentUser(), null);
+  assert.equal(sessionClient.siteSession.id, 'site-current');
+  assert.ok(drafts.getItem('monthly_v7_pending:save_module:session-invalid'));
+});
+
+test('active save 的 lease 或 authority failure 進 blocked 後背景保存不再 dispatch', async () => {
+  for (const [code, expectedState] of [
+    ['LEASE_LOST', 'LEASE_LOST_BLOCKED'],
+    ['AUTHORITY_CHANGED', 'AUTHORITY_CHANGED_BLOCKED']
+  ]) {
+    const statuses = [];
+    let saveCalls = 0;
+    const app = new MonthlyV7BrowserApp({ transport: {} });
+    app.status = { mode: 'v7' };
+    app.setHost({ setStatus(text, kind) { statuses.push({ text, kind }); } });
+    const baseline = { id: 'm1', revision: 1, payload: { title: '雲端原始內容' } };
+    app.client = {
+      snapshot: { report: { id: 'report-1', revision: 1 }, modules: [baseline], records: [] },
+      isActive: () => true,
+      isWriteReady: () => true,
+      sessionErrorCode: () => '',
+      currentUser: () => ({ id: 'u-current' }),
+      currentReport: () => ({ id: 'report-1', revision: 1 }),
+      modulePayload(item) { return { title: item.title }; },
+      pendingOperationTargets: () => new Set(),
+      hasPendingOperation: () => false,
+      readDraft: () => ({
+        entityType: 'module', entityId: 'm1', baseRevision: 1,
+        payload: { title: '待保存本機內容' }
+      }),
+      clearDraft: () => {},
+      getLease: () => null,
+      async saveModule() { saveCalls += 1; return { ok: true }; }
+    };
+    app.clientHost().onConflict({
+      entityType: 'module', entityId: 'm1',
+      draft: { title: '待保存本機內容' },
+      result: { ok: false, error: code }
+    });
+
+    const result = await app.persistReportData(
+      [{ _v7Id: 'm1', _v7Revision: 1, title: '待保存本機內容' }],
+      { saveOrigin: 'autosave' }
+    );
+
+    assert.equal(saveCalls, 0);
+    assert.equal(result.localOnly, true);
+    assert.equal(result.state, expectedState);
+    assert.equal(app.isWriteFailureBlocked('module', 'm1'), true);
+    assert.equal(statuses.at(-1).kind, 'error');
+    assert.match(statuses.at(-1).text, code === 'LEASE_LOST' ? /編輯權.*失效/ : /authority.*變更/i);
+  }
+});
+
+test('heartbeat lease lost 進唯讀 blocker，使用者重新取得 lease 後才解除', async () => {
+  const statuses = [];
+  const leases = new Map();
+  let claimCalls = 0;
+  const app = new MonthlyV7BrowserApp({ transport: {} });
+  app.status = { mode: 'v7' };
+  app.setHost({ setStatus(text, kind) { statuses.push({ text, kind }); } });
+  app.client = {
+    isActive: () => true,
+    currentUser: () => ({ id: 'u-current' }),
+    getLease(type, id) { return leases.get(`${type}:${id}`) || null; },
+    async claimLease(type, id) {
+      claimCalls += 1;
+      const lease = { entityType: type, entityId: id, leaseId: 'lease-new', fencingToken: 2 };
+      leases.set(`${type}:${id}`, lease);
+      return lease;
+    }
+  };
+  app.decorateEditorRows = () => {};
+  app.decorateLease = () => {};
+
+  app.clientHost().onLeaseLost({
+    entityType: 'module', entityId: 'm1',
+    lease: { leaseId: 'lease-old', fencingToken: 1 },
+    result: { ok: false, error: 'LEASE_LOST' }
+  });
+
+  assert.equal(app.isWriteFailureBlocked('module', 'm1'), true);
+  assert.equal(statuses.at(-1).kind, 'error');
+  assert.match(statuses.at(-1).text, /編輯權.*失效/);
+
+  await app.claimModule('m1');
+
+  assert.equal(claimCalls, 1);
+  assert.equal(app.isWriteFailureBlocked('module', 'm1'), false);
+  assert.equal(app.client.getLease('module', 'm1').leaseId, 'lease-new');
+});
+
+test('operation receipt history 只保留最近 32 筆且回傳 clone', () => {
+  const client = new MonthlyV7Client({
+    transport: { async rpc() { return { ok: true }; } },
+    sessionStorage: memoryStorage(), draftStorage: memoryStorage(),
+    idFactory: () => 'tab-current'
+  });
+  for (let index = 1; index <= 33; index += 1) {
+    client.setOperationReceipt({
+      state: 'CLOUD_CONFIRMED',
+      operationId: `operation-${index}`,
+      rpcName: 'monthly_v7_save_module',
+      pendingKey: `save_module:m${index}`
+    });
+  }
+
+  const history = client.operationReceipts();
+  assert.equal(history.length, 32);
+  assert.equal(history[0].operationId, 'operation-2');
+  assert.equal(history.at(-1).operationId, 'operation-33');
+  history[0].state = 'MUTATED_BY_CALLER';
+  history.push({ operationId: 'caller-only' });
+  assert.equal(client.operationReceipts().length, 32);
+  assert.equal(client.operationReceipts()[0].state, 'CLOUD_CONFIRMED');
 });
