@@ -395,6 +395,92 @@ test('已驗證 authority 不得沿用到未重新驗證的新雲端配置或 un
   }
 });
 
+test('從未保存雲端 identity 時仍維持純本機 unconfigured 模式', async ({ page }) => {
+  await page.route('**/supabase-config.js', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/javascript; charset=utf-8',
+      body: 'window.MONTHLY_REPORT_SUPABASE_CONFIG={};'
+    });
+  });
+  await page.goto('/', { waitUntil: 'load' });
+  expect(await page.evaluate(() => localStorage.getItem(V4_CLOUD_CONFIG_KEY))).toBeNull();
+  expect(await page.evaluate(() => v4CloudAuthorityMode())).toBe('unconfigured');
+});
+
+test('明確清空部署注入的 legacy 雲端 identity 後不得復活舊設定或呼叫 legacy RPC', async ({ page, request }) => {
+  await request.post('/__fake_status?kind=legacy');
+  await page.addInitScript(() => {
+    const owner = { username: 'owner', displayName: 'Legacy Owner', role: 'owner' };
+    localStorage.setItem('monthly_report_v5_users', JSON.stringify([{ ...owner, passwordHash: 'test-only' }]));
+    sessionStorage.setItem('monthly_report_v5_session', JSON.stringify(owner));
+    sessionStorage.setItem(
+      'monthly_report_site_access_unlocked_hash',
+      '38adfff5529d37b7699dadcc02aba2877a44fb6f6b788b3bfae859be6ebbc432'
+    );
+  });
+  await page.goto('/', { waitUntil: 'load' });
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App?.status?.mode || '')).toBe('legacy');
+  await expect(page.locator('body')).not.toHaveClass(/site-access-locked/);
+  await page.evaluate(() => {
+    const config = v4GetCloudConfig();
+    config.autoSyncOnOpen = false;
+    localStorage.setItem(V4_CLOUD_CONFIG_KEY, JSON.stringify(config));
+    switchV1Tab('cloud');
+  });
+  await expect(page.locator('#v4-workspace-key')).toBeVisible();
+  const before = await (await request.get('/__fake_state')).json();
+
+  const cleared = await page.evaluate(async () => {
+    const workspace = document.getElementById('v4-workspace-key');
+    if (!workspace) throw new Error('WORKSPACE_CONFIG_INPUT_NOT_FOUND');
+    workspace.value = '';
+    window.alert = () => {};
+    window.confirm = () => true;
+    v4SaveCloudConfigFromForm();
+    await v4AutoSyncLatestFromCloud({ silent: true });
+    await v4CheckCloudRevision({ silent: true });
+    await v4DownloadFromCloud();
+    await v4TestCloudConnection();
+    await v4UploadToCloud({ silent: true });
+    return {
+      savedWorkspace: JSON.parse(localStorage.getItem(V4_CLOUD_CONFIG_KEY) || '{}').workspaceKey,
+      currentWorkspace: v4GetCloudConfig().workspaceKey,
+      mode: v4CloudAuthorityMode(),
+      currentUser: v5CurrentUser(),
+      locked: document.body.classList.contains('site-access-locked')
+    };
+  });
+  expect(cleared).toEqual({
+    savedWorkspace: '',
+    currentWorkspace: '',
+    mode: 'blocked',
+    currentUser: null,
+    locked: true
+  });
+  const afterClear = await (await request.get('/__fake_state')).json();
+  expect(afterClear.rpcCounts.get_monthly_report_cloud_data || 0).toBe(before.rpcCounts.get_monthly_report_cloud_data || 0);
+  expect(afterClear.rpcCounts.upsert_monthly_report_cloud_data || 0).toBe(before.rpcCounts.upsert_monthly_report_cloud_data || 0);
+
+  await page.reload({ waitUntil: 'load' });
+  await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+  const reloaded = await page.evaluate(() => ({
+    savedWorkspace: JSON.parse(localStorage.getItem(V4_CLOUD_CONFIG_KEY) || '{}').workspaceKey,
+    currentWorkspace: v4GetCloudConfig().workspaceKey,
+    mode: v4CloudAuthorityMode(),
+    currentUser: v5CurrentUser()
+  }));
+  expect(reloaded).toEqual({
+    savedWorkspace: '',
+    currentWorkspace: '',
+    mode: 'blocked',
+    currentUser: null
+  });
+  const afterReload = await (await request.get('/__fake_state')).json();
+  expect(afterReload.rpcCounts.get_monthly_report_cloud_data || 0).toBe(afterClear.rpcCounts.get_monthly_report_cloud_data || 0);
+  expect(afterReload.rpcCounts.upsert_monthly_report_cloud_data || 0).toBe(afterClear.rpcCounts.upsert_monthly_report_cloud_data || 0);
+});
+
 test('權威帳號名冊等待與失敗期間禁止登入同步，logout 失敗仍回 Gate 並可重試', async ({ page, request }) => {
   let signalSnapshotStarted;
   let releaseSnapshot;

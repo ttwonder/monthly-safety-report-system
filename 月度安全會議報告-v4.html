@@ -6039,7 +6039,12 @@
             const base = v4GetDefaultCloudConfig();
             try {
                 const saved = JSON.parse(localStorage.getItem(V4_CLOUD_CONFIG_KEY) || '{}');
-                ['supabaseUrl','anonKey','workspaceKey','lastCloudUpdatedAt','lastSyncAt','lastUpdatedBy'].forEach(key => {
+                ['supabaseUrl','anonKey','workspaceKey'].forEach(key => {
+                    if (Object.prototype.hasOwnProperty.call(saved, key)) {
+                        base[key] = String(saved[key] ?? '').trim();
+                    }
+                });
+                ['lastCloudUpdatedAt','lastSyncAt','lastUpdatedBy'].forEach(key => {
                     if (String(saved[key] || '').trim()) base[key] = String(saved[key]).trim();
                 });
                 if (Number.isFinite(Number(saved.cloudRevision))) base.cloudRevision = Number(saved.cloudRevision);
@@ -6261,6 +6266,19 @@
             return !!(config.supabaseUrl && config.anonKey && config.workspaceKey);
         }
 
+        function v4HasSavedCloudIdentityOverride() {
+            try {
+                const raw = localStorage.getItem(V4_CLOUD_CONFIG_KEY);
+                if (raw === null) return false;
+                const saved = JSON.parse(raw);
+                return !!(saved && typeof saved === 'object' && !Array.isArray(saved)
+                    && ['supabaseUrl', 'anonKey', 'workspaceKey']
+                        .some(key => Object.prototype.hasOwnProperty.call(saved, key)));
+            } catch {
+                return true;
+            }
+        }
+
         function v4CloudConfigIdentity(config) {
             if (!config || typeof config !== 'object') return '';
             return JSON.stringify([
@@ -6329,7 +6347,9 @@
         function v4CloudAuthorityMode(config = v4GetCloudConfig()) {
             const verifiedConfig = window.MonthlyV7App?.client?.config;
             const verifiedReady = v4ConfigReady(verifiedConfig);
-            if (!v4ConfigReady(config)) return verifiedReady ? 'blocked' : 'unconfigured';
+            if (!v4ConfigReady(config)) {
+                return verifiedReady || v4HasSavedCloudIdentityOverride() ? 'blocked' : 'unconfigured';
+            }
             if (!verifiedReady
                 || v4CloudConfigIdentity(config) !== v4CloudConfigIdentity(verifiedConfig)) return 'blocked';
             const mode = String(window.MonthlyV7App?.status?.mode || 'unknown');
