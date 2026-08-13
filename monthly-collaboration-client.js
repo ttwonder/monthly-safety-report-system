@@ -458,6 +458,12 @@
           const server = this.cloneJson(incoming.report, {});
           const meta = this.cloneJson(draft && draft.payload, null) || this.cloneJson(local, null) || this.cloneJson(previous.report, {});
           incoming.report._serverRevision = Number(server.revision || 0);
+          incoming.report._serverPayload = {
+            title: String(server.title || ''),
+            date: String(server.date || ''),
+            period: this.cloneJson(server.period, {}),
+            settings: this.cloneJson(server.settings, {})
+          };
           for (const field of ['title', 'date', 'period', 'settings', 'status']) {
             if (meta && Object.prototype.hasOwnProperty.call(meta, field)) incoming.report[field] = this.cloneJson(meta[field], meta[field]);
           }
@@ -1549,7 +1555,25 @@
         period: JSON.parse(JSON.stringify(meta && meta.period || report.period || {})),
         settings: JSON.parse(JSON.stringify(meta && meta.settings || report.settings || {}))
       };
+      let replayLease = null;
+      let operationLease = null;
       const supersededLease = this.getLease('report_meta', report.id);
+      const command = (result) => {
+        try {
+          return this.commandResult(result, 'SAVE_REPORT_META_FAILED');
+        } catch (error) {
+          if (error && error.code === 'REVISION_CONFLICT') {
+            this.forgetCapturedLease(operationLease || replayLease || supersededLease);
+            if (typeof this.host.onConflict === 'function') {
+              this.host.onConflict({
+                entityType: 'report_meta', entityId: report.id,
+                draft: payload, baseRevision: Number(report.revision), result: error.result
+              });
+            }
+          }
+          throw error;
+        }
+      };
       const superseded = await this.reconcileSupersededPending(
         'monthly_v7_save_report_meta', pendingKey,
         [{ entityType: 'report_meta', entityId: report.id, payload }]
@@ -1568,7 +1592,7 @@
         } else if (priorResult && priorResult.error === 'LEASE_LOST') {
           this.forgetCapturedLease(supersededLease);
         } else {
-          return this.commandResult(priorResult, 'SAVE_REPORT_META_FAILED');
+          return command(priorResult);
         }
       }
       this.saveDraft('report_meta', report.id, payload, Number(report.revision));
@@ -1583,8 +1607,6 @@
         p_period: payload.period,
         p_settings: payload.settings
       };
-      let replayLease = null;
-      let operationLease = null;
       const complete = async (result, releaseCurrent = false) => {
         if (releaseCurrent) {
           await this.releaseCapturedLease(operationLease || replayLease || supersededLease, operationContext);
@@ -1596,26 +1618,29 @@
         this.setReportAuthorityRevision(report, result.revision);
         Object.assign(report, payload);
         this.clearDraft('report_meta', report.id);
+        if (typeof this.host.onItemSaved === 'function') {
+          this.host.onItemSaved({ entityType: 'report_meta', entityId: report.id, revision: Number(result.revision) });
+        }
         return result;
       };
       replayLease = this.getLease('report_meta', report.id);
       const replayed = await this.replayPendingBeforeLease('monthly_v7_save_report_meta', pendingKey, desiredParams);
       this.assertSessionContext(operationContext, 'save_report_meta');
       if (replayed) {
-        if (replayed.ok === true) return complete(this.commandResult(replayed, 'SAVE_REPORT_META_FAILED'), true);
+        if (replayed.ok === true) return complete(command(replayed), true);
         if (replayed.error !== 'LEASE_LOST') {
           await this.releaseCapturedLease(replayLease, operationContext);
           this.assertSessionContext(operationContext, 'save_report_meta_cleanup');
-          return this.commandResult(replayed, 'SAVE_REPORT_META_FAILED');
+          return command(replayed);
         }
         this.forgetCapturedLease(replayLease);
       }
       operationLease = this.getLease('report_meta', report.id) || await this.claimLease('report_meta', report.id);
       this.assertSessionContext(operationContext, 'save_report_meta');
-      const result = this.commandResult(await this.executeOperation('monthly_v7_save_report_meta', Object.assign({}, desiredParams, {
+      const result = command(await this.executeOperation('monthly_v7_save_report_meta', Object.assign({}, desiredParams, {
         p_lease_id: operationLease.leaseId,
         p_fencing_token: operationLease.fencingToken
-      }), pendingKey), 'SAVE_REPORT_META_FAILED');
+      }), pendingKey));
       this.assertSessionContext(operationContext, 'save_report_meta');
       return complete(result, false);
     }

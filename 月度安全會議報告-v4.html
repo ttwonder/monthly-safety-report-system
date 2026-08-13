@@ -2266,9 +2266,9 @@
     </div>
 
     <script src="./vendor/supabase-2.112.2.js"></script>
-    <script src="./monthly-collaboration-core.js?v=7.0.14"></script>
-    <script src="./monthly-collaboration-client.js?v=7.0.14"></script>
-    <script src="./monthly-collaboration-v7.js?v=7.0.14"></script>
+    <script src="./monthly-collaboration-core.js?v=7.0.15"></script>
+    <script src="./monthly-collaboration-client.js?v=7.0.15"></script>
+    <script src="./monthly-collaboration-v7.js?v=7.0.15"></script>
     <script>
         // --- 核心：全域字體合成與切換 ---
         function changeGlobalFont(options = {}) {
@@ -2507,11 +2507,18 @@
                             const cloud = await window.MonthlyV7App.persistReportData(reportData, {
                                 resolveRevisionConflict: options.resolveRevisionConflict === true
                             });
+                            let meta = null;
+                            let cloudSaved = false;
                             if (cloud?.saved === true) {
-                                await window.MonthlyV7App.flush(v7CurrentReportMeta());
-                                v7AcknowledgeCloudSave(cloudTargetGeneration);
+                                meta = await window.MonthlyV7App.flush(v7CurrentReportMeta(), {
+                                    resolveRevisionConflict: options.resolveRevisionConflict === true
+                                });
+                                if (meta?.conflictBlocked !== true && meta?.localOnly !== true) {
+                                    v7AcknowledgeCloudSave(cloudTargetGeneration);
+                                    cloudSaved = true;
+                                }
                             }
-                            resolve({ localSaved: true, cloudSaved: cloud?.saved === true, cloud });
+                            resolve({ localSaved: true, cloudSaved, cloud, meta });
                         } catch (error) {
                             resolve({ localSaved: true, cloudSaved: false, error });
                         }
@@ -5154,7 +5161,12 @@
                     error.code = 'CLOUD_SAVE_NOT_CONFIRMED';
                     throw error;
                 }
-                await app.flush(v7CurrentReportMeta());
+                const meta = await app.flush(v7CurrentReportMeta(), { resolveRevisionConflict: true });
+                if (meta?.conflictBlocked === true || meta?.localOnly === true) {
+                    const error = new Error('CLOUD_SAVE_NOT_CONFIRMED');
+                    error.code = 'CLOUD_SAVE_NOT_CONFIRMED';
+                    throw error;
+                }
                 const report = app.client?.currentReport?.() || {};
                 const unresolvedModules = reportData.filter((item) => item?._v7Id && app.client?.readDraft?.('module', item._v7Id));
                 const unresolvedMeta = report.id && app.client?.readDraft?.('report_meta', report.id);
@@ -6137,6 +6149,18 @@
                 || v7CurrentReportHasPendingSaveOperation();
         }
 
+        function v7IsRevisionConflictBlocked() {
+            return window.MonthlyV7App?.isRevisionConflictBlocked?.() === true;
+        }
+
+        function v7PublishRevisionConflictBlocked() {
+            if (!v7IsRevisionConflictBlocked()) return false;
+            v7ClearCloudAutoSaveTimer();
+            if (window.MonthlyV7App?.publishRevisionConflictStatus?.()) return true;
+            v4SetCloudRuntimeStatus('雲端有較新版本；本機草稿已保留，等待你選擇。請按「保存修改」查看並決定。', 'error');
+            return true;
+        }
+
         function v7ClearCloudAutoSaveTimer() {
             clearTimeout(V4_AUTO_SAVE_TIMER);
             V4_AUTO_SAVE_TIMER = null;
@@ -6146,11 +6170,13 @@
             if (V4_CLOUD_APPLYING || V4_AUTO_SAVE_TIMER || !v7HasUnsyncedCloudChanges()) return;
             if (!window.MonthlyV7App?.isActive?.() || !window.MonthlyV7App?.isWriteReady?.()) return;
             if (window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery) return;
+            if (v7PublishRevisionConflictBlocked()) return;
             V4_AUTO_SAVE_TIMER = setTimeout(async () => {
                 V4_AUTO_SAVE_TIMER = null;
                 if (!v7HasUnsyncedCloudChanges() || !window.MonthlyV7App?.isWriteReady?.()) return;
+                if (v7PublishRevisionConflictBlocked()) return;
                 await v4UploadToCloud({ silent: true, reason: '每分鐘自動保存', flushLatest: false });
-                if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
+                if (v7HasUnsyncedCloudChanges() && !v7IsRevisionConflictBlocked()) v7ScheduleCloudAutoSave();
             }, Math.max(250, Number(delayMs) || v7CloudAutoSaveIntervalMs()));
         }
 
@@ -6162,6 +6188,7 @@
                 v4SetCloudRuntimeStatus(v7LegacyRecoveryStatusText(), 'warn');
                 return V7_CLOUD_DIRTY_GENERATION;
             }
+            if (v7PublishRevisionConflictBlocked()) return V7_CLOUD_DIRTY_GENERATION;
             if (!v5CurrentUser()) {
                 v4SetCloudRuntimeStatus(`${reason}已保存為本機草稿；請登入後提交。`, 'warn');
                 return V7_CLOUD_DIRTY_GENERATION;
@@ -6508,11 +6535,21 @@
                             resolveRevisionConflict: !silent,
                             confirmLegacyRecovery: !silent
                         });
+                        if (cloud?.conflictBlocked === true) {
+                            v7PublishRevisionConflictBlocked();
+                            return false;
+                        }
                         if (cloud?.recoveryPending === true || cloud?.localOnly === true) {
                             v4SetCloudRuntimeStatus('切換前救援內容仍只保存在本機；禁止背景上傳，請人工確認後按「保存修改」。', 'warn');
                             return false;
                         }
-                        await window.MonthlyV7App.flush(v7CurrentReportMeta());
+                        const meta = await window.MonthlyV7App.flush(v7CurrentReportMeta(), {
+                            resolveRevisionConflict: !silent
+                        });
+                        if (meta?.conflictBlocked === true || meta?.localOnly === true) {
+                            v7PublishRevisionConflictBlocked();
+                            return false;
+                        }
                         const v7Client = window.MonthlyV7App?.client;
                         if (v7Client?.snapshot?.legacyLocalRecovery) {
                             const recovery = v7Client.snapshot.legacyLocalRecovery;
@@ -6552,7 +6589,9 @@
                             return false;
                         }
                         if (error?.code === 'REVISION_CONFLICT') {
-                            v4SetCloudRuntimeStatus('項目保存衝突：REVISION_CONFLICT。本機草稿已保留；請按「保存修改」確認處理。', 'error');
+                            if (!v7PublishRevisionConflictBlocked()) {
+                                v4SetCloudRuntimeStatus('雲端有較新版本；本機草稿已保留，等待你選擇。請按「保存修改」查看並決定。', 'error');
+                            }
                         } else {
                             const code = String(error?.code || '');
                             const message = String(error?.message || error || '');
@@ -6587,7 +6626,7 @@
                 } finally {
                     if (V7_CLOUD_SAVE_PROMISE === savePromise) V7_CLOUD_SAVE_PROMISE = null;
                     V4_CLOUD_SAVING = false;
-                    if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
+                    if (v7HasUnsyncedCloudChanges() && !v7IsRevisionConflictBlocked()) v7ScheduleCloudAutoSave();
                 }
                 if (result && flushLatest && options.followUp !== false && v7HasUnsyncedCloudChanges()) {
                     return v4UploadToCloud(Object.assign({}, options, { followUp: false }));
@@ -6715,6 +6754,9 @@
                     const recovery = window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery;
                     if (recovery) {
                         v4SetCloudRuntimeStatus(v7LegacyRecoveryStatusText(recovery), 'warn');
+                    } else if (v7PublishRevisionConflictBlocked()) {
+                        // A stale-base draft is not an ordinary restored draft. Keep
+                        // the actionable conflict state visible and autosave stopped.
                     } else if (restoredDraftCount > 0) {
                         v4SetCloudRuntimeStatus(`已恢復 ${restoredDraftCount} 個未提交本機草稿；請按「保存修改」完成雲端提交。`, 'warn');
                     } else {
@@ -6771,7 +6813,13 @@
             if (v4RejectUnsafeCloudFallback({ silent, alert: !silent })) return false;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!v5CurrentUser()) return false;
-                try { await window.MonthlyV7App.syncLatest(); if (!silent) v4SetCloudRuntimeStatus('逐項變更檢查完成。', 'ok'); return true; }
+                try {
+                    await window.MonthlyV7App.syncLatest();
+                    if (!v7PublishRevisionConflictBlocked() && !silent) {
+                        v4SetCloudRuntimeStatus('逐項變更檢查完成。', 'ok');
+                    }
+                    return true;
+                }
                 catch (error) { if (!silent) v4SetCloudRuntimeStatus('逐項檢查失敗：' + error.message, 'error'); return false; }
             }
             if (V4_CLOUD_SAVING || V4_AUTO_SAVE_TIMER) return false;
@@ -7955,8 +8003,16 @@
                 );
             },
             onConflict: (info) => {
-                v4SetCloudRuntimeStatus(`項目保存衝突：${info?.result?.error || '雲端版本已改變'}。本機草稿已保留；請按「保存修改」確認處理。`, 'error');
-                showToast('此項目未覆蓋雲端；本機草稿已保留。');
+                const code = String(info?.result?.error || '');
+                if (code === 'REVISION_CONFLICT') {
+                    v4SetCloudRuntimeStatus('雲端有較新版本；本機草稿已保留，等待你選擇。請按「保存修改」查看並決定。', 'error');
+                    v7ClearCloudAutoSaveTimer();
+                    showToast('此項目未覆蓋雲端；本機草稿已保留。');
+                } else if (code === 'LEASE_LOST') {
+                    v4SetCloudRuntimeStatus('編輯權已失效；內容保留為本機草稿，禁止直接覆蓋。', 'error');
+                } else if (code === 'AUTHORITY_CHANGED') {
+                    v4SetCloudRuntimeStatus('雲端 authority 已變更；已停止保存，本機草稿仍保留。', 'error');
+                }
             },
             onRemoteChangeWhileEditing: () => v4SetCloudRuntimeStatus('正在編輯的項目有遠端新版本；目前草稿未被覆蓋。', 'warn'),
             onLeaseLost: () => v4SetCloudRuntimeStatus('編輯權已失效；內容保留為本機草稿，禁止直接覆蓋。', 'error'),

@@ -134,6 +134,7 @@
       this.persistChain = Promise.resolve();
       this.claimPromises = new Map();
       this.moduleReleaseTimers = new Map();
+      this.revisionConflictBlocks = new Map();
       this.initialized = false;
       this.guardsInstalled = false;
     }
@@ -156,6 +157,8 @@
           : false,
         applyBundle: async (bundle, snapshot) => {
           if (typeof this.host.applyBundle === 'function') await this.host.applyBundle(bundle, snapshot);
+          this.rebuildRevisionConflictBlocks(snapshot);
+          if (this.isRevisionConflictBlocked()) this.publishRevisionConflictStatus();
         },
         applyEntity: async (entity, event) => {
           this.acceptRemoteEntity(entity);
@@ -170,11 +173,14 @@
           if (typeof this.host.onLeaseLost === 'function') this.host.onLeaseLost(info);
         },
         onConflict: (info) => {
+          const revisionBlocked = this.markRevisionConflict(info);
           this.decorateEditorRows();
           if (typeof this.host.onConflict === 'function') this.host.onConflict(info);
+          if (revisionBlocked) this.publishRevisionConflictStatus();
         },
         onRemoteChangeWhileEditing: (entity, event) => {
           if (typeof this.host.onRemoteChangeWhileEditing === 'function') this.host.onRemoteChangeWhileEditing(entity, event);
+          if (this.isRevisionConflictBlocked()) this.publishRevisionConflictStatus();
         },
         onTransportError: (error) => this.reportError(error),
         onSessionStateChanged: (event) => {
@@ -182,6 +188,7 @@
           this.decorateEditorRows();
         },
         onItemSaved: (info) => {
+          this.clearRevisionConflict(info && info.entityType, info && info.entityId);
           this.decorateEditorRows();
           if (typeof this.host.onItemSaved === 'function') this.host.onItemSaved(info);
         },
@@ -325,6 +332,132 @@
       });
     }
 
+    revisionConflictKey(entityType, entityId) {
+      return `${String(entityType || '')}:${String(entityId || '')}`;
+    }
+
+    revisionConflictStatusText() {
+      const subject = this.revisionConflictBlocks.size > 1
+        ? `${this.revisionConflictBlocks.size} 個項目`
+        : '此項目';
+      return `雲端有較新版本；${subject}的本機草稿已保留，等待你選擇。請按「保存修改」查看並決定。`;
+    }
+
+    publishRevisionConflictStatus() {
+      if (!this.isRevisionConflictBlocked()) return false;
+      this.setStatus(this.revisionConflictStatusText(), 'error', { preferOverRecovery: true });
+      return true;
+    }
+
+    isRevisionConflictBlocked(entityType, entityId) {
+      if (entityType && entityId) {
+        return this.revisionConflictBlocks.has(this.revisionConflictKey(entityType, entityId));
+      }
+      return this.revisionConflictBlocks.size > 0;
+    }
+
+    clearRevisionConflict(entityType, entityId) {
+      if (!entityType || !entityId) return false;
+      return this.revisionConflictBlocks.delete(this.revisionConflictKey(entityType, entityId));
+    }
+
+    markRevisionConflict(info = {}) {
+      const result = info.result || {};
+      if (String(result.error || '') !== 'REVISION_CONFLICT') return false;
+      const add = (entityType, entityId, draftPayload, baseRevision) => {
+        const type = String(entityType || '');
+        const id = String(entityId || '');
+        if (!['module', 'report_meta'].includes(type) || !id) return;
+        const storedDraft = this.client && this.client.readDraft(type, id);
+        const base = Number(storedDraft?.baseRevision ?? baseRevision ?? 0);
+        const current = Number(result.currentRevision ?? result.current_revision ?? 0);
+        this.revisionConflictBlocks.set(this.revisionConflictKey(type, id), {
+          state: 'REVISION_CONFLICT_BLOCKED',
+          entityType: type,
+          entityId: id,
+          baseRevision: Number.isSafeInteger(base) && base >= 0 ? base : 0,
+          serverRevision: Number.isSafeInteger(current) && current > 0 ? current : null,
+          draft: clone(storedDraft?.payload ?? draftPayload ?? {}),
+          result: clone(result),
+          source: 'server'
+        });
+      };
+      if (info.entityType === 'module_batch') {
+        const conflictId = String(result.entityId || result.entity_id || info.entityId || '');
+        const drafts = Array.isArray(info.drafts) ? info.drafts : [];
+        const targets = conflictId
+          ? drafts.filter((row) => String(row?.moduleId || row?.module_id || '') === conflictId)
+          : drafts;
+        for (const row of targets) {
+          add(
+            'module', row?.moduleId || row?.module_id, row?.payload,
+            row?.expectedRevision ?? row?.expected_revision
+          );
+        }
+        if (conflictId && targets.length === 0) add('module', conflictId, null, null);
+      } else {
+        add(info.entityType, info.entityId, info.draft, info.baseRevision);
+      }
+      return this.isRevisionConflictBlocked();
+    }
+
+    rebuildRevisionConflictBlocks(snapshot = this.client && this.client.snapshot) {
+      const next = new Map();
+      if (!this.client || !snapshot) {
+        this.revisionConflictBlocks = next;
+        return [];
+      }
+      const reportId = String(snapshot.report && snapshot.report.id || '');
+      const batchPendingKey = reportId ? `save_module_batch:${reportId}` : '';
+      const hasAnyBatchPending = !!(batchPendingKey && this.client.hasPendingOperation(batchPendingKey));
+      const addIfStale = (entityType, entityId, authorityRevision, authorityPayload) => {
+        const id = String(entityId || '');
+        const draft = id && this.client.readDraft(entityType, id);
+        const base = Number(draft && draft.baseRevision);
+        const current = Number(authorityRevision);
+        if (!draft || !Number.isSafeInteger(base) || base < 0
+          || !Number.isSafeInteger(current) || current <= base
+          || canonical(draft.payload) === canonical(authorityPayload)) return;
+        const pendingKey = entityType === 'module'
+          ? `save_module:${id}`
+          : `save_report_meta:${id}`;
+        if (this.client.hasPendingOperation(pendingKey)
+          || (entityType === 'module' && hasAnyBatchPending)) return;
+        next.set(this.revisionConflictKey(entityType, id), {
+          state: 'REVISION_CONFLICT_BLOCKED',
+          entityType,
+          entityId: id,
+          baseRevision: base,
+          serverRevision: current,
+          draft: clone(draft.payload),
+          result: { ok: false, error: 'REVISION_CONFLICT', currentRevision: current },
+          source: 'snapshot'
+        });
+      };
+      for (const row of snapshot.modules || []) {
+        addIfStale(
+          'module', row && row.id,
+          row && (row._serverRevision ?? row.revision),
+          row && (row._serverPayload ?? row.payload)
+        );
+      }
+      if (snapshot.report && reportId) {
+        const authorityMeta = snapshot.report._serverPayload || {
+          title: String(snapshot.report.title || ''),
+          date: String(snapshot.report.date || ''),
+          period: clone(snapshot.report.period || {}),
+          settings: clone(snapshot.report.settings || {})
+        };
+        addIfStale(
+          'report_meta', reportId,
+          snapshot.report._serverRevision ?? snapshot.report.revision,
+          authorityMeta
+        );
+      }
+      this.revisionConflictBlocks = next;
+      return Array.from(next.values()).map(clone);
+    }
+
     baselineModuleMap() {
       return new Map(((this.client.snapshot && this.client.snapshot.modules) || []).map((row) => {
         if (!Object.prototype.hasOwnProperty.call(row, '_serverPayload')) return [row.id, row];
@@ -347,6 +480,7 @@
       row.payload = clone(confirmedPayload === undefined ? this.client.modulePayload(item) : confirmedPayload);
       delete row._serverPayload;
       delete row._serverRevision;
+      this.clearRevisionConflict('module', item._v7Id);
     }
 
     hasModuleDraft(entityId) {
@@ -391,6 +525,7 @@
         this.acceptRemoteEntity(entity);
         item._v7Revision = Number(entity.revision);
         this.client.saveDraft('module', item._v7Id, this.client.modulePayload(item), item._v7Revision);
+        this.clearRevisionConflict('module', item._v7Id);
       });
       return serverEntities;
     }
@@ -457,6 +592,46 @@
       }
     }
 
+    async rebaseReportMetaForConfirmedRetry(meta, conflictError, operationContext = this.captureOperationContext()) {
+      this.assertOperationContext(operationContext, 'rebase_report_meta');
+      const report = this.currentReport();
+      if (!report || !report.id) throw new Error('REPORT_CONTEXT_REQUIRED');
+      const entity = await this.client.getEntity('report_meta', report.id);
+      this.assertOperationContext(operationContext, 'rebase_report_meta');
+      if (entity.deleted || !Number.isFinite(Number(entity.revision))) {
+        const error = new Error('CONFLICT_ENTITY_UNAVAILABLE');
+        error.code = 'CONFLICT_ENTITY_UNAVAILABLE';
+        error.result = entity;
+        throw error;
+      }
+      const confirmed = typeof this.host.confirmRevisionOverwrite === 'function'
+        ? await Promise.resolve(this.host.confirmRevisionOverwrite({
+          entityType: 'report_meta',
+          entityIds: [report.id],
+          drafts: [clone(meta)],
+          serverEntities: [clone(entity)],
+          result: conflictError && conflictError.result
+        }))
+        : false;
+      this.assertOperationContext(operationContext, 'rebase_report_meta');
+      if (!confirmed) {
+        this.setStatus('已取消覆蓋；雲端未變更，本機草稿仍完整保留。', 'warn');
+        const error = new Error('REVISION_CONFLICT_CANCELLED');
+        error.code = 'REVISION_CONFLICT_CANCELLED';
+        error.silent = true;
+        error.result = conflictError && conflictError.result;
+        throw error;
+      }
+      this.acceptRemoteEntity(entity);
+      if (this.client.snapshot && this.client.snapshot.report) {
+        this.client.snapshot.report._serverRevision = Number(entity.revision);
+        this.client.snapshot.report._serverPayload = clone(entity.payload || {});
+      }
+      this.client.saveDraft('report_meta', report.id, meta, Number(entity.revision));
+      this.clearRevisionConflict('report_meta', report.id);
+      return entity;
+    }
+
     async persistReportData(items, options = {}) {
       if (!this.isActive()) return { mode: 'legacy' };
       if (!this.isWriteReady()) {
@@ -490,6 +665,27 @@
       return this.enqueue(async (operationContext) => {
         if (!this.client.snapshot) {
           await this.client.loadSnapshot();
+          this.assertOperationContext(operationContext, 'persist_report_data');
+        }
+        const blockedModules = liveItems.filter((item) => (
+          item && item._v7Id && this.isRevisionConflictBlocked('module', item._v7Id)
+        ));
+        if (blockedModules.length > 0) {
+          if (options.resolveRevisionConflict !== true) {
+            this.publishRevisionConflictStatus();
+            return {
+              mode: 'v7', localOnly: true, conflictBlocked: true,
+              state: 'REVISION_CONFLICT_BLOCKED'
+            };
+          }
+          const conflict = new Error('REVISION_CONFLICT');
+          conflict.code = 'REVISION_CONFLICT';
+          conflict.result = clone(
+            this.revisionConflictBlocks.get(
+              this.revisionConflictKey('module', blockedModules[0]._v7Id)
+            )?.result || { ok: false, error: 'REVISION_CONFLICT' }
+          );
+          await this.rebaseModulesForConfirmedRetry(blockedModules, conflict, operationContext);
           this.assertOperationContext(operationContext, 'persist_report_data');
         }
         let baseline = this.baselineModuleMap();
@@ -565,7 +761,7 @@
       });
     }
 
-    async persistReportMeta(meta) {
+    async persistReportMeta(meta, options = {}) {
       if (!this.isActive()) return { mode: 'legacy' };
       if (!this.isWriteReady()) return { mode: 'v7', localOnly: true };
       const report = this.currentReport();
@@ -586,9 +782,39 @@
         return { ok: true, skipped: true, revision: Number(report.revision) };
       }
       return this.enqueue(async (operationContext) => {
+        if (this.isRevisionConflictBlocked('report_meta', report.id)) {
+          if (options.resolveRevisionConflict !== true) {
+            this.publishRevisionConflictStatus();
+            return {
+              mode: 'v7', localOnly: true, conflictBlocked: true,
+              state: 'REVISION_CONFLICT_BLOCKED'
+            };
+          }
+          const conflict = new Error('REVISION_CONFLICT');
+          conflict.code = 'REVISION_CONFLICT';
+          conflict.result = clone(
+            this.revisionConflictBlocks.get(
+              this.revisionConflictKey('report_meta', report.id)
+            )?.result || { ok: false, error: 'REVISION_CONFLICT' }
+          );
+          await this.rebaseReportMetaForConfirmedRetry(nextMeta, conflict, operationContext);
+          this.assertOperationContext(operationContext, 'persist_report_meta');
+        }
         let cloudConfirmed = false;
         try {
-          const result = await this.client.saveReportMeta(nextMeta);
+          let result;
+          try {
+            result = await this.client.saveReportMeta(nextMeta);
+          } catch (error) {
+            if (error && error.code === 'REVISION_CONFLICT'
+              && options.resolveRevisionConflict === true) {
+              await this.rebaseReportMetaForConfirmedRetry(nextMeta, error, operationContext);
+              this.assertOperationContext(operationContext, 'persist_report_meta');
+              result = await this.client.saveReportMeta(nextMeta);
+            } else {
+              throw error;
+            }
+          }
           this.assertOperationContext(operationContext, 'persist_report_meta');
           cloudConfirmed = true;
           this.setStatus(`月報資訊已保存｜${cloudSaveTime()}`, 'ok');
@@ -691,13 +917,15 @@
       }, 'persist-records');
     }
 
-    async flush(meta) {
+    async flush(meta, options = {}) {
       const operationContext = this.captureOperationContext();
       await this.persistChain.catch(() => undefined);
       this.assertOperationContext(operationContext, 'flush');
-      if (meta && this.isActive() && this.currentUser()) await this.persistReportMeta(meta);
+      const result = meta && this.isActive() && this.currentUser()
+        ? await this.persistReportMeta(meta, options)
+        : true;
       this.assertOperationContext(operationContext, 'flush');
-      return true;
+      return result;
     }
 
     async claimModule(entityId) {

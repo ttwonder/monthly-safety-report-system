@@ -2024,12 +2024,20 @@ test('未提交的 module 變更離開後仍保留 lease，不提前放鎖', asy
   expect(errors).toEqual([]);
 });
 
-test('revision conflict 保留本機草稿，重載後由使用者確認才以目前內容重試', async ({ page, request }) => {
+test('revision conflict 停止背景重送，重載後仍等待使用者確認才以目前內容重試', async ({ page, request }) => {
   await page.addInitScript(() => {
-    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 1500;
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 750;
   });
   const errors = [];
+  let saveCalls = 0;
   page.on('pageerror', (error) => errors.push(error.message));
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_save_module' || payload?.name === 'monthly_v7_save_module_batch') {
+      saveCalls += 1;
+    }
+    await route.continue();
+  });
   await enterAndLogin(page, 'owner', 'owner-pass');
   await request.post('/__fake_remote_module_change');
 
@@ -2041,13 +2049,31 @@ test('revision conflict 保留本機草稿，重載後由使用者確認才以�
   await title.fill('本機待救回內容');
   await page.locator('#mainTitle').click();
 
-  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('REVISION_CONFLICT');
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('雲端有較新版本');
+  await expect.poll(() => saveCalls).toBe(1);
+  await page.waitForTimeout(1900);
+  expect(saveCalls).toBe(1);
+  const firstBlockedState = await page.evaluate(() => ({
+    blocked: window.MonthlyV7App?.isRevisionConflictBlocked?.() === true,
+    dirty: v7HasUnsyncedCloudChanges(),
+    hasTimer: Boolean(V4_AUTO_SAVE_TIMER),
+    hasPromise: Boolean(V7_CLOUD_SAVE_PROMISE),
+    status: document.getElementById('v4-cloud-runtime-status')?.textContent || ''
+  }));
+  expect(firstBlockedState).toEqual({
+    blocked: true,
+    dirty: true,
+    hasTimer: false,
+    hasPromise: false,
+    status: expect.stringMatching(/雲端有較新版本.*本機草稿已保留.*等待你選擇/)
+  });
   let state = await request.get('/__fake_state').then((response) => response.json());
   expect(state.modules[0].revision).toBe(2);
   expect(state.modules[0].payload.title).toBe('遠端較新內容');
   const savedDraft = await page.evaluate((id) => JSON.parse(localStorage.getItem(`monthly_v7_draft:module:${id}`) || 'null'), moduleId);
   expect(savedDraft.payload.title.replace(/<br>$/i, '')).toBe('本機待救回內容');
 
+  const saveCallsBeforeReload = saveCalls;
   await page.reload();
   row = page.locator(`#tableBody tr[data-v7-entity-id="${moduleId}"]`);
   title = row.locator('td').nth(1).locator('.editable-div');
@@ -2096,7 +2122,14 @@ test('revision conflict 保留本機草稿，重載後由使用者確認才以�
   });
   expect(redundantDraftComparison.live).toEqual(redundantDraftComparison.baseline);
   expect(redundantDraftComparison.draft).toBeNull();
-  await expect.poll(() => page.locator('#v4-cloud-runtime-status').textContent()).toMatch(/已恢復 1 個未提交本機草稿|項目保存衝突：REVISION_CONFLICT/);
+  await page.waitForTimeout(1900);
+  expect(saveCalls).toBe(saveCallsBeforeReload);
+  expect(await page.evaluate(() => ({
+    blocked: window.MonthlyV7App?.isRevisionConflictBlocked?.() === true,
+    states: Array.from(window.MonthlyV7App?.revisionConflictBlocks?.values?.() || [])
+      .map((entry) => entry.state)
+  }))).toEqual({ blocked: true, states: ['REVISION_CONFLICT_BLOCKED'] });
+  await expect.poll(() => page.locator('#v4-cloud-runtime-status').textContent()).toMatch(/雲端有較新版本.*本機草稿已保留.*等待你選擇/);
 
   let cancellationPrompt = '';
   page.once('dialog', async (dialog) => {
@@ -2109,6 +2142,9 @@ test('revision conflict 保留本機草稿，重載後由使用者確認才以�
   expect(state.modules[0].revision).toBe(2);
   expect(state.modules[0].payload.title).toBe('遠端較新內容');
   expect(await page.evaluate((id) => localStorage.getItem(`monthly_v7_draft:module:${id}`), moduleId)).not.toBeNull();
+  await page.waitForTimeout(1900);
+  expect(saveCalls).toBe(saveCallsBeforeReload);
+  expect(await page.evaluate(() => window.MonthlyV7App?.isRevisionConflictBlocked?.())).toBe(true);
 
   let confirmation = '';
   page.once('dialog', async (dialog) => {
@@ -2122,7 +2158,109 @@ test('revision conflict 保留本機草稿，重載後由使用者確認才以�
   expect(cancellationPrompt).toContain('目前畫面內容');
   expect(cancellationPrompt).toContain('取消');
   expect(confirmation).toBe(cancellationPrompt);
+  expect(saveCalls).toBe(saveCallsBeforeReload + 1);
   expect(await page.evaluate((id) => localStorage.getItem(`monthly_v7_draft:module:${id}`), moduleId)).toBeNull();
+  await expect(page.locator('#v4-cloud-runtime-status')).toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
+  expect(errors).toEqual([]);
+});
+
+test('report metadata conflict 停止背景重送，重載與取消後只在明確確認時提交', async ({ page, request }) => {
+  await page.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 750;
+  });
+  const errors = [];
+  let metaSaveCalls = 0;
+  let metaReadCalls = 0;
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_save_report_meta') metaSaveCalls += 1;
+    if (payload?.name === 'monthly_v7_get_entity'
+      && payload?.params?.p_entity_type === 'report_meta') metaReadCalls += 1;
+    await route.continue();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await request.post('/__fake_remote_report_meta_change');
+
+  const title = page.locator('#mainTitle');
+  await title.click();
+  await title.fill('本機待救回月報標題');
+  await page.locator('#reportDate').click();
+
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('雲端有較新版本');
+  await expect.poll(() => metaSaveCalls).toBe(1);
+  await page.waitForTimeout(1900);
+  expect(metaSaveCalls).toBe(1);
+  expect(await page.evaluate(() => ({
+    blocked: window.MonthlyV7App?.isRevisionConflictBlocked?.('report_meta', window.MonthlyV7App?.client?.currentReport?.()?.id) === true,
+    dirty: v7HasUnsyncedCloudChanges(),
+    hasTimer: Boolean(V4_AUTO_SAVE_TIMER),
+    draft: window.MonthlyV7App?.client?.readDraft?.(
+      'report_meta', window.MonthlyV7App?.client?.currentReport?.()?.id
+    )
+  }))).toMatchObject({
+    blocked: true,
+    dirty: true,
+    hasTimer: false,
+    draft: { baseRevision: 1, payload: { title: '本機待救回月報標題' } }
+  });
+  let state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.report).toMatchObject({ revision: 2, title: '遠端較新月報標題' });
+  const blockedReceipt = await page.evaluate(() => saveToDB(reportData, Date.now(), {
+    markCloudDirty: false
+  }));
+  expect(blockedReceipt).toMatchObject({ localSaved: true, cloudSaved: false });
+  expect(metaSaveCalls).toBe(1);
+
+  const savesBeforeReload = metaSaveCalls;
+  await page.reload();
+  await expect(page.locator('#mainTitle')).toHaveText('本機待救回月報標題');
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App?.initialized === true
+    && window.MonthlyV7App?.client?.currentReport?.()?._serverRevision === 2)).toBe(true);
+  await page.waitForTimeout(1900);
+  expect(metaSaveCalls).toBe(savesBeforeReload);
+  expect(await page.evaluate(() => window.MonthlyV7App?.isRevisionConflictBlocked?.(
+    'report_meta', window.MonthlyV7App?.client?.currentReport?.()?.id
+  ))).toBe(true);
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText(/雲端有較新版本.*本機草稿已保留.*等待你選擇/);
+
+  const readsBeforeResolution = metaReadCalls;
+  let cancellationPrompt = '';
+  page.once('dialog', async (dialog) => {
+    cancellationPrompt = dialog.message();
+    await dialog.dismiss();
+  });
+  await page.getByRole('button', { name: '保存修改' }).click();
+  await expect(page.locator('#v4-cloud-runtime-status')).toContainText('已取消覆蓋');
+  expect(metaReadCalls).toBe(readsBeforeResolution + 1);
+  expect(metaSaveCalls).toBe(savesBeforeReload);
+  state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.report).toMatchObject({ revision: 2, title: '遠端較新月報標題' });
+  expect(await page.evaluate(() => window.MonthlyV7App?.isRevisionConflictBlocked?.(
+    'report_meta', window.MonthlyV7App?.client?.currentReport?.()?.id
+  ))).toBe(true);
+
+  let confirmation = '';
+  page.once('dialog', async (dialog) => {
+    confirmation = dialog.message();
+    await dialog.accept();
+  });
+  await page.getByRole('button', { name: '保存修改' }).click();
+  await expect.poll(async () => request.get('/__fake_state').then((response) => response.json())
+    .then((next) => next.report.revision)).toBe(3);
+  state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.report.title).toBe('本機待救回月報標題');
+  expect(metaReadCalls).toBe(readsBeforeResolution + 2);
+  expect(metaSaveCalls).toBe(savesBeforeReload + 1);
+  expect(cancellationPrompt).toContain('目前畫面內容');
+  expect(cancellationPrompt).toContain('取消');
+  expect(confirmation).toBe(cancellationPrompt);
+  expect(await page.evaluate(() => ({
+    blocked: window.MonthlyV7App?.isRevisionConflictBlocked?.(),
+    draft: window.MonthlyV7App?.client?.readDraft?.(
+      'report_meta', window.MonthlyV7App?.client?.currentReport?.()?.id
+    )
+  }))).toEqual({ blocked: false, draft: null });
   await expect(page.locator('#v4-cloud-runtime-status')).toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
   expect(errors).toEqual([]);
 });
@@ -2223,7 +2361,24 @@ test('保存 RPC 無回應會結束等待並保留草稿，重試後可由新瀏
   });
   await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=always');
 
-  await page.evaluate(() => v5SaveChangesToCloud());
+  await page.evaluate(() => {
+    window.__timeoutSaveState = { status: 'pending', result: null, error: '' };
+    window.__timeoutSavePromise = v5SaveChangesToCloud()
+      .then((result) => {
+        window.__timeoutSaveState = { status: 'done', result, error: '' };
+      })
+      .catch((error) => {
+        window.__timeoutSaveState = {
+          status: 'error', result: null, error: String(error?.message || error)
+        };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__timeoutSaveState?.status), {
+    timeout: 15000
+  }).toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__timeoutSaveState)).toEqual({
+    status: 'done', result: false, error: ''
+  });
   await expect.poll(() => page.locator('#v5TopStatus').innerText()).toContain('RPC_TIMEOUT');
   await expect(page.locator('#v4-cloud-runtime-status')).not.toHaveText(/雲端已保存｜\d{2}:\d{2}:\d{2}/);
   expect(dialogs.some((message) => message.includes('RPC_TIMEOUT'))).toBe(true);

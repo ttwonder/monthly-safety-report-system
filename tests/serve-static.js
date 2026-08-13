@@ -322,16 +322,45 @@ function rpc(name, p) {
     }
     const module = state.modules.find((entry) => entry.id === p.p_entity_id);
     if (p.p_entity_type === 'module' && module) return { ok: true, entityType: 'module', entityId: module.id, revision: module.revision, deleted: false, payload: clone(module.payload) };
+    if (p.p_entity_type === 'report_meta' && p.p_entity_id === state.report.id) {
+      return {
+        ok: true, entityType: 'report_meta', entityId: state.report.id,
+        revision: state.report.revision, deleted: false,
+        payload: {
+          title: state.report.title, date: state.report.date,
+          period: clone(state.report.period), settings: clone(state.report.settings)
+        }
+      };
+    }
     return { ok: false, error: 'ENTITY_NOT_FOUND' };
   }
   if (name === 'monthly_v7_save_report_meta') {
+    const user = userForSession(p.p_user_session_id);
+    if (!user) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const requestHash = canonical({
+      command: 'save_report_meta', reportId: p.p_report_id,
+      expectedRevision: Number(p.p_expected_revision),
+      title: p.p_title, date: p.p_report_date,
+      period: p.p_period, settings: p.p_settings,
+      leaseId: p.p_lease_id, fencingToken: Number(p.p_fencing_token)
+    });
+    const replay = replayOperation(p.p_operation_id, user.id, requestHash);
+    if (replay) return replay;
     const lease = state.leases.get(`report_meta:${p.p_report_id}`);
-    if (!lease || lease.leaseId !== p.p_lease_id) return { ok: false, error: 'LEASE_LOST' };
-    if (state.report.revision !== Number(p.p_expected_revision)) return { ok: false, error: 'REVISION_CONFLICT' };
+    if (!lease || lease.expiresAt <= now() || lease.leaseId !== p.p_lease_id
+      || lease.fencingToken !== Number(p.p_fencing_token)
+      || lease.clientSessionId !== p.p_client_session_id || lease.holderUserId !== user.id) {
+      return storeOperation(p.p_operation_id, user.id, requestHash, { ok: false, error: 'LEASE_LOST' });
+    }
+    if (state.report.revision !== Number(p.p_expected_revision)) {
+      return storeOperation(p.p_operation_id, user.id, requestHash, {
+        ok: false, error: 'REVISION_CONFLICT', currentRevision: state.report.revision
+      });
+    }
     Object.assign(state.report, { title: p.p_title, date: p.p_report_date, period: clone(p.p_period), settings: clone(p.p_settings), revision: state.report.revision + 1 });
     lease.expiresAt = now() - 1;
     event('report_meta', state.report.id, state.report.revision, p.p_operation_id);
-    return { ok: true, revision: state.report.revision };
+    return storeOperation(p.p_operation_id, user.id, requestHash, { ok: true, revision: state.report.revision });
   }
   if (name === 'monthly_v7_create_report_snapshot') {
     if (!Object.prototype.hasOwnProperty.call(p, 'p_snapshot_kind') || Object.prototype.hasOwnProperty.call(p, 'p_kind')) {
@@ -395,6 +424,12 @@ const server = http.createServer((req, res) => {
     module.revision += 1;
     module.updatedAt = new Date().toISOString();
     event('module', module.id, module.revision, randomUUID());
+    res.writeHead(204); return res.end();
+  }
+  if (url.pathname === '/__fake_remote_report_meta_change' && req.method === 'POST') {
+    state.report.title = '遠端較新月報標題';
+    state.report.revision += 1;
+    event('report_meta', state.report.id, state.report.revision, randomUUID());
     res.writeHead(204); return res.end();
   }
   if (url.pathname === '/__fake_malicious_module_title' && req.method === 'POST') {

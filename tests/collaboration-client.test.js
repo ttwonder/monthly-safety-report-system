@@ -1265,6 +1265,74 @@ test('metadata 舊保存成功不得刪除同 session 後繼 lease', async () =>
   assert.equal(client.getLease('report_meta', 'r1'), lease2);
 });
 
+test('report metadata 只有 revision conflict 發出版本衝突 callback', async () => {
+  for (const code of ['REVISION_CONFLICT', 'LEASE_LOST']) {
+    const conflicts = [];
+    const drafts = memoryStorage();
+    const client = new MonthlyV7Client({
+      transport: {
+        async rpc(name) {
+          assert.equal(name, 'monthly_v7_save_report_meta');
+          return { ok: false, error: code, currentRevision: 2 };
+        }
+      },
+      sessionStorage: memoryStorage(), draftStorage: drafts,
+      idFactory: () => 'tab',
+      operationIdFactory: () => '00000000-0000-4000-8000-000000000904',
+      host: { onConflict(info) { conflicts.push(info); } }
+    });
+    client.status = { mode: 'v7' };
+    client.config = { workspaceKey: 'workspace-test' };
+    client.siteSession = { id: 'site-1' };
+    client.userSession = { id: 'session-u1' };
+    client.user = { id: 'u1' };
+    client.snapshot = {
+      report: { id: 'r1', revision: 1, title: '舊', date: '', period: {}, settings: {} },
+      modules: [], records: []
+    };
+    client.leases.set(client.leaseKey('report_meta', 'r1'), {
+      entityType: 'report_meta', entityId: 'r1', leaseId: 'lease-1',
+      fencingToken: 1, holderUserId: 'u1', clientSessionId: 'tab'
+    });
+
+    await assert.rejects(
+      () => client.saveReportMeta({ title: '本機新標題', date: '', period: {}, settings: {} }),
+      (error) => error.code === code
+    );
+    assert.equal(conflicts.length, code === 'REVISION_CONFLICT' ? 1 : 0, code);
+    if (code === 'REVISION_CONFLICT') {
+      assert.equal(conflicts[0].entityType, 'report_meta');
+      assert.equal(conflicts[0].entityId, 'r1');
+      assert.equal(conflicts[0].baseRevision, 1);
+      assert.equal(conflicts[0].result.currentRevision, 2);
+    }
+    assert.equal(client.readDraft('report_meta', 'r1').payload.title, '本機新標題');
+  }
+});
+
+test('既有 revision blocker 不得覆蓋後續非 revision conflict 的狀態', () => {
+  const published = [];
+  const app = new MonthlyV7BrowserApp({
+    transport: fakeTransport({}),
+    host: {
+      onConflict(info) { published.push(`host:${info.result.error}`); },
+      setStatus(text) { published.push(`status:${text}`); }
+    }
+  });
+  app.client = { readDraft: () => null };
+  app.decorateEditorRows = () => {};
+  app.revisionConflictBlocks.set('module:m1', {
+    state: 'REVISION_CONFLICT_BLOCKED', entityType: 'module', entityId: 'm1'
+  });
+
+  app.clientHost().onConflict({
+    entityType: 'module', entityId: 'm2', result: { ok: false, error: 'LEASE_LOST' }
+  });
+
+  assert.deepEqual(published, ['host:LEASE_LOST']);
+  assert.equal(app.isRevisionConflictBlocked('module', 'm1'), true);
+});
+
 test('record 舊保存衝突不得刪除同 session 後繼 lease', async () => {
   let resolveSave;
   let signalStarted;
@@ -1363,6 +1431,42 @@ test('protected snapshot merge 顯示本機 draft，但保留真正 server paylo
   assert.equal(row._serverRevision, 5);
   assert.equal('_serverPayload' in row.payload, false);
   assert.equal('_serverRevision' in row.payload, false);
+});
+
+test('protected report metadata merge 保留本機草稿與真正 server payload/revision', async () => {
+  const drafts = memoryStorage();
+  const client = new MonthlyV7Client({
+    transport: fakeTransport({}),
+    sessionStorage: memoryStorage(), draftStorage: drafts, idFactory: () => 'tab'
+  });
+  client.snapshot = {
+    report: {
+      id: 'r1', revision: 2, title: '舊本機基線', date: '2026-08-01',
+      period: { startM: '8' }, settings: { font: 'A' }
+    },
+    modules: [], records: []
+  };
+  const local = {
+    title: '衝突後保留的本機標題', date: '2026-08-02',
+    period: { startM: '9' }, settings: { font: 'B' }
+  };
+  const remote = {
+    title: '遠端較新標題', date: '2026-08-03',
+    period: { startM: '10' }, settings: { font: 'C' }
+  };
+  client.saveDraft('report_meta', 'r1', local, 2);
+
+  const merged = await client.mergeSnapshotWithProtectedLocal({
+    report: { id: 'r1', revision: 5, ...remote }, modules: [], records: []
+  });
+
+  assert.equal(merged.report.title, local.title);
+  assert.equal(merged.report.date, local.date);
+  assert.deepEqual(merged.report.period, local.period);
+  assert.deepEqual(merged.report.settings, local.settings);
+  assert.equal(merged.report.revision, 2);
+  assert.equal(merged.report._serverRevision, 5);
+  assert.deepEqual(merged.report._serverPayload, remote);
 });
 
 test('saveModule 以 lease/fence/CAS 保存，失鎖保留草稿且成功後保留目前編輯 lease', async () => {
