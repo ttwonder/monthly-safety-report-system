@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.19';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.20';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -7071,7 +7071,19 @@
                     const restoredDraftCount = reportData.filter(item => item?._v7Id
                         && window.MonthlyV7App?.client?.readDraft?.('module', item._v7Id)).length;
                     const recovery = window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery;
-                    if (recovery) {
+                    const userResumeCode = String(window.MonthlyV7App?.client?.status?.userResumeErrorCode || '');
+                    const userResumeMessage = ['USER_RESUME_INVALID', 'USER_SESSION_INVALID', 'READ_SESSION_INVALID'].includes(userResumeCode)
+                        ? '帳號保持登入已失效；網站仍已解鎖，請重新登入。'
+                        : userResumeCode === 'RPC_TIMEOUT'
+                        ? '帳號自動登入暫時失敗；網站仍已解鎖，可手動登入。'
+                        : userResumeCode === 'USER_RESUME_CAPABILITY_MISSING'
+                        ? '帳號保持登入尚未啟用；網站仍已解鎖，可手動登入。'
+                        : userResumeCode
+                        ? `帳號自動登入未完成：${userResumeCode}；網站仍已解鎖，可手動登入。`
+                        : '';
+                    if (userResumeMessage) {
+                        v4SetCloudRuntimeStatus(userResumeMessage, 'warn');
+                    } else if (recovery) {
                         v4SetCloudRuntimeStatus(v7LegacyRecoveryStatusText(recovery), 'warn');
                     } else if (v7PublishRevisionConflictBlocked()) {
                         // A stale-base draft is not an ordinary restored draft. Keep
@@ -7918,12 +7930,17 @@
             const username = (document.getElementById('v5-login-username')?.value || '').trim();
             const password = document.getElementById('v5-login-password')?.value || '';
             const rememberUsername = document.getElementById('v5-remember-username')?.checked === true;
+            const rememberUser = document.getElementById('v5-remember-user')?.checked === true;
             if (v4RejectUnsafeCloudFallback({ alert: true })) return;
             if (window.MonthlyV7App?.isActive?.()) {
                 if (!username || !password) return alert('請填寫用戶名和密碼。');
                 try {
-                    const user = await window.MonthlyV7App.login(username, password);
+                    const user = await window.MonthlyV7App.login(username, password, { rememberUser });
                     v5RememberSuccessfulUsername(username, rememberUsername);
+                    const resumeStatus = window.MonthlyV7App.userResumeStatus || {};
+                    if (resumeStatus.requested === true && resumeStatus.remembered !== true) {
+                        v4SetCloudRuntimeStatus('帳號已登入，但無法在此裝置保持登入；下次仍需輸入帳號密碼。', 'warn');
+                    }
                     renderV5SessionBar();
                     renderV4CloudPane();
                     renderTable();
@@ -8063,6 +8080,10 @@
             const rememberUsername = v5RememberUsernameEnabled();
             const rememberedUsername = rememberUsername ? v5RememberedUsername() : '';
             const rememberCheckedAttr = rememberUsername ? ' checked' : '';
+            const canRememberUser = isV7 && Boolean(window.MonthlyV7App?.client?.siteSession?.trustedDeviceId);
+            const rememberUserDisabledAttr = sessionControlsDisabled || !canRememberUser
+                ? ' disabled aria-disabled="true"'
+                : '';
             const configReady = v4ConfigReady();
             root.innerHTML = user ? `
                 <div class="v5-session-bar">
@@ -8083,6 +8104,10 @@
                         <input id="v5-remember-username" type="checkbox" class="accent-sky-600" onchange="v5SetRememberUsernameEnabled(this.checked)"${rememberCheckedAttr}${disabledAttr}>
                         記住上次用戶名
                     </label>
+                    ${isV7 ? `<label class="inline-flex items-center gap-1 text-[11px] text-slate-600 whitespace-nowrap" title="需先在進站畫面勾選記住此裝置">
+                        <input id="v5-remember-user" type="checkbox" class="accent-sky-600"${rememberUserDisabledAttr}>
+                        保持登入
+                    </label>` : ''}
                     <button class="v5-sync-btn" onclick="v5Login()"${disabledAttr}>登入</button>
                     <button class="v5-sync-btn" onclick="v5SyncLatest()"${disabledAttr}><i class="fas fa-rotate mr-1"></i>同步最新</button>
                     <button class="v5-sync-btn" onclick="siteAccessForgetTrustedDevice()">忘記此裝置</button>

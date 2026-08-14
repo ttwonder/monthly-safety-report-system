@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.19';
+  const buildId = '7.0.20';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
@@ -50,6 +50,7 @@
     }
 
     siteResumeStorageKey() { return 'monthly_v7_site_resume_marker'; }
+    userResumeStorageKey() { return 'monthly_v7_user_resume_marker'; }
 
     readSiteResumeMarker() {
       if (!this.resumeStorage) return null;
@@ -65,11 +66,13 @@
           || !Number.isInteger(Number(marker.authorityEpoch)) || Number(marker.authorityEpoch) <= 0
           || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
           this.clearSiteResumeMarker();
+          this.clearUserResumeMarker();
           return null;
         }
         return Object.assign({}, marker);
       } catch (_error) {
         this.clearSiteResumeMarker();
+        this.clearUserResumeMarker();
         return null;
       }
     }
@@ -98,12 +101,71 @@
       catch (_error) { return false; }
     }
 
+    readUserResumeMarker() {
+      if (!this.resumeStorage) return null;
+      let raw = null;
+      try { raw = this.resumeStorage.getItem(this.userResumeStorageKey()); }
+      catch (_error) { return null; }
+      if (raw === null) return null;
+      try {
+        const marker = JSON.parse(raw);
+        const expiresAt = Date.parse(String(marker && marker.expiresAt || ''));
+        if (!marker || marker.version !== 1 || marker.purpose !== 'user'
+          || !/^[0-9a-f]{64}$/.test(String(marker.token || ''))
+          || !String(marker.trustedDeviceId || '').trim()
+          || !Number.isInteger(Number(marker.authorityEpoch)) || Number(marker.authorityEpoch) <= 0
+          || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+          this.clearUserResumeMarker();
+          return null;
+        }
+        return Object.assign({}, marker);
+      } catch (_error) {
+        this.clearUserResumeMarker();
+        return null;
+      }
+    }
+
+    writeUserResumeMarker(result) {
+      if (!this.resumeStorage) return false;
+      const marker = {
+        version: 1,
+        purpose: 'user',
+        token: String(result && (result.resume_token || result.resumeToken) || ''),
+        expiresAt: String(result && (result.expires_at || result.expiresAt) || ''),
+        authorityEpoch: Number(this.status.authorityEpoch || 0),
+        trustedDeviceId: String(result && (result.trusted_device_id || result.trustedDeviceId) || '')
+      };
+      if (!/^[0-9a-f]{64}$/.test(marker.token)
+        || !Number.isFinite(Date.parse(marker.expiresAt)) || Date.parse(marker.expiresAt) <= Date.now()
+        || !Number.isInteger(marker.authorityEpoch) || marker.authorityEpoch <= 0
+        || !marker.trustedDeviceId) {
+        throw new Error('USER_RESUME_MARKER_INVALID');
+      }
+      this.resumeStorage.setItem(this.userResumeStorageKey(), JSON.stringify(marker));
+      return true;
+    }
+
+    clearUserResumeMarker() {
+      if (!this.resumeStorage) return false;
+      try { this.resumeStorage.removeItem(this.userResumeStorageKey()); return true; }
+      catch (_error) { return false; }
+    }
+
     isSiteResumeCapabilityMissing(error) {
       const code = String(error && error.code || '');
       const detail = [error && error.message, error && error.details, error && error.hint]
         .map((value) => String(value || ''))
         .join(' ');
       return code === 'PGRST202' && detail.includes('monthly_v7_exchange_site_resume');
+    }
+
+    isUserResumeCapabilityMissing(error) {
+      const code = String(error && error.code || '');
+      const detail = [error && error.message, error && error.details, error && error.hint]
+        .map((value) => String(value || ''))
+        .join(' ');
+      return code === 'PGRST202'
+        && (detail.includes('monthly_v7_issue_user_resume') || detail.includes('monthly_v7_exchange_user_resume'));
     }
 
     async issueSiteResume() {
@@ -114,6 +176,9 @@
         p_client_session_id: this.clientSessionId
       });
       if (!result || result.ok !== true) throw new Error(result && result.error || 'SITE_RESUME_ISSUE_FAILED');
+      this.siteSession.trustedDeviceId = String(result.trusted_device_id || result.trustedDeviceId || '');
+      if (!this.siteSession.trustedDeviceId) throw new Error('SITE_RESUME_DEVICE_INVALID');
+      if (this.sessionStorage) this.sessionStorage.setItem('monthly_v7_site_session', JSON.stringify(this.siteSession));
       this.writeSiteResumeMarker(result);
       return this.readSiteResumeMarker();
     }
@@ -123,6 +188,7 @@
       if (!marker) return null;
       if (Number(marker.authorityEpoch) !== Number(this.status.authorityEpoch)) {
         this.clearSiteResumeMarker();
+        this.clearUserResumeMarker();
         const error = new Error('SITE_RESUME_AUTHORITY_CHANGED');
         error.code = 'SITE_RESUME_AUTHORITY_CHANGED';
         throw error;
@@ -137,25 +203,146 @@
       } catch (error) {
         if (String(error && (error.code || error.message) || '').includes('SITE_RESUME_INVALID')) {
           this.clearSiteResumeMarker();
+          this.clearUserResumeMarker();
         }
         throw error;
       }
       if (!result || result.ok !== true) {
         const code = String(result && result.error || 'SITE_RESUME_FAILED');
-        if (code === 'SITE_RESUME_INVALID') this.clearSiteResumeMarker();
+        if (code === 'SITE_RESUME_INVALID') {
+          this.clearSiteResumeMarker();
+          this.clearUserResumeMarker();
+        }
         const error = new Error(code);
         error.code = code;
         throw error;
       }
       this.siteSession = {
         id: result.site_session_id || result.siteSessionId,
-        expiresAt: result.expires_at || result.expiresAt || ''
+        expiresAt: result.expires_at || result.expiresAt || '',
+        trustedDeviceId: String(result.trusted_device_id || result.trustedDeviceId || '')
       };
+      if (!this.siteSession.trustedDeviceId) throw new Error('SITE_RESUME_DEVICE_INVALID');
       this.siteSessionPendingValidation = true;
       if (this.sessionStorage) this.sessionStorage.setItem('monthly_v7_site_session', JSON.stringify(this.siteSession));
       this.writeSiteResumeMarker(result);
       this.sessionGeneration += 1;
       return Object.assign({}, this.siteSession);
+    }
+
+    async issueUserResume() {
+      if (!this.isWriteReady()) throw new Error('USER_SESSION_REQUIRED');
+      const trustedDeviceId = String(this.siteSession && this.siteSession.trustedDeviceId || '');
+      if (!trustedDeviceId) throw new Error('TRUSTED_DEVICE_REQUIRED');
+      const result = await this.rpc('monthly_v7_issue_user_resume', {
+        p_workspace_key: this.config.workspaceKey,
+        p_site_session_id: this.siteSession.id,
+        p_user_session_id: this.userSession.id,
+        p_client_session_id: this.clientSessionId
+      });
+      if (!result || result.ok !== true) throw new Error(result && result.error || 'USER_RESUME_ISSUE_FAILED');
+      const resultDeviceId = String(result.trusted_device_id || result.trustedDeviceId || '');
+      if (!resultDeviceId || resultDeviceId !== trustedDeviceId) throw new Error('USER_RESUME_DEVICE_MISMATCH');
+      this.writeUserResumeMarker(result);
+      const stored = this.readUserResumeMarker();
+      if (!stored) throw new Error('USER_RESUME_MARKER_INVALID');
+      return stored;
+    }
+
+    async restoreUserFromMarker() {
+      const marker = this.readUserResumeMarker();
+      if (!marker) return null;
+      if (!this.isSiteUnlocked()) throw new Error('SITE_SESSION_REQUIRED');
+      if (Number(marker.authorityEpoch) !== Number(this.status.authorityEpoch)) {
+        this.clearUserResumeMarker();
+        const error = new Error('USER_RESUME_AUTHORITY_CHANGED');
+        error.code = 'USER_RESUME_AUTHORITY_CHANGED';
+        throw error;
+      }
+      const trustedDeviceId = String(this.siteSession && this.siteSession.trustedDeviceId || '');
+      if (!trustedDeviceId) throw new Error('TRUSTED_DEVICE_REQUIRED');
+      if (trustedDeviceId !== String(marker.trustedDeviceId)) {
+        this.clearUserResumeMarker();
+        const error = new Error('USER_RESUME_DEVICE_CHANGED');
+        error.code = 'USER_RESUME_DEVICE_CHANGED';
+        throw error;
+      }
+      const attemptId = ++this.loginAttemptEpoch;
+      const siteSessionId = String(this.siteSession.id || '');
+      let result;
+      try {
+        result = await this.rpc('monthly_v7_exchange_user_resume', {
+          p_workspace_key: this.config.workspaceKey,
+          p_site_session_id: siteSessionId,
+          p_resume_token: marker.token,
+          p_client_session_id: this.clientSessionId
+        });
+      } catch (error) {
+        const code = String(error && (error.code || error.message) || '');
+        if (['USER_RESUME_INVALID', 'USER_RESUME_AUTHORITY_CHANGED', 'USER_RESUME_DEVICE_CHANGED'].includes(code)) {
+          this.clearUserResumeMarker();
+        }
+        throw error;
+      }
+      this.assertLoginAttempt(attemptId, siteSessionId);
+      if (!result || result.ok !== true) {
+        const code = String(result && result.error || 'USER_RESUME_FAILED');
+        if (code === 'USER_RESUME_INVALID') this.clearUserResumeMarker();
+        const error = new Error(code);
+        error.code = code;
+        throw error;
+      }
+      const resultDeviceId = String(result.trusted_device_id || result.trustedDeviceId || '');
+      if (!resultDeviceId || resultDeviceId !== trustedDeviceId) {
+        this.clearUserResumeMarker();
+        const error = new Error('USER_RESUME_DEVICE_MISMATCH');
+        error.code = 'USER_RESUME_DEVICE_MISMATCH';
+        throw error;
+      }
+      const provisionalSession = { id: result.user_session_id || result.userSessionId };
+      const provisionalUser = Object.assign({}, result.user || {});
+      try {
+        this.writeUserResumeMarker(result);
+      } catch (error) {
+        this.clearUserResumeMarker();
+        throw error;
+      }
+      this.userSession = provisionalSession;
+      this.user = provisionalUser;
+      this.userSessionPendingValidation = true;
+      this.sessionGeneration += 1;
+      try {
+        await this.loadSnapshot({
+          retryTransient: true,
+          loginAttempt: { attemptId, siteSessionId, userSessionId: provisionalSession.id }
+        });
+        this.assertLoginAttempt(attemptId, siteSessionId);
+        if (String(this.userSession && this.userSession.id || '') !== String(provisionalSession.id)
+          || this.userSessionPendingValidation === true) {
+          throw this.staleLoginAttemptError(attemptId);
+        }
+      } catch (error) {
+        const ownsProvisional = this.isLoginAttemptCurrent(attemptId, siteSessionId)
+          && String(this.userSession && this.userSession.id || '') === String(provisionalSession.id)
+          && this.userSessionPendingValidation === true;
+        if (ownsProvisional) this.clearUserSession('user-resume-snapshot-failed');
+        const code = String(error && (error.code || error.message) || '');
+        if (['USER_RESUME_INVALID', 'USER_SESSION_INVALID', 'READ_SESSION_INVALID'].includes(code)) {
+          this.clearUserResumeMarker();
+        }
+        if (error && error.sessionInvalidHandled === true) {
+          error.resumeStage = 'snapshot';
+          throw error;
+        }
+        if (!this.isLoginAttemptCurrent(attemptId, siteSessionId)) throw this.staleLoginAttemptError(attemptId);
+        error.resumeStage = 'snapshot';
+        throw error;
+      }
+      if (this.sessionStorage) {
+        this.sessionStorage.setItem('monthly_v7_user_session', JSON.stringify(this.userSession));
+        this.sessionStorage.setItem('monthly_v7_user_projection', JSON.stringify(this.user));
+      }
+      return this.currentUser();
     }
 
     lastRpc() {
@@ -274,6 +461,7 @@
       if (code === 'SITE_SESSION_INVALID') {
         this.clearSessions('server-site-session-invalid', code);
       } else {
+        this.clearUserResumeMarker();
         this.clearUserSession('server-user-session-invalid', code);
       }
       return code;
@@ -390,7 +578,8 @@
         authorityEpoch,
         minimumClientVersion,
         errorCode: '',
-        siteResumeErrorCode: ''
+        siteResumeErrorCode: '',
+        userResumeErrorCode: ''
       };
       if (this.status.mode === 'v7' && this.sessionStorage) {
         try { this.siteSession = JSON.parse(this.sessionStorage.getItem('monthly_v7_site_session') || 'null'); } catch { this.siteSession = null; }
@@ -523,6 +712,11 @@
           && String(this.userSession && this.userSession.id || '') === String(provisionalSession.id)
           && this.userSessionPendingValidation === true;
         if (ownsProvisional) this.clearUserSession('login-snapshot-failed');
+        if (error && error.sessionInvalidHandled === true) {
+          error.loginStage = 'snapshot';
+          error.credentialsAccepted = true;
+          throw error;
+        }
         if (!this.isLoginAttemptCurrent(attemptId, siteSessionId)) throw this.staleLoginAttemptError(attemptId);
         error.loginStage = 'snapshot';
         error.credentialsAccepted = true;
@@ -718,6 +912,7 @@
           assertLoadOwnership();
           break;
         } catch (error) {
+          if (error && error.sessionInvalidHandled === true) throw error;
           assertLoadOwnership();
           attempt += 1;
           if (!retryTransient || attempt >= 2 || error?.code !== 'RPC_TIMEOUT') throw error;
@@ -2505,6 +2700,7 @@
           p_new_password: String(newPassword || '')
         }, `update_site_password:${this.config.workspaceKey}`), 'UPDATE_SITE_PASSWORD_FAILED');
         this.clearSiteResumeMarker();
+        this.clearUserResumeMarker();
         this.clearSessions('site-password-rotated');
         return result;
       } catch (error) {
@@ -2514,6 +2710,7 @@
           || /failed to fetch|networkerror|network request failed/i.test(message);
         if (resultUnknown) {
           this.clearSiteResumeMarker();
+          this.clearUserResumeMarker();
           this.clearSessions('site-password-rotation-unconfirmed', code);
         }
         throw error;
@@ -2628,7 +2825,10 @@
           this.commandResult(result, 'USER_LOGOUT_FAILED');
         }
       } finally {
-        if (this.isSessionContextCurrent(operationContext)) this.clearUserSession('user-logout');
+        if (this.isSessionContextCurrent(operationContext)) {
+          this.clearUserResumeMarker();
+          this.clearUserSession('user-logout');
+        }
       }
     }
 
@@ -2655,9 +2855,11 @@
       } finally {
         if (this.isSessionContextCurrent(operationContext)) {
           this.clearSiteResumeMarker();
+          this.clearUserResumeMarker();
           this.clearSessions('site-logout');
         } else if (!this.hasSiteSession()) {
           this.clearSiteResumeMarker();
+          this.clearUserResumeMarker();
         }
       }
     }
@@ -2685,9 +2887,11 @@
       } finally {
         if (this.isSessionContextCurrent(operationContext)) {
           this.clearSiteResumeMarker();
+          this.clearUserResumeMarker();
           this.clearSessions('trusted-device-forgotten');
         } else if (!this.hasSiteSession()) {
           this.clearSiteResumeMarker();
+          this.clearUserResumeMarker();
         }
       }
     }

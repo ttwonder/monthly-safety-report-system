@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.19';
+  const buildId = '7.0.20';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -169,6 +169,7 @@
       this.authorityWriteBlock = null;
       this.initialized = false;
       this.guardsInstalled = false;
+      this.userResumeStatus = { requested: false, remembered: false, restored: false, warning: '' };
     }
 
     setHost(host) {
@@ -367,12 +368,63 @@
       return result;
     }
 
-    async login(username, password) {
+    async login(username, password, options = {}) {
+      const rememberUser = options.rememberUser === true;
+      this.client.clearUserResumeMarker();
+      this.client.status.userResumeErrorCode = '';
+      this.userResumeStatus = { requested: rememberUser, remembered: false, restored: false, warning: '' };
       const user = await this.client.login(username, password);
+      if (rememberUser) {
+        try {
+          await this.client.issueUserResume();
+          this.userResumeStatus.remembered = true;
+        } catch (error) {
+          const authorityCode = this.authorityFailureCode(error);
+          const sessionCode = this.client && typeof this.client.sessionErrorCode === 'function'
+            ? this.client.sessionErrorCode(error)
+            : '';
+          if (authorityCode || sessionCode || error?.code === 'STALE_SESSION_RESPONSE') throw error;
+          this.userResumeStatus.warning = this.client.isUserResumeCapabilityMissing(error)
+            ? 'USER_RESUME_CAPABILITY_MISSING'
+            : String(error && (error.code || error.message) || 'USER_RESUME_ISSUE_FAILED');
+        }
+      }
       this.client.startHeartbeat();
       this.client.startRealtime();
       this.decorateEditorRows();
       return user;
+    }
+
+    async resumeUserFromMarker() {
+      if (!this.client || this.client.currentUser()) return this.currentUser();
+      const marker = this.client.readUserResumeMarker();
+      if (!marker) return null;
+      if (!this.client.isSiteUnlocked() || !String(this.client.siteSession && this.client.siteSession.trustedDeviceId || '')) {
+        return null;
+      }
+      this.userResumeStatus = { requested: true, remembered: true, restored: false, warning: '' };
+      try {
+        const user = await this.client.restoreUserFromMarker();
+        if (!user) return null;
+        this.userResumeStatus.restored = true;
+        this.client.status.userResumeErrorCode = '';
+        this.client.startHeartbeat();
+        this.client.startRealtime();
+        return user;
+      } catch (error) {
+        const authorityCode = this.authorityFailureCode(error);
+        const sessionCode = this.client && typeof this.client.sessionErrorCode === 'function'
+          ? this.client.sessionErrorCode(error)
+          : '';
+        if (authorityCode || sessionCode === 'SITE_SESSION_INVALID' || error?.code === 'STALE_SESSION_RESPONSE') throw error;
+        const rawCode = String(error && (error.code || error.message) || 'USER_RESUME_FAILED');
+        const code = this.client.isUserResumeCapabilityMissing(error)
+          ? 'USER_RESUME_CAPABILITY_MISSING'
+          : rawCode;
+        this.client.status.userResumeErrorCode = code;
+        this.userResumeStatus.warning = code;
+        return null;
+      }
     }
 
     async logoutUser() {
@@ -442,12 +494,13 @@
 
     async loadSnapshot() {
       const result = await this.client.loadSnapshot();
+      if (!this.client.currentUser()) await this.resumeUserFromMarker();
       if (this.client.currentUser()) {
         this.client.startHeartbeat();
         this.client.startRealtime();
       }
       this.decorateEditorRows();
-      return result;
+      return this.client.snapshot || result;
     }
 
     async syncLatest() {

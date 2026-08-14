@@ -89,7 +89,9 @@ function resultState() {
     activeTrustedDeviceCount: Array.from(state.trustedDevices.values())
       .filter((device) => !device.revoked && device.expiresAt > now()).length,
     activeSiteResumeCount: Array.from(state.resumeTokens.values())
-      .filter((token) => token.purpose === 'site' && !token.consumed && !token.revoked && token.expiresAt > now()).length
+      .filter((token) => token.purpose === 'site' && !token.consumed && !token.revoked && token.expiresAt > now()).length,
+    activeUserResumeCount: Array.from(state.resumeTokens.values())
+      .filter((token) => token.purpose === 'user' && !token.consumed && !token.revoked && token.expiresAt > now()).length
   };
 }
 
@@ -190,13 +192,107 @@ function rpc(name, p) {
     if (!state.siteSessions.has(p.p_site_session_id) || state.passwords[p.p_username] !== p.p_password) return { ok: false, error: 'INVALID_CREDENTIALS' };
     const user = state.users.find((entry) => entry.username === p.p_username);
     const id = randomUUID();
-    state.userSessions.set(id, { userId: user.id, clientSessionId: p.p_client_session_id, siteSessionId: p.p_site_session_id });
+    state.userSessions.set(id, {
+      userId: user.id,
+      userVersion: user.version,
+      clientSessionId: p.p_client_session_id,
+      siteSessionId: p.p_site_session_id
+    });
     return { ok: true, user_session_id: id, user: clone(user) };
+  }
+  if (name === 'monthly_v7_issue_user_resume') {
+    const siteSession = state.siteSessions.get(p.p_site_session_id);
+    const userSession = state.userSessions.get(p.p_user_session_id);
+    if (!siteSession || siteSession.clientSessionId !== p.p_client_session_id) {
+      return { ok: false, error: 'SITE_SESSION_INVALID' };
+    }
+    if (!siteSession.trustedDeviceId) return { ok: false, error: 'TRUSTED_DEVICE_REQUIRED' };
+    if (!userSession || userSession.siteSessionId !== p.p_site_session_id
+      || userSession.clientSessionId !== p.p_client_session_id) {
+      return { ok: false, error: 'USER_SESSION_INVALID' };
+    }
+    const user = state.users.find((entry) => entry.id === userSession.userId
+      && entry.active !== false && entry.version === userSession.userVersion);
+    const device = state.trustedDevices.get(siteSession.trustedDeviceId);
+    if (!user) return { ok: false, error: 'USER_SESSION_INVALID' };
+    if (!device || device.revoked || device.expiresAt <= now()) return { ok: false, error: 'TRUSTED_DEVICE_REQUIRED' };
+    for (const token of state.resumeTokens.values()) {
+      if (token.deviceId === siteSession.trustedDeviceId && token.purpose === 'user' && !token.consumed) token.revoked = true;
+    }
+    const rawToken = randomBytes(32).toString('hex');
+    const expiresAt = Math.min(device.expiresAt, now() + 12 * 60 * 60 * 1000);
+    state.resumeTokens.set(rawToken, {
+      deviceId: siteSession.trustedDeviceId,
+      purpose: 'user',
+      userId: user.id,
+      userVersion: user.version,
+      userRole: user.role,
+      expiresAt,
+      consumed: false,
+      revoked: false
+    });
+    return {
+      ok: true,
+      trusted_device_id: siteSession.trustedDeviceId,
+      resume_token: rawToken,
+      expires_at: new Date(expiresAt).toISOString(),
+      user: clone(user)
+    };
+  }
+  if (name === 'monthly_v7_exchange_user_resume') {
+    const siteSession = state.siteSessions.get(p.p_site_session_id);
+    const token = state.resumeTokens.get(p.p_resume_token);
+    const device = siteSession && siteSession.trustedDeviceId
+      ? state.trustedDevices.get(siteSession.trustedDeviceId)
+      : null;
+    const user = token && state.users.find((entry) => entry.id === token.userId
+      && entry.active !== false && entry.version === token.userVersion && entry.role === token.userRole);
+    if (!siteSession || siteSession.clientSessionId !== p.p_client_session_id
+      || !token || token.purpose !== 'user' || token.deviceId !== siteSession.trustedDeviceId
+      || token.consumed || token.revoked || token.expiresAt <= now()
+      || !device || device.revoked || device.expiresAt <= now() || !user) {
+      return { ok: false, error: 'USER_RESUME_INVALID' };
+    }
+    token.consumed = true;
+    const replacement = randomBytes(32).toString('hex');
+    const expiresAt = Math.min(device.expiresAt, now() + 12 * 60 * 60 * 1000);
+    state.resumeTokens.set(replacement, {
+      deviceId: token.deviceId,
+      purpose: 'user',
+      userId: user.id,
+      userVersion: user.version,
+      userRole: user.role,
+      expiresAt,
+      consumed: false,
+      revoked: false
+    });
+    const userSessionId = randomUUID();
+    state.userSessions.set(userSessionId, {
+      userId: user.id,
+      userVersion: user.version,
+      clientSessionId: p.p_client_session_id,
+      siteSessionId: p.p_site_session_id
+    });
+    return {
+      ok: true,
+      user_session_id: userSessionId,
+      trusted_device_id: token.deviceId,
+      resume_token: replacement,
+      expires_at: new Date(expiresAt).toISOString(),
+      user: clone(user)
+    };
   }
   if (name === 'monthly_v7_logout_user') {
     const session = state.userSessions.get(p.p_user_session_id);
     const belongsToSite = session && session.siteSessionId === p.p_site_session_id;
-    if (belongsToSite) state.userSessions.delete(p.p_user_session_id);
+    if (belongsToSite) {
+      const siteSession = state.siteSessions.get(p.p_site_session_id);
+      for (const token of state.resumeTokens.values()) {
+        if (token.purpose === 'user' && token.userId === session.userId
+          && token.deviceId === siteSession?.trustedDeviceId && !token.consumed) token.revoked = true;
+      }
+      state.userSessions.delete(p.p_user_session_id);
+    }
     return { ok: true, revoked: Boolean(belongsToSite) };
   }
   if (name === 'monthly_v7_logout') {
@@ -621,7 +717,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/supabase-config.js') {
     res.writeHead(200, { 'Content-Type': mime['.js'] });
-    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace'};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.0.19'});`);
+    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace'};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.0.20'});`);
   }
   if (url.pathname === '/vendor/supabase-2.112.2.js') { res.writeHead(200, { 'Content-Type': mime['.js'] }); return res.end(fakeSdk); }
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;

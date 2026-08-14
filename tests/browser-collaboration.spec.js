@@ -279,7 +279,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.19';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.20';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +319,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.19'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.20'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +522,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.0.19', config: '7.0.19', core: '7.0.19', client: '7.0.19', v7: '7.0.19'
+      page: '7.0.20', config: '7.0.20', core: '7.0.20', client: '7.0.20', v7: '7.0.20'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -984,6 +984,231 @@ test('記住此裝置會跨 browser context 輪替 site marker，snapshot 驗證
   await resumedContext.close();
 });
 
+test('帳號保持登入與記住用戶名分離且預設不勾，未 opt-in 時零 user-resume RPC', async ({ page, request }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+
+  await expect(page.locator('#v5-remember-username')).toBeVisible();
+  await expect(page.locator('#v5-remember-user')).toBeVisible();
+  await expect(page.locator('#v5-remember-user')).not.toBeChecked();
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+
+  expect(await page.evaluate(() => localStorage.getItem('monthly_v7_user_resume_marker'))).toBeNull();
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_issue_user_resume || 0)).toBe(0);
+  expect(Number(state.rpcCounts.monthly_v7_exchange_user_resume || 0)).toBe(0);
+});
+
+test('缺少 user-resume issue migration 時仍完成手動登入，但警告未保持登入且不建 marker', async ({ page }) => {
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name !== 'monthly_v7_issue_user_resume') return route.continue();
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        code: 'PGRST202',
+        message: 'Could not find the function public.monthly_v7_issue_user_resume'
+      })
+    });
+  });
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await page.locator('#v5-remember-user').check();
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+  await expect(page.locator('#v5TopStatus')).toContainText('帳號已登入，但無法在此裝置保持登入');
+  expect(await page.evaluate(() => window.MonthlyV7App.currentUser()?.username || '')).toBe('owner');
+  expect(await page.evaluate(() => localStorage.getItem('monthly_v7_user_resume_marker'))).toBeNull();
+});
+
+test('明確 opt-in 後跨 context 輪替 user marker，第二次 authoritative snapshot 成功前不投影 Owner', async ({ page, browser, request }) => {
+  test.setTimeout(90000);
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await expect(page.locator('#v5-remember-user')).toBeVisible();
+  await page.locator('#v5-remember-user').check();
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+
+  const firstMarker = await page.evaluate(() => JSON.parse(localStorage.getItem('monthly_v7_user_resume_marker') || 'null'));
+  expect(firstMarker).toMatchObject({
+    version: 1,
+    purpose: 'user',
+    authorityEpoch: 2
+  });
+  expect(firstMarker.token).toMatch(/^[a-f0-9]{64}$/);
+  expect(firstMarker.trustedDeviceId).toBeTruthy();
+  expect(JSON.stringify(firstMarker)).not.toContain('owner');
+  expect(JSON.stringify(firstMarker)).not.toContain('owner-pass');
+  expect(JSON.stringify(firstMarker)).not.toContain('password');
+
+  const storageState = await page.context().storageState();
+  const origin = storageState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
+  expect(origin).toBeTruthy();
+  const resumedContext = await browser.newContext({ storageState: { cookies: [], origins: [origin] } });
+  const resumed = await resumedContext.newPage();
+  let snapshotCount = 0;
+  let signalUserSnapshot;
+  let releaseUserSnapshot;
+  const userSnapshotStarted = new Promise((resolve) => { signalUserSnapshot = resolve; });
+  const userSnapshotGate = new Promise((resolve) => { releaseUserSnapshot = resolve; });
+  await resumed.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_get_snapshot') {
+      snapshotCount += 1;
+      if (snapshotCount === 2) {
+        signalUserSnapshot();
+        await userSnapshotGate;
+      }
+    }
+    await route.continue();
+  });
+  await resumed.goto('/', { waitUntil: 'domcontentloaded' });
+  await userSnapshotStarted;
+
+  await expect(resumed.locator('#siteAccessGate')).toBeHidden();
+  expect(await resumed.evaluate(() => window.MonthlyV7App.currentUser())).toBeNull();
+  expect(await resumed.evaluate(() => sessionStorage.getItem('monthly_v7_user_session'))).toBeNull();
+  await expect(resumed.locator('#v5TopStatus')).not.toContainText('Owner A');
+
+  releaseUserSnapshot();
+  await expect.poll(() => resumed.evaluate(() => window.MonthlyV7App.currentUser()?.username || ''), {
+    timeout: 30000
+  }).toBe('owner');
+  await expect(resumed.locator('#v5TopStatus')).toContainText('Owner A');
+  const rotated = await resumed.evaluate(() => JSON.parse(localStorage.getItem('monthly_v7_user_resume_marker') || 'null'));
+  expect(rotated.token).toMatch(/^[a-f0-9]{64}$/);
+  expect(rotated.token).not.toBe(firstMarker.token);
+  expect(rotated.trustedDeviceId).toBe(firstMarker.trustedDeviceId);
+
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_issue_user_resume || 0)).toBe(1);
+  expect(Number(state.rpcCounts.monthly_v7_exchange_user_resume || 0)).toBe(1);
+  expect(state.activeUserResumeCount).toBe(1);
+  expect(state.activeSiteResumeCount).toBe(1);
+
+  await resumed.getByRole('button', { name: '登出', exact: true }).click();
+  await expect(resumed.locator('#siteAccessGate')).toBeHidden();
+  await expect(resumed.locator('#v5-login-username')).toBeVisible();
+  expect(await resumed.evaluate(() => localStorage.getItem('monthly_v7_user_resume_marker'))).toBeNull();
+  expect(await resumed.evaluate(() => localStorage.getItem('monthly_v7_site_resume_marker'))).not.toBeNull();
+  const loggedOutState = await (await request.get('/__fake_state')).json();
+  expect(loggedOutState.activeUserResumeCount).toBe(0);
+  expect(loggedOutState.activeSiteResumeCount).toBe(1);
+  await resumedContext.close();
+});
+
+for (const fixture of [
+  {
+    label: '永久失效',
+    kind: 'invalid',
+    expectedText: '帳號保持登入已失效',
+    markerKept: false
+  },
+  {
+    label: '交換逾時',
+    kind: 'timeout',
+    expectedText: '帳號自動登入暫時失敗',
+    markerKept: true
+  },
+  {
+    label: 'migration 缺失',
+    kind: 'missing',
+    expectedText: '帳號保持登入尚未啟用',
+    markerKept: true
+  }
+]) {
+  test(`user resume ${fixture.label}時保持 site 解鎖與手動登入，並依失敗類型處理 marker`, async ({ page, browser, request }) => {
+    test.setTimeout(90000);
+    await page.goto('/');
+    await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+    await page.locator('#site-remember-device').check();
+    await page.locator('#site-access-password').fill('gate-pass');
+    await page.getByRole('button', { name: '進入系統' }).click();
+    await expect(page.locator('#siteAccessGate')).toBeHidden();
+    await page.locator('#v5-remember-user').check();
+    await page.locator('#v5-login-username').fill('owner');
+    await page.locator('#v5-login-password').fill('owner-pass');
+    await page.getByRole('button', { name: '登入', exact: true }).click();
+    await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+
+    const storageState = await page.context().storageState();
+    const origin = storageState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
+    expect(origin).toBeTruthy();
+    const resumedContext = await browser.newContext({ storageState: { cookies: [], origins: [origin] } });
+    await resumedContext.addInitScript((kind) => {
+      if (kind === 'timeout') window.MONTHLY_V7_RPC_TIMEOUT_MS = 75;
+      localStorage.setItem('monthly_v7_draft:module:user-resume-failure', JSON.stringify({
+        payload: { title: 'user resume 失敗仍保留' }, baseRevision: 1
+      }));
+    }, fixture.kind);
+    if (fixture.kind === 'timeout') {
+      await request.post('/__fake_hang_rpc?name=monthly_v7_exchange_user_resume&count=1');
+    } else {
+      await resumedContext.route('**/__fake_rpc', async (route) => {
+        const payload = route.request().postDataJSON();
+        if (payload?.name !== 'monthly_v7_exchange_user_resume') return route.continue();
+        if (fixture.kind === 'invalid') {
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ ok: false, error: 'USER_RESUME_INVALID' })
+          });
+        }
+        return route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            code: 'PGRST202',
+            message: 'Could not find the function public.monthly_v7_exchange_user_resume'
+          })
+        });
+      });
+    }
+    const resumed = await resumedContext.newPage();
+    await resumed.goto('/', { waitUntil: 'domcontentloaded' });
+
+    await expect(resumed.locator('#siteAccessGate')).toBeHidden({ timeout: 30000 });
+    await expect(resumed.locator('#v5-login-username')).toBeVisible();
+    await expect(resumed.locator('#v5TopStatus')).toContainText(fixture.expectedText);
+    expect(await resumed.evaluate(() => window.MonthlyV7App.currentUser())).toBeNull();
+    const local = await resumed.evaluate(() => ({
+      marker: localStorage.getItem('monthly_v7_user_resume_marker'),
+      siteMarker: localStorage.getItem('monthly_v7_site_resume_marker'),
+      draft: localStorage.getItem('monthly_v7_draft:module:user-resume-failure'),
+      userSession: sessionStorage.getItem('monthly_v7_user_session'),
+      userProjection: sessionStorage.getItem('monthly_v7_user_projection')
+    }));
+    expect(Boolean(local.marker)).toBe(fixture.markerKept);
+    expect(local.siteMarker).not.toBeNull();
+    expect(JSON.parse(local.draft).payload.title).toBe('user resume 失敗仍保留');
+    expect(local.userSession).toBeNull();
+    expect(local.userProjection).toBeNull();
+    await resumedContext.close();
+  });
+}
+
 test('authority epoch 改變時在 exchange 前清除 site marker、保留證據並維持 Gate', async ({ page, browser, request }) => {
   await page.goto('/');
   await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
@@ -997,6 +1222,14 @@ test('authority epoch 改變時在 exchange 前清除 site marker、保留證據
   expect(origin).toBeTruthy();
   const resumedContext = await browser.newContext({ storageState: { cookies: [], origins: [origin] } });
   await resumedContext.addInitScript(() => {
+    localStorage.setItem('monthly_v7_user_resume_marker', JSON.stringify({
+      version: 1,
+      purpose: 'user',
+      token: '9'.repeat(64),
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      authorityEpoch: 2,
+      trustedDeviceId: 'authority-epoch-old-device'
+    }));
     localStorage.setItem('monthly_v7_draft:module:authority-epoch', JSON.stringify({
       payload: { title: 'authority 改變仍保留' }, baseRevision: 1
     }));
@@ -1024,11 +1257,13 @@ test('authority epoch 改變時在 exchange 前清除 site marker、保留證據
   await expect(resumed.locator('#site-access-error')).toContainText('雲端權威版本已變更');
   const local = await resumed.evaluate(() => ({
     marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    userMarker: localStorage.getItem('monthly_v7_user_resume_marker'),
     site: sessionStorage.getItem('monthly_v7_site_session'),
     draft: localStorage.getItem('monthly_v7_draft:module:authority-epoch'),
     pending: localStorage.getItem('monthly_v7_pending:save_module:authority-epoch')
   }));
   expect(local.marker).toBeNull();
+  expect(local.userMarker).toBeNull();
   expect(local.site).toBeNull();
   expect(JSON.parse(local.draft).payload.title).toBe('authority 改變仍保留');
   expect(local.pending).toBe('{authority-epoch-pending-evidence');
@@ -1185,6 +1420,7 @@ test('退出網站會撤銷 trusted device 並回到 Gate，但保留 draft 與 
   await page.getByRole('button', { name: '進入系統' }).click();
   await expect(page.locator('#siteAccessGate')).toBeHidden();
   await expect(page.locator('#v5-login-username')).toBeVisible();
+  await page.locator('#v5-remember-user').check();
   await page.locator('#v5-login-username').fill('owner');
   await page.locator('#v5-login-password').fill('owner-pass');
   await page.getByRole('button', { name: '登入', exact: true }).click();
@@ -1196,12 +1432,14 @@ test('退出網站會撤銷 trusted device 並回到 Gate，但保留 draft 與 
     localStorage.setItem('monthly_v7_pending:save_module:exit-site', '{exit-site-pending-evidence');
   });
   expect(await page.evaluate(() => localStorage.getItem('monthly_v7_site_resume_marker'))).not.toBeNull();
+  expect(await page.evaluate(() => localStorage.getItem('monthly_v7_user_resume_marker'))).not.toBeNull();
 
   await page.getByRole('button', { name: '退出網站', exact: true }).click();
 
   await expect(page.locator('#siteAccessGate')).toBeVisible();
   const local = await page.evaluate(() => ({
     marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    userMarker: localStorage.getItem('monthly_v7_user_resume_marker'),
     site: sessionStorage.getItem('monthly_v7_site_session'),
     user: sessionStorage.getItem('monthly_v7_user_session'),
     projection: sessionStorage.getItem('monthly_v7_user_projection'),
@@ -1209,6 +1447,7 @@ test('退出網站會撤銷 trusted device 並回到 Gate，但保留 draft 與 
     pending: localStorage.getItem('monthly_v7_pending:save_module:exit-site')
   }));
   expect(local.marker).toBeNull();
+  expect(local.userMarker).toBeNull();
   expect(local.site).toBeNull();
   expect(local.user).toBeNull();
   expect(local.projection).toBeNull();
@@ -1217,6 +1456,7 @@ test('退出網站會撤銷 trusted device 並回到 Gate，但保留 draft 與 
   const state = await (await request.get('/__fake_state')).json();
   expect(Number(state.rpcCounts.monthly_v7_logout || 0)).toBe(1);
   expect(state.activeSiteResumeCount).toBe(0);
+  expect(state.activeUserResumeCount).toBe(0);
   expect(state.activeTrustedDeviceCount).toBe(0);
 });
 
@@ -1227,6 +1467,11 @@ test('忘記此裝置走專用 RPC，不混用 full logout，並保留恢復證�
   await page.locator('#site-access-password').fill('gate-pass');
   await page.getByRole('button', { name: '進入系統' }).click();
   await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await page.locator('#v5-remember-user').check();
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
   await page.evaluate(() => {
     localStorage.setItem('monthly_v7_draft:module:forget-device', JSON.stringify({
       payload: { title: '忘記裝置仍保留' }, baseRevision: 1
@@ -1235,18 +1480,25 @@ test('忘記此裝置走專用 RPC，不混用 full logout，並保留恢復證�
     renderV5SessionBar();
   });
   expect(await page.evaluate(() => localStorage.getItem('monthly_v7_site_resume_marker'))).not.toBeNull();
+  expect(await page.evaluate(() => localStorage.getItem('monthly_v7_user_resume_marker'))).not.toBeNull();
 
   await page.getByRole('button', { name: '忘記此裝置', exact: true }).click();
 
   await expect(page.locator('#siteAccessGate')).toBeVisible();
   const local = await page.evaluate(() => ({
     marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    userMarker: localStorage.getItem('monthly_v7_user_resume_marker'),
     site: sessionStorage.getItem('monthly_v7_site_session'),
+    user: sessionStorage.getItem('monthly_v7_user_session'),
+    projection: sessionStorage.getItem('monthly_v7_user_projection'),
     draft: localStorage.getItem('monthly_v7_draft:module:forget-device'),
     pending: localStorage.getItem('monthly_v7_pending:save_module:forget-device')
   }));
   expect(local.marker).toBeNull();
+  expect(local.userMarker).toBeNull();
   expect(local.site).toBeNull();
+  expect(local.user).toBeNull();
+  expect(local.projection).toBeNull();
   expect(JSON.parse(local.draft).payload.title).toBe('忘記裝置仍保留');
   expect(local.pending).toBe('{forget-device-pending-evidence');
   const state = await (await request.get('/__fake_state')).json();
@@ -1254,6 +1506,7 @@ test('忘記此裝置走專用 RPC，不混用 full logout，並保留恢復證�
   expect(Number(state.rpcCounts.monthly_v7_logout || 0)).toBe(0);
   expect(state.activeTrustedDeviceCount).toBe(0);
   expect(state.activeSiteResumeCount).toBe(0);
+  expect(state.activeUserResumeCount).toBe(0);
 });
 
 test('進站密碼 rotation 撤銷舊 trusted device、回到 Gate 並保留 recovery evidence', async ({ page, browser, request }) => {
@@ -1264,6 +1517,7 @@ test('進站密碼 rotation 撤銷舊 trusted device、回到 Gate 並保留 rec
   await page.locator('#site-access-password').fill('gate-pass');
   await page.getByRole('button', { name: '進入系統' }).click();
   await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await page.locator('#v5-remember-user').check();
   await page.locator('#v5-login-username').fill('owner');
   await page.locator('#v5-login-password').fill('owner-pass');
   await page.getByRole('button', { name: '登入', exact: true }).click();
@@ -1280,7 +1534,9 @@ test('進站密碼 rotation 撤銷舊 trusted device、回到 Gate 並保留 rec
   const staleOrigin = staleState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
   expect(staleOrigin).toBeTruthy();
   const oldMarker = await page.evaluate(() => localStorage.getItem('monthly_v7_site_resume_marker'));
+  const oldUserMarker = await page.evaluate(() => localStorage.getItem('monthly_v7_user_resume_marker'));
   expect(oldMarker).not.toBeNull();
+  expect(oldUserMarker).not.toBeNull();
 
   const beforeShortPassword = await (await request.get('/__fake_state')).json();
   let shortPasswordMessage = '';
@@ -1319,6 +1575,7 @@ test('進站密碼 rotation 撤銷舊 trusted device、回到 Gate 並保留 rec
     const serialized = JSON.stringify(entries);
     return {
       marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+      userMarker: localStorage.getItem('monthly_v7_user_resume_marker'),
       site: sessionStorage.getItem('monthly_v7_site_session'),
       user: sessionStorage.getItem('monthly_v7_user_session'),
       projection: sessionStorage.getItem('monthly_v7_user_projection'),
@@ -1329,6 +1586,7 @@ test('進站密碼 rotation 撤銷舊 trusted device、回到 Gate 並保留 rec
     };
   }, 'rotated-gate-pass');
   expect(local.marker).toBeNull();
+  expect(local.userMarker).toBeNull();
   expect(local.site).toBeNull();
   expect(local.user).toBeNull();
   expect(local.projection).toBeNull();
@@ -1343,6 +1601,7 @@ test('進站密碼 rotation 撤銷舊 trusted device、回到 Gate 並保留 rec
   await expect.poll(() => stalePage.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
   await expect(stalePage.locator('#siteAccessGate')).toBeVisible();
   await expect(stalePage.locator('#site-access-error')).toContainText('此裝置的進站恢復已失效');
+  expect(await stalePage.evaluate(() => localStorage.getItem('monthly_v7_user_resume_marker'))).toBeNull();
   await staleContext.close();
 
   await page.locator('#site-remember-device').uncheck();
@@ -1357,6 +1616,7 @@ test('進站密碼 rotation 撤銷舊 trusted device、回到 Gate 並保留 rec
   expect(Number(state.rpcCounts.monthly_v7_update_site_password || 0)).toBe(1);
   expect(state.activeTrustedDeviceCount).toBe(0);
   expect(state.activeSiteResumeCount).toBe(0);
+  expect(state.activeUserResumeCount).toBe(0);
   expect(JSON.stringify(state)).not.toContain('rotated-gate-pass');
 });
 
@@ -3998,8 +4258,11 @@ test('背景保存已在途時正式 PDF 只接續同一保存，不產生 REVIS
     await dialog.dismiss();
   });
   await enterAndLogin(page, 'owner', 'owner-pass');
-  const editor = page.locator('#tableBody .module-title-editor').first();
+  const row = page.locator('#tableBody tr').first();
+  const editor = row.locator('.module-title-editor');
   await editor.click();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(editor).toHaveAttribute('contenteditable', 'true');
   await editor.fill('背景保存與正式 PDF 共用的內容');
   await expect.poll(() => saveCalls, { timeout: 10000 }).toBe(1);
 
