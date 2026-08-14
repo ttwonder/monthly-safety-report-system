@@ -704,6 +704,367 @@ test('logoutUser 只撤銷 user session，保留 site session 與本機草稿', 
   assert.equal(client.readDraft('module', 'm1').payload.title, '尚未提交');
 });
 
+test('initialize 的 site resume timeout 保留 marker 並回到手動 Gate', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: 'c'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  const timeout = Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_exchange_site_resume: () => { throw timeout; },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-manual' }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes
+  });
+
+  const status = await client.initialize({ workspaceKey: 'workspace-test' });
+
+  assert.equal(status.mode, 'v7');
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(client.siteSession, null);
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), marker);
+  await client.openSite('gate');
+  assert.equal(client.isSiteUnlocked(), true);
+  assert.deepEqual(transport.calls.map((call) => call.name), [
+    'ensureAnonymous', 'monthly_v7_get_status', 'monthly_v7_exchange_site_resume', 'monthly_v7_open_site'
+  ]);
+});
+
+test('缺少 site resume RPC 時保留 marker 並允許既有手動進站流程', async () => {
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: 'd'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  const missingRpc = Object.assign(
+    new Error('Could not find the function public.monthly_v7_exchange_site_resume in the schema cache'),
+    { code: 'PGRST202' }
+  );
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_exchange_site_resume: () => { throw missingRpc; },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-manual' }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: memoryStorage(), resumeStorage: resumes
+  });
+
+  const status = await client.initialize({ workspaceKey: 'workspace-test' });
+
+  assert.equal(status.mode, 'v7');
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), marker);
+  await client.openSite('gate');
+  assert.equal(client.isSiteUnlocked(), true);
+});
+
+test('site resume 權限或未知 SQL 錯誤仍 fail closed，不得偽裝成 capability missing', async () => {
+  for (const failure of [
+    Object.assign(new Error('permission denied for function monthly_v7_exchange_site_resume'), { code: '42501' }),
+    Object.assign(new Error('unexpected database failure'), { code: 'XX000' })
+  ]) {
+    const resumes = memoryStorage();
+    resumes.setItem('monthly_v7_site_resume_marker', JSON.stringify({
+      version: 1,
+      purpose: 'site',
+      token: 'e'.repeat(64),
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      authorityEpoch: 2
+    }));
+    const client = new MonthlyV7Client({
+      transport: fakeTransport({
+        monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+        monthly_v7_exchange_site_resume: () => { throw failure; }
+      }),
+      sessionStorage: memoryStorage(), draftStorage: memoryStorage(), resumeStorage: resumes
+    });
+    await assert.rejects(client.initialize({ workspaceKey: 'workspace-test' }), (error) => error === failure);
+    assert.equal(client.isSiteUnlocked(), false);
+  }
+});
+
+for (const { method, rpcName } of [
+  { method: 'logout', rpcName: 'monthly_v7_logout' },
+  { method: 'forgetTrustedDevice', rpcName: 'monthly_v7_forget_trusted_device' }
+]) {
+  test(`${method} 收到 SITE_SESSION_INVALID 時仍清本機 marker 並保留 recovery evidence`, async () => {
+    const sessions = memoryStorage();
+    const drafts = memoryStorage();
+    const resumes = memoryStorage();
+    const marker = JSON.stringify({
+      version: 1,
+      purpose: 'site',
+      token: '4'.repeat(64),
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      authorityEpoch: 2
+    });
+    const transport = fakeTransport({
+      monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+      monthly_v7_open_site: { ok: true, site_session_id: `site-${method}-invalid` },
+      [rpcName]: { ok: false, error: 'SITE_SESSION_INVALID' }
+    });
+    const client = new MonthlyV7Client({
+      transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes,
+      idFactory: () => `tab-${method}-invalid`
+    });
+    await client.initialize({ workspaceKey: 'workspace-test' });
+    await client.openSite('gate');
+    resumes.setItem('monthly_v7_site_resume_marker', marker);
+    client.saveDraft('module', `m-${method}-invalid`, { title: 'session失效仍保留' }, 1);
+    drafts.setItem(`monthly_v7_pending:save_module:m-${method}-invalid`, '{session-invalid-pending');
+
+    await assert.rejects(client[method](), (error) => error?.code === 'SITE_SESSION_INVALID');
+
+    assert.equal(client.isSiteUnlocked(), false);
+    assert.equal(sessions.getItem('monthly_v7_site_session'), null);
+    assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), null);
+    assert.equal(client.readDraft('module', `m-${method}-invalid`).payload.title, 'session失效仍保留');
+    assert.equal(drafts.getItem(`monthly_v7_pending:save_module:m-${method}-invalid`), '{session-invalid-pending');
+  });
+}
+
+test('full site logout server 回 ok false 時上拋未確認，但仍清本機 marker/session 並保留 draft', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: '7'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-logout-false' },
+    monthly_v7_logout: { ok: false, error: 'LOGOUT_NOT_CONFIRMED' }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  client.saveDraft('module', 'm-logout-false', { title: '登出未確認仍保留' }, 1);
+
+  await assert.rejects(client.logout(), /LOGOUT_NOT_CONFIRMED/);
+
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(sessions.getItem('monthly_v7_site_session'), null);
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), null);
+  assert.equal(client.readDraft('module', 'm-logout-false').payload.title, '登出未確認仍保留');
+});
+
+test('full site logout 有 marker 但 server 回 trustedDeviceRevoked false 時不得宣稱已確認', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: '6'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-logout-device-false' },
+    monthly_v7_logout: { ok: true, revoked: true, trustedDeviceRevoked: false }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  client.saveDraft('module', 'm-logout-device-false', { title: '裝置撤銷未確認仍保留' }, 1);
+  drafts.setItem('monthly_v7_pending:save_module:m-logout-device-false', '{logout-device-false-pending');
+
+  await assert.rejects(
+    client.logout(),
+    (error) => error?.code === 'TRUSTED_DEVICE_REVOCATION_NOT_CONFIRMED'
+  );
+
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(sessions.getItem('monthly_v7_site_session'), null);
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), null);
+  assert.equal(client.readDraft('module', 'm-logout-device-false').payload.title, '裝置撤銷未確認仍保留');
+  assert.equal(drafts.getItem('monthly_v7_pending:save_module:m-logout-device-false'), '{logout-device-false-pending');
+});
+
+test('forgetTrustedDevice 呼叫專用撤銷 RPC 並清 sessions/marker，但保留 draft pending', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: 'f'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-forget' },
+    monthly_v7_forget_trusted_device: { ok: true, forgotten: true, trusted_device_id: 'device-forget' }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes,
+    idFactory: () => 'tab-forget'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  client.saveDraft('module', 'm-forget', { title: '忘記裝置仍保留' }, 1);
+  drafts.setItem('monthly_v7_pending:save_module:m-forget', '{forget-pending-evidence');
+  transport.calls.length = 0;
+
+  const result = await client.forgetTrustedDevice();
+
+  assert.equal(result.forgotten, true);
+  assert.deepEqual(transport.calls, [{
+    name: 'monthly_v7_forget_trusted_device',
+    params: {
+      p_workspace_key: 'workspace-test',
+      p_site_session_id: 'site-forget',
+      p_client_session_id: 'tab-forget'
+    }
+  }]);
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), null);
+  assert.equal(sessions.getItem('monthly_v7_site_session'), null);
+  assert.equal(client.readDraft('module', 'm-forget').payload.title, '忘記裝置仍保留');
+  assert.equal(drafts.getItem('monthly_v7_pending:save_module:m-forget'), '{forget-pending-evidence');
+});
+
+test('forgetTrustedDevice server 回 ok true 但 forgotten false 時上拋未確認並清本機狀態', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: '5'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-forget-false' },
+    monthly_v7_forget_trusted_device: { ok: true, forgotten: false }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes,
+    idFactory: () => 'tab-forget-false'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  client.saveDraft('module', 'm-forget-false', { title: '忘記未確認仍保留' }, 1);
+  drafts.setItem('monthly_v7_pending:save_module:m-forget-false', '{forget-false-pending');
+
+  await assert.rejects(
+    client.forgetTrustedDevice(),
+    (error) => error?.code === 'FORGET_TRUSTED_DEVICE_NOT_CONFIRMED'
+  );
+
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(sessions.getItem('monthly_v7_site_session'), null);
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), null);
+  assert.equal(client.readDraft('module', 'm-forget-false').payload.title, '忘記未確認仍保留');
+  assert.equal(drafts.getItem('monthly_v7_pending:save_module:m-forget-false'), '{forget-false-pending');
+});
+
+test('logoutUser 保留 trusted site marker，full site logout 清 marker 且保留草稿', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: 'a'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: {
+      ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' }
+    },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 1, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: []
+    },
+    monthly_v7_logout_user: { ok: true, revoked: true },
+    monthly_v7_logout: { ok: true, revoked: true, trustedDeviceRevoked: true }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  client.saveDraft('module', 'm1', { title: '登出仍保留' }, 1);
+
+  await client.logoutUser();
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), marker);
+  assert.equal(client.isSiteUnlocked(), true);
+
+  await client.logout();
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), null);
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(client.readDraft('module', 'm1').payload.title, '登出仍保留');
+});
+
+test('本機 site cleanup 不呼叫 logout RPC、不清 trusted marker，且保留草稿 pending', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: 'b'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  drafts.setItem('monthly_v7_pending:save_module:m1', '{pending-evidence');
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  client.saveDraft('module', 'm1', { title: '本機清理仍保留' }, 1);
+  transport.calls.length = 0;
+
+  client.clearLocalSiteSession('startup-snapshot-unavailable');
+
+  assert.deepEqual(transport.calls, []);
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(sessions.getItem('monthly_v7_site_session'), null);
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), marker);
+  assert.equal(client.readDraft('module', 'm1').payload.title, '本機清理仍保留');
+  assert.equal(drafts.getItem('monthly_v7_pending:save_module:m1'), '{pending-evidence');
+});
+
 test('logoutUser server 回 ok false 時上拋未確認狀態，但仍清本頁 user 且保留 site/草稿', async () => {
   const sessions = memoryStorage();
   const drafts = memoryStorage();
@@ -1079,7 +1440,7 @@ test('舊 actor 的晚到 logout finally 不得清除新 actor session', async (
   assert.equal(client.userSession.id, 'session-u2');
 });
 
-for (const method of ['logoutUser', 'logout']) {
+for (const method of ['logoutUser', 'logout', 'forgetTrustedDevice']) {
   test(`adapter ${method} 等待釋放舊 lease 時不得改用新 session 登出或刪 successor`, async () => {
     const app = new MonthlyV7BrowserApp({ transport: {} });
     let generation = 1;
@@ -1134,7 +1495,8 @@ for (const method of ['logoutUser', 'logout']) {
         return true;
       },
       async logoutUser() { logoutCalls.push({ method: 'logoutUser', context: currentContext() }); },
-      async logout() { logoutCalls.push({ method: 'logout', context: currentContext() }); }
+      async logout() { logoutCalls.push({ method: 'logout', context: currentContext() }); },
+      async forgetTrustedDevice() { logoutCalls.push({ method: 'forgetTrustedDevice', context: currentContext() }); }
     };
     app.decorateEditorRows = () => {};
 
@@ -1150,6 +1512,106 @@ for (const method of ['logoutUser', 'logout']) {
     await assert.rejects(loggingOut, (error) => error.code === 'STALE_SESSION_RESPONSE');
     assert.deepEqual(logoutCalls, []);
     assert.equal(leases.get('module:m1'), leaseU2);
+  });
+}
+
+for (const method of ['logout', 'forgetTrustedDevice']) {
+  test(`adapter ${method} 釋放 lease 時 user session 失效仍以同一 site session 執行撤銷`, async () => {
+    const app = new MonthlyV7BrowserApp({ transport: {} });
+    let generation = 1;
+    let actorUserId = 'u1';
+    let userSessionId = 'user-u1';
+    let siteSessionId = 'site-u1';
+    const lease = {
+      entityType: 'module', entityId: 'm1', leaseId: 'lease-u1', fencingToken: 1,
+      holderUserId: 'u1', clientSessionId: 'tab'
+    };
+    const revocations = [];
+    const currentContext = () => Object.freeze({
+      generation, actorUserId, userSessionId, siteSessionId, clientSessionId: 'tab'
+    });
+    const isCurrent = (context) => context.generation === generation
+      && context.actorUserId === actorUserId
+      && context.userSessionId === userSessionId
+      && context.siteSessionId === siteSessionId;
+    app.client = {
+      leases: new Map([['module:m1', lease]]),
+      captureSessionContext: currentContext,
+      isSessionContextCurrent: isCurrent,
+      assertSessionContext(context) {
+        if (!isCurrent(context)) {
+          const error = new Error('STALE_SESSION_RESPONSE');
+          error.code = 'STALE_SESSION_RESPONSE';
+          throw error;
+        }
+      },
+      async releaseCapturedLease() {
+        generation += 1;
+        actorUserId = '';
+        userSessionId = '';
+        const error = new Error('USER_SESSION_INVALID');
+        error.code = 'USER_SESSION_INVALID';
+        throw error;
+      },
+      async logout() {
+        revocations.push({ method: 'logout', context: currentContext() });
+        siteSessionId = '';
+      },
+      async forgetTrustedDevice() {
+        revocations.push({ method: 'forgetTrustedDevice', context: currentContext() });
+        siteSessionId = '';
+        return { ok: true, forgotten: true };
+      },
+      isSiteUnlocked: () => Boolean(siteSessionId)
+    };
+    app.decorateEditorRows = () => {};
+
+    await app[method]();
+
+    assert.equal(revocations.length, 1);
+    assert.equal(revocations[0].method, method);
+    assert.equal(revocations[0].context.siteSessionId, 'site-u1');
+    assert.equal(revocations[0].context.userSessionId, '');
+  });
+
+  test(`adapter ${method} 釋放 lease 時 site session 失效會清 marker 且不碰 server successor`, async () => {
+    const app = new MonthlyV7BrowserApp({ transport: {} });
+    let generation = 1;
+    let siteSessionId = 'site-u1';
+    let markerPresent = true;
+    let revocationCalls = 0;
+    const currentContext = () => Object.freeze({
+      generation, actorUserId: 'u1', userSessionId: 'user-u1', siteSessionId, clientSessionId: 'tab'
+    });
+    app.client = {
+      leases: new Map([['module:m1', { entityType: 'module', entityId: 'm1' }]]),
+      captureSessionContext: currentContext,
+      isSessionContextCurrent: (context) => context.generation === generation && context.siteSessionId === siteSessionId,
+      assertSessionContext() {
+        const error = new Error('STALE_SESSION_RESPONSE');
+        error.code = 'STALE_SESSION_RESPONSE';
+        throw error;
+      },
+      async releaseCapturedLease() {
+        generation += 1;
+        siteSessionId = '';
+        const error = new Error('SITE_SESSION_INVALID');
+        error.code = 'SITE_SESSION_INVALID';
+        throw error;
+      },
+      clearSiteResumeMarker() { markerPresent = false; },
+      clearLocalSiteSession() { siteSessionId = ''; return true; },
+      async logout() { revocationCalls += 1; },
+      async forgetTrustedDevice() { revocationCalls += 1; },
+      isSiteUnlocked: () => Boolean(siteSessionId)
+    };
+    app.decorateEditorRows = () => {};
+
+    await assert.rejects(app[method](), (error) => error?.code === 'SITE_SESSION_INVALID');
+
+    assert.equal(markerPresent, false);
+    assert.equal(siteSessionId, '');
+    assert.equal(revocationCalls, 0);
   });
 }
 
@@ -3041,6 +3503,339 @@ test('report_meta 舊 operation 回 LEASE_LOST 後才 claim 並只送一個新 o
   assert.equal(saves[1].params.p_operation_id, newOperationId);
   assert.equal(client.currentReport().revision, 2);
   assert.equal(drafts.getItem('monthly_v7_draft:report_meta:r1'), null);
+});
+
+test('敏感 pending 的 operation ID 非 UUID 時保留原始證據並零 RPC', async () => {
+  const drafts = memoryStorage();
+  const pendingKey = 'monthly_v7_pending:update_site_password:workspace-test';
+  const raw = JSON.stringify({
+    operationId: 'not-a-uuid',
+    createdAt: '2026-08-14T00:00:00.000Z',
+    actorUserId: 'u1',
+    sensitive: true,
+    rpcName: 'monthly_v7_update_site_password',
+    pendingKey: 'update_site_password:workspace-test',
+    resultUnknown: true
+  });
+  drafts.setItem(pendingKey, raw);
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-sensitive-invalid' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-sensitive-invalid', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_update_site_password: { ok: true, requiresReauth: true }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    operationIdFactory: () => '00000000-0000-4000-8000-000000000910'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  transport.calls.length = 0;
+
+  await assert.rejects(
+    client.updateSitePassword('another-new-gate-pass'),
+    (error) => error?.code === 'PENDING_OPERATION_UNRESOLVED'
+  );
+
+  assert.equal(drafts.getItem(pendingKey), raw);
+  assert.equal(transport.calls.some((call) => call.name === 'monthly_v7_update_site_password'), false);
+  assert.equal(client.isSiteUnlocked(), true);
+  assert.equal(client.currentUser()?.id, 'u1');
+});
+
+test('敏感 pending 的 createdAt 非 canonical ISO 時保留原始證據並零 RPC', async () => {
+  const drafts = memoryStorage();
+  const pendingKey = 'monthly_v7_pending:update_site_password:workspace-test';
+  const raw = JSON.stringify({
+    operationId: '00000000-0000-4000-8000-000000000991',
+    createdAt: '2026-08-14',
+    actorUserId: 'u1',
+    sensitive: true,
+    rpcName: 'monthly_v7_update_site_password',
+    pendingKey: 'update_site_password:workspace-test',
+    resultUnknown: true
+  });
+  drafts.setItem(pendingKey, raw);
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-sensitive-time' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-sensitive-time', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_update_site_password: { ok: true, operationId: '00000000-0000-4000-8000-000000000991' }
+  });
+  const client = new MonthlyV7Client({
+    transport,
+    sessionStorage: memoryStorage(),
+    draftStorage: drafts,
+    idFactory: () => 'tab-sensitive-time'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate-pass');
+  await client.login('owner', 'owner-pass');
+
+  await assert.rejects(
+    () => client.updateSitePassword('rotated-site-secret'),
+    (error) => error && error.code === 'PENDING_OPERATION_UNRESOLVED'
+  );
+
+  assert.equal(transport.calls.filter((call) => call.name === 'monthly_v7_update_site_password').length, 0);
+  assert.equal(drafts.getItem(pendingKey), raw);
+});
+
+test('createUser timeout 的 pending evidence 不得持久化帳號密碼', async () => {
+  const drafts = memoryStorage();
+  const timeout = Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' });
+  const operationId = '00000000-0000-4000-8000-000000000906';
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-create-sensitive' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-create-sensitive', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_create_user: () => { throw timeout; }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-create-sensitive', operationIdFactory: () => operationId
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  await assert.rejects(
+    client.createUser({ username: 'admin-secret', displayName: 'Admin', role: 'admin', password: 'never-store-this-pass' }),
+    (error) => error === timeout
+  );
+
+  const raw = drafts.getItem('monthly_v7_pending:create_user:admin-secret');
+  assert.ok(raw);
+  const pending = JSON.parse(raw);
+  assert.equal(pending.operationId, operationId);
+  assert.equal(pending.sensitive, true);
+  assert.equal(pending.resultUnknown, true);
+  assert.equal(pending.rpcName, 'monthly_v7_create_user');
+  assert.equal(raw.includes('never-store-this-pass'), false);
+  assert.equal(raw.includes('p_password'), false);
+});
+
+test('updateUser 密碼重設 timeout 的 pending evidence 不得持久化帳號密碼', async () => {
+  const drafts = memoryStorage();
+  const timeout = Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' });
+  const operationId = '00000000-0000-4000-8000-000000000911';
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-update-sensitive' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-update-sensitive', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_update_user: () => { throw timeout; }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-update-sensitive', operationIdFactory: () => operationId
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  await assert.rejects(
+    client.updateUser('u2', {
+      username: 'operator', displayName: 'Operator', role: 'operator', password: 'reset-secret-pass'
+    }),
+    (error) => error === timeout
+  );
+
+  const raw = drafts.getItem('monthly_v7_pending:update_user:u2');
+  assert.ok(raw);
+  const pending = JSON.parse(raw);
+  assert.equal(pending.operationId, operationId);
+  assert.equal(pending.sensitive, true);
+  assert.equal(pending.resultUnknown, true);
+  assert.equal(pending.rpcName, 'monthly_v7_update_user');
+  assert.equal(raw.includes('reset-secret-pass'), false);
+  assert.equal(raw.includes('p_new_password'), false);
+});
+
+test('site password rotation 未知結果在重新登入後沿用原 operation ID 對帳', async () => {
+  const drafts = memoryStorage();
+  const sessions = memoryStorage();
+  const resumes = memoryStorage();
+  const operationId = '00000000-0000-4000-8000-000000000907';
+  const timeout = Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' });
+  const firstTransport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-first' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-first', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_update_site_password: () => { throw timeout; }
+  });
+  const first = new MonthlyV7Client({
+    transport: firstTransport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes,
+    idFactory: () => 'tab-sensitive-first', operationIdFactory: () => operationId
+  });
+  await first.initialize({ workspaceKey: 'workspace-test' });
+  await first.openSite('gate');
+  await first.login('owner', 'pass');
+  await assert.rejects(first.updateSitePassword('same-new-gate-pass'), (error) => error === timeout);
+
+  const secondTransport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-second' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-second', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_update_site_password: { ok: true, requiresReauth: true, generation: 2 }
+  });
+  const second = new MonthlyV7Client({
+    transport: secondTransport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes,
+    idFactory: () => 'tab-sensitive-second',
+    operationIdFactory: () => { throw new Error('NEW_OPERATION_ID_FORBIDDEN'); }
+  });
+  await second.initialize({ workspaceKey: 'workspace-test' });
+  await second.openSite('gate');
+  await second.login('owner', 'pass');
+
+  const result = await second.updateSitePassword('same-new-gate-pass');
+
+  assert.equal(result.ok, true);
+  const calls = secondTransport.calls.filter((call) => call.name === 'monthly_v7_update_site_password');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.p_operation_id, operationId);
+  assert.equal(second.lastOperationReceipt().saveOrigin, 'pending-replay');
+  assert.equal(drafts.getItem('monthly_v7_pending:update_site_password:workspace-test'), null);
+});
+
+test('site password rotation timeout 時本機 fail closed 並保留 pending/draft 證據', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: '8'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  const operationId = '00000000-0000-4000-8000-000000000908';
+  const timeout = new Error('RPC_TIMEOUT');
+  timeout.code = 'RPC_TIMEOUT';
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-rotate-timeout' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-rotate-timeout', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_update_site_password: () => { throw timeout; }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes,
+    idFactory: () => 'tab-rotate-timeout', operationIdFactory: () => operationId
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  client.saveDraft('module', 'm-rotate-timeout', { title: 'rotation timeout 仍保留' }, 1);
+
+  await assert.rejects(client.updateSitePassword('new-gate-pass'), (error) => error === timeout);
+
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(client.currentUser(), null);
+  assert.equal(sessions.getItem('monthly_v7_site_session'), null);
+  assert.equal(sessions.getItem('monthly_v7_user_session'), null);
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), null);
+  assert.equal(client.readDraft('module', 'm-rotate-timeout').payload.title, 'rotation timeout 仍保留');
+  const pending = JSON.parse(drafts.getItem('monthly_v7_pending:update_site_password:workspace-test'));
+  assert.equal(pending.operationId, operationId);
+  assert.equal(pending.resultUnknown, true);
+  assert.equal(pending.sensitive, true);
+  assert.equal(pending.rpcName, 'monthly_v7_update_site_password');
+  assert.equal(pending.actorUserId, 'u1');
+  assert.equal(JSON.stringify(pending).includes('new-gate-pass'), false);
+  assert.equal(JSON.stringify(pending).includes('p_new_password'), false);
+  assert.equal(client.lastOperationReceipt().state, 'RESULT_UNKNOWN_PENDING_RECONCILIATION');
+});
+
+test('敏感 operation 第一個確定錯誤後第二次 timeout 仍保留原 operation envelope', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const operationId = '00000000-0000-4000-8000-000000000912';
+  const firstError = Object.assign(new Error('TEMPORARY_FAILURE'), { code: 'TEMPORARY_FAILURE' });
+  const timeout = Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' });
+  let attempts = 0;
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-sensitive-mixed-retry' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-sensitive-mixed-retry', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_update_site_password: () => {
+      attempts += 1;
+      throw attempts === 1 ? firstError : timeout;
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes,
+    idFactory: () => 'tab-sensitive-mixed-retry', operationIdFactory: () => operationId
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  await assert.rejects(client.updateSitePassword('mixed-retry-secret'), (error) => error === timeout);
+
+  const calls = transport.calls.filter((call) => call.name === 'monthly_v7_update_site_password');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((call) => call.params.p_operation_id), [operationId, operationId]);
+  const rawPending = drafts.getItem('monthly_v7_pending:update_site_password:workspace-test');
+  assert.notEqual(rawPending, null);
+  const pending = JSON.parse(rawPending);
+  assert.equal(pending.operationId, operationId);
+  assert.equal(pending.resultUnknown, true);
+  assert.equal(rawPending.includes('mixed-retry-secret'), false);
+  assert.equal(rawPending.includes('p_new_password'), false);
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(client.currentUser(), null);
+});
+
+test('site password rotation 成功後清 trusted marker 與 sessions，但保留 draft pending', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: '9'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-rotate' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-rotate', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_update_site_password: { ok: true, requiresReauth: true, generation: 2 }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes,
+    idFactory: () => 'tab-rotate',
+    operationIdFactory: () => '00000000-0000-4000-8000-000000000909'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+  resumes.setItem('monthly_v7_site_resume_marker', marker);
+  client.saveDraft('module', 'm-rotate', { title: '換密碼仍保留' }, 1);
+  drafts.setItem('monthly_v7_pending:save_module:m-rotate', '{rotate-pending-evidence');
+
+  const result = await client.updateSitePassword('new-gate-pass');
+
+  assert.equal(result.requiresReauth, true);
+  assert.equal(client.isSiteUnlocked(), false);
+  assert.equal(client.currentUser(), null);
+  assert.equal(sessions.getItem('monthly_v7_site_session'), null);
+  assert.equal(sessions.getItem('monthly_v7_user_session'), null);
+  assert.equal(resumes.getItem('monthly_v7_site_resume_marker'), null);
+  assert.equal(client.readDraft('module', 'm-rotate').payload.title, '換密碼仍保留');
+  assert.equal(drafts.getItem('monthly_v7_pending:save_module:m-rotate'), '{rotate-pending-evidence');
 });
 
 test('user 管理、正式 snapshot 與 site password rotation 走 server RPC 並撤銷本頁 sessions', async () => {

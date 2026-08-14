@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.18';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.19';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -1997,6 +1997,10 @@
                 <div class="text-sm text-slate-500">請輸入網站進入密碼</div>
             </div>
             <input id="site-access-password" type="password" class="site-access-input mb-3" placeholder="網站密碼" autocomplete="current-password" onkeydown="if(event.key==='Enter') siteAccessUnlockFromForm()">
+            <label class="mb-3 flex items-center gap-2 text-sm text-slate-600">
+                <input id="site-remember-device" type="checkbox" class="accent-sky-600">
+                記住此裝置（最多 12 小時）
+            </label>
             <button class="site-access-btn" onclick="siteAccessUnlockFromForm()"><i class="fas fa-right-to-bracket mr-1"></i>進入系統</button>
             <div id="site-access-error" class="text-sm text-rose-600 font-bold mt-3 min-h-[20px]"></div>
             <div id="site-safe-reload-panel" class="hidden mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-left">
@@ -7471,6 +7475,7 @@
             const input = document.getElementById('site-access-password');
             const error = document.getElementById('site-access-error');
             const password = input ? input.value : '';
+            const rememberDevice = document.getElementById('site-remember-device')?.checked === true;
             const authorityMode = v4CloudAuthorityMode();
             if (authorityMode === 'blocked') {
                 if (error) error.textContent = '雲端安全驗證尚未完成，已停止登入與同步。';
@@ -7479,15 +7484,24 @@
             }
             if (authorityMode === 'v7') {
                 try {
-                    await window.MonthlyV7App.openSite(password);
+                    const result = await window.MonthlyV7App.openSite(password, { rememberDevice });
+                    const resumeRemembered = result?.resumeRemembered;
                     if (error) error.textContent = '';
                     if (input) input.value = '';
                     siteAccessRenderGate();
                     await monthlyReportBoot();
+                    if (resumeRemembered === false) {
+                        showToast('已成功進入，但無法記住此裝置；下次需重新輸入進站密碼。');
+                    }
                     return true;
                 } catch (err) {
-                    if (error) error.textContent = '密碼不正確或雲端驗證暫時不可用。';
+                    const code = String(err?.authorityFailureCode || err?.code || err?.message || '');
+                    if (error) error.textContent = ['AUTHORITY_CHANGED', 'AUTHORITY_NOT_ACTIVE']
+                        .some(value => code.includes(value))
+                        ? '雲端權威狀態已變更，已停止進站與同步；本機草稿仍完整保留。'
+                        : '密碼不正確或雲端驗證暫時不可用。';
                     if (input) { input.value = ''; input.focus(); }
+                    siteAccessRenderGate();
                     return false;
                 }
             }
@@ -7508,7 +7522,7 @@
             if (v4RejectUnsafeCloudFallback({ alert: true })) return;
             const p1 = document.getElementById('site-access-new-password')?.value || '';
             const p2 = document.getElementById('site-access-confirm-password')?.value || '';
-            if (!p1 || p1.length < 6) return alert('請輸入至少 6 個字元的新網站密碼。');
+            if (!p1 || p1.length < 8) return alert('請輸入至少 8 個字元的新網站密碼。');
             if (p1 !== p2) return alert('兩次輸入的新網站密碼不一致。');
             if (window.MonthlyV7App?.isActive?.()) {
                 try {
@@ -7960,6 +7974,49 @@
             renderV5SessionBar();
             showToast(serverRevoked ? '帳號已登出' : '本分頁已登出；伺服器撤銷未確認');
         }
+        async function siteAccessExitSite() {
+            let serverRevoked = true;
+            try {
+                if (window.MonthlyV7App?.isActive?.()) {
+                    v7PreserveVisibleEditorDrafts();
+                    v7ClearCloudAutoSaveTimer();
+                    await window.MonthlyV7App.logout();
+                }
+            } catch (error) {
+                serverRevoked = false;
+                console.warn('[Monthly V7] site logout acknowledgement unavailable', error);
+            } finally {
+                v5SetSession(null);
+                siteAccessForgetUnlock();
+                siteAccessRenderGate();
+                const error = document.getElementById('site-access-error');
+                if (error) error.textContent = serverRevoked
+                    ? '已退出網站；本機草稿仍完整保留。'
+                    : '本機已退出；伺服器撤銷未確認，本機草稿仍完整保留。';
+            }
+            return serverRevoked;
+        }
+        async function siteAccessForgetTrustedDevice() {
+            let serverRevoked = true;
+            try {
+                if (!window.MonthlyV7App?.isActive?.()) throw new Error('TRUSTED_DEVICE_UNAVAILABLE');
+                v7PreserveVisibleEditorDrafts();
+                v7ClearCloudAutoSaveTimer();
+                await window.MonthlyV7App.forgetTrustedDevice();
+            } catch (error) {
+                serverRevoked = false;
+                console.warn('[Monthly V7] trusted-device revocation acknowledgement unavailable', error);
+            } finally {
+                v5SetSession(null);
+                siteAccessForgetUnlock();
+                siteAccessRenderGate();
+                const error = document.getElementById('site-access-error');
+                if (error) error.textContent = serverRevoked
+                    ? '已忘記此裝置；本機草稿仍完整保留。'
+                    : '本機已忘記此裝置；伺服器撤銷未確認，本機草稿仍完整保留。';
+            }
+            return serverRevoked;
+        }
         async function v5SyncLatest() {
             await v4AutoSyncLatestFromCloud({ silent: false, source: '正在同步最新雲端資料...' });
         }
@@ -8013,6 +8070,8 @@
                     <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
                     <button class="v5-sync-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改</button>
                     <button class="v5-sync-btn" onclick="v5Logout()">登出</button>
+                    <button class="v5-sync-btn" onclick="siteAccessForgetTrustedDevice()">忘記此裝置</button>
+                    <button class="v5-sync-btn" onclick="siteAccessExitSite()">退出網站</button>
                     <span class="text-[11px] text-slate-500">server session｜分頁獨立</span>
                     ${v4CloudStatusHtml()}
                 </div>` : `
@@ -8026,6 +8085,8 @@
                     </label>
                     <button class="v5-sync-btn" onclick="v5Login()"${disabledAttr}>登入</button>
                     <button class="v5-sync-btn" onclick="v5SyncLatest()"${disabledAttr}><i class="fas fa-rotate mr-1"></i>同步最新</button>
+                    <button class="v5-sync-btn" onclick="siteAccessForgetTrustedDevice()">忘記此裝置</button>
+                    <button class="v5-sync-btn" onclick="siteAccessExitSite()">退出網站</button>
                     ${v4CloudStatusHtml()}
                 </div>`;
         }
@@ -8424,9 +8485,10 @@
                 SITE_ACCESS_BOOTED = false;
                 V4_STARTUP_SYNC_DONE = false;
                 try {
-                    await window.MonthlyV7App.logout();
+                    const code = String(window.MonthlyV7App?.client?.lastRpc?.() || 'SNAPSHOT_UNAVAILABLE');
+                    window.MonthlyV7App.clearLocalSiteSession('startup-snapshot-unavailable', code);
                 } catch (error) {
-                    console.warn('[Monthly V7] startup cleanup acknowledgement unavailable', error);
+                    console.warn('[Monthly V7] startup local session cleanup unavailable', error);
                 } finally {
                     const gateError = document.getElementById('site-access-error');
                     if (gateError) gateError.textContent = '雲端帳號資料讀取失敗，已停止登入與同步；本機草稿仍保留。';
@@ -8466,6 +8528,19 @@
                 }
             }
             siteAccessRenderGate();
+            if (window.MonthlyV7App?.status?.siteResumeErrorCode === 'SITE_RESUME_INVALID') {
+                const gateError = document.getElementById('site-access-error');
+                if (gateError) gateError.textContent = '此裝置的進站恢復已失效，請重新輸入進站密碼；本機草稿仍完整保留。';
+            } else if (window.MonthlyV7App?.status?.siteResumeErrorCode === 'SITE_RESUME_AUTHORITY_CHANGED') {
+                const gateError = document.getElementById('site-access-error');
+                if (gateError) gateError.textContent = '雲端權威版本已變更，已停止自動進站；請重新輸入進站密碼，本機草稿仍完整保留。';
+            } else if (window.MonthlyV7App?.status?.siteResumeErrorCode === 'RPC_TIMEOUT') {
+                const gateError = document.getElementById('site-access-error');
+                if (gateError) gateError.textContent = '自動進站暫時失敗；可信裝置資料已保留，可直接輸入進站密碼，本機草稿未變更。';
+            } else if (window.MonthlyV7App?.status?.siteResumeErrorCode === 'SITE_RESUME_CAPABILITY_MISSING') {
+                const gateError = document.getElementById('site-access-error');
+                if (gateError) gateError.textContent = '可信裝置恢復尚未啟用；可直接輸入進站密碼，本機草稿與裝置資料未變更。';
+            }
             if (siteAccessIsUnlocked() || window.MonthlyV7App?.isSiteSessionPendingValidation?.()) {
                 await monthlyReportBoot();
             }

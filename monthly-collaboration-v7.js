@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.18';
+  const buildId = '7.0.19';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -258,6 +258,7 @@
         transport: this.transport,
         sessionStorage: root.sessionStorage,
         draftStorage: root.localStorage,
+        resumeStorage: root.localStorage,
         host: this.clientHost()
       });
       try {
@@ -341,8 +342,28 @@
       });
     }
 
-    async openSite(password) {
+    async openSite(password, options = {}) {
       const result = await this.client.openSite(password);
+      if (options.rememberDevice === true) {
+        try {
+          await this.client.issueSiteResume();
+          result.resumeRemembered = true;
+        } catch (error) {
+          const authorityCode = this.authorityFailureCode(error);
+          if (authorityCode) {
+            try { error.code = authorityCode; } catch (_error) { /* preserve original error */ }
+            this.client.clearSiteResumeMarker();
+            this.client.clearLocalSiteSession('site-resume-authority-changed', authorityCode);
+            throw error;
+          }
+          const sessionCode = this.client && typeof this.client.sessionErrorCode === 'function'
+            ? this.client.sessionErrorCode(error)
+            : '';
+          if (sessionCode || error?.code === 'STALE_SESSION_RESPONSE') throw error;
+          result.resumeRemembered = false;
+          result.resumeWarning = String(error && (error.code || error.message) || 'SITE_RESUME_ISSUE_FAILED');
+        }
+      }
       return result;
     }
 
@@ -380,13 +401,43 @@
       for (const timer of this.moduleReleaseTimers.values()) root.clearTimeout(timer);
       this.moduleReleaseTimers.clear();
       const leases = Array.from(client.leases.values());
-      await Promise.allSettled(leases.map((lease) => client.releaseCapturedLease(lease, operationContext)));
-      this.assertOperationContext(operationContext, 'logout_site_release');
+      const releaseResults = await Promise.allSettled(
+        leases.map((lease) => client.releaseCapturedLease(lease, operationContext))
+      );
+      this.assertSiteOperationContext(operationContext, 'logout_site_release', releaseResults);
       await client.logout();
       if (typeof client.isSiteUnlocked === 'function' && client.isSiteUnlocked()) {
         this.assertOperationContext(operationContext, 'logout_site_complete');
       }
       this.decorateEditorRows();
+    }
+
+    async forgetTrustedDevice() {
+      if (!this.client) return;
+      const client = this.client;
+      const operationContext = this.captureOperationContext();
+      for (const timer of this.moduleReleaseTimers.values()) root.clearTimeout(timer);
+      this.moduleReleaseTimers.clear();
+      const leases = Array.from(client.leases.values());
+      const releaseResults = await Promise.allSettled(
+        leases.map((lease) => client.releaseCapturedLease(lease, operationContext))
+      );
+      this.assertSiteOperationContext(operationContext, 'forget_trusted_device_release', releaseResults);
+      const result = await client.forgetTrustedDevice();
+      if (typeof client.isSiteUnlocked === 'function' && client.isSiteUnlocked()) {
+        this.assertOperationContext(operationContext, 'forget_trusted_device_complete');
+      }
+      this.decorateEditorRows();
+      return result;
+    }
+
+    clearLocalSiteSession(reason = 'local-site-session-cleared', code = '') {
+      if (!this.client) return false;
+      for (const timer of this.moduleReleaseTimers.values()) root.clearTimeout(timer);
+      this.moduleReleaseTimers.clear();
+      const cleared = this.client.clearLocalSiteSession(reason, code);
+      this.decorateEditorRows();
+      return cleared;
     }
 
     async loadSnapshot() {
@@ -420,6 +471,31 @@
         this.client.assertSessionContext(context, operationName);
       }
       return context;
+    }
+
+    assertSiteOperationContext(context, operationName = '', releaseResults = []) {
+      if (!context || !this.client) return context;
+      const current = this.captureOperationContext();
+      const originalSiteSessionId = String(context.siteSessionId || '');
+      const currentSiteSessionId = String(current && current.siteSessionId || '');
+      const sameClientSession = String(current && current.clientSessionId || '')
+        === String(context.clientSessionId || '');
+      if (originalSiteSessionId && sameClientSession && currentSiteSessionId === originalSiteSessionId) {
+        return context;
+      }
+      const siteInvalid = releaseResults.find((entry) => {
+        if (!entry || entry.status !== 'rejected') return false;
+        const code = String(entry.reason && (entry.reason.code || entry.reason.message) || '');
+        return code.includes('SITE_SESSION_INVALID');
+      });
+      if (!currentSiteSessionId && siteInvalid) {
+        if (typeof this.client.clearSiteResumeMarker === 'function') this.client.clearSiteResumeMarker();
+        if (typeof this.client.clearLocalSiteSession === 'function') {
+          this.client.clearLocalSiteSession(`${operationName}-site-invalid`, 'SITE_SESSION_INVALID');
+        }
+        throw siteInvalid.reason;
+      }
+      return this.assertOperationContext(context, operationName);
     }
 
     enqueue(task, operationName = 'queued-persist', options = {}) {

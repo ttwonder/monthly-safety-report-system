@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.18';
+  const buildId = '7.0.19';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
@@ -18,6 +18,7 @@
       this.transport = options.transport;
       this.sessionStorage = options.sessionStorage || null;
       this.draftStorage = options.draftStorage || null;
+      this.resumeStorage = options.resumeStorage || null;
       this.core = options.core || core;
       this.host = options.host || {};
       this.idFactory = options.idFactory || (() => {
@@ -46,6 +47,115 @@
       this.operationReceipt = null;
       this.operationReceiptHistory = [];
       this.lastRpcName = '';
+    }
+
+    siteResumeStorageKey() { return 'monthly_v7_site_resume_marker'; }
+
+    readSiteResumeMarker() {
+      if (!this.resumeStorage) return null;
+      let raw = null;
+      try { raw = this.resumeStorage.getItem(this.siteResumeStorageKey()); }
+      catch (_error) { return null; }
+      if (raw === null) return null;
+      try {
+        const marker = JSON.parse(raw);
+        const expiresAt = Date.parse(String(marker && marker.expiresAt || ''));
+        if (!marker || marker.version !== 1 || marker.purpose !== 'site'
+          || !/^[0-9a-f]{64}$/.test(String(marker.token || ''))
+          || !Number.isInteger(Number(marker.authorityEpoch)) || Number(marker.authorityEpoch) <= 0
+          || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+          this.clearSiteResumeMarker();
+          return null;
+        }
+        return Object.assign({}, marker);
+      } catch (_error) {
+        this.clearSiteResumeMarker();
+        return null;
+      }
+    }
+
+    writeSiteResumeMarker(result) {
+      if (!this.resumeStorage) return false;
+      const marker = {
+        version: 1,
+        purpose: 'site',
+        token: String(result && (result.resume_token || result.resumeToken) || ''),
+        expiresAt: String(result && (result.expires_at || result.expiresAt) || ''),
+        authorityEpoch: Number(result && (result.authority_epoch ?? result.authorityEpoch) || this.status.authorityEpoch || 0)
+      };
+      if (!/^[0-9a-f]{64}$/.test(marker.token)
+        || !Number.isFinite(Date.parse(marker.expiresAt))
+        || !Number.isInteger(marker.authorityEpoch) || marker.authorityEpoch <= 0) {
+        throw new Error('SITE_RESUME_MARKER_INVALID');
+      }
+      this.resumeStorage.setItem(this.siteResumeStorageKey(), JSON.stringify(marker));
+      return true;
+    }
+
+    clearSiteResumeMarker() {
+      if (!this.resumeStorage) return false;
+      try { this.resumeStorage.removeItem(this.siteResumeStorageKey()); return true; }
+      catch (_error) { return false; }
+    }
+
+    isSiteResumeCapabilityMissing(error) {
+      const code = String(error && error.code || '');
+      const detail = [error && error.message, error && error.details, error && error.hint]
+        .map((value) => String(value || ''))
+        .join(' ');
+      return code === 'PGRST202' && detail.includes('monthly_v7_exchange_site_resume');
+    }
+
+    async issueSiteResume() {
+      if (!this.isSiteUnlocked()) throw new Error('SITE_SESSION_REQUIRED');
+      const result = await this.rpc('monthly_v7_issue_site_resume', {
+        p_workspace_key: this.config.workspaceKey,
+        p_site_session_id: this.siteSession.id,
+        p_client_session_id: this.clientSessionId
+      });
+      if (!result || result.ok !== true) throw new Error(result && result.error || 'SITE_RESUME_ISSUE_FAILED');
+      this.writeSiteResumeMarker(result);
+      return this.readSiteResumeMarker();
+    }
+
+    async restoreSiteFromMarker() {
+      const marker = this.readSiteResumeMarker();
+      if (!marker) return null;
+      if (Number(marker.authorityEpoch) !== Number(this.status.authorityEpoch)) {
+        this.clearSiteResumeMarker();
+        const error = new Error('SITE_RESUME_AUTHORITY_CHANGED');
+        error.code = 'SITE_RESUME_AUTHORITY_CHANGED';
+        throw error;
+      }
+      let result;
+      try {
+        result = await this.rpc('monthly_v7_exchange_site_resume', {
+          p_workspace_key: this.config.workspaceKey,
+          p_resume_token: marker.token,
+          p_client_session_id: this.clientSessionId
+        });
+      } catch (error) {
+        if (String(error && (error.code || error.message) || '').includes('SITE_RESUME_INVALID')) {
+          this.clearSiteResumeMarker();
+        }
+        throw error;
+      }
+      if (!result || result.ok !== true) {
+        const code = String(result && result.error || 'SITE_RESUME_FAILED');
+        if (code === 'SITE_RESUME_INVALID') this.clearSiteResumeMarker();
+        const error = new Error(code);
+        error.code = code;
+        throw error;
+      }
+      this.siteSession = {
+        id: result.site_session_id || result.siteSessionId,
+        expiresAt: result.expires_at || result.expiresAt || ''
+      };
+      this.siteSessionPendingValidation = true;
+      if (this.sessionStorage) this.sessionStorage.setItem('monthly_v7_site_session', JSON.stringify(this.siteSession));
+      this.writeSiteResumeMarker(result);
+      this.sessionGeneration += 1;
+      return Object.assign({}, this.siteSession);
     }
 
     lastRpc() {
@@ -279,7 +389,8 @@
         authorityState,
         authorityEpoch,
         minimumClientVersion,
-        errorCode: ''
+        errorCode: '',
+        siteResumeErrorCode: ''
       };
       if (this.status.mode === 'v7' && this.sessionStorage) {
         try { this.siteSession = JSON.parse(this.sessionStorage.getItem('monthly_v7_site_session') || 'null'); } catch { this.siteSession = null; }
@@ -287,6 +398,21 @@
         try { this.user = JSON.parse(this.sessionStorage.getItem('monthly_v7_user_projection') || 'null'); } catch { this.user = null; }
         this.siteSessionPendingValidation = !!(this.siteSession && this.siteSession.id);
         this.userSessionPendingValidation = !!(this.userSession && this.userSession.id && this.user);
+      }
+      if (this.status.mode === 'v7' && !this.hasSiteSession()) {
+        try {
+          await this.restoreSiteFromMarker();
+        } catch (error) {
+          const code = String(error && (error.code || error.message) || '');
+          if (['SITE_RESUME_INVALID', 'SITE_RESUME_AUTHORITY_CHANGED', 'RPC_TIMEOUT'].includes(code)) {
+            this.status.siteResumeErrorCode = code;
+          }
+          if (this.isSiteResumeCapabilityMissing(error)) {
+            this.status.siteResumeErrorCode = 'SITE_RESUME_CAPABILITY_MISSING';
+          }
+          if (!['SITE_RESUME_INVALID', 'SITE_RESUME_AUTHORITY_CHANGED', 'RPC_TIMEOUT'].includes(code)
+            && !this.isSiteResumeCapabilityMissing(error)) throw error;
+        }
       }
       return Object.assign({}, this.status);
     }
@@ -1560,6 +1686,101 @@
       throw lastError;
     }
 
+    async executeSensitiveOperation(rpcName, params, pendingKey, options = {}) {
+      const storageKey = `monthly_v7_pending:${pendingKey}`;
+      const requestedOrigin = String(options.saveOrigin || 'manual');
+      const currentActorId = String((this.currentUser() && this.currentUser().id) || '');
+      const operationIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const canonicalTimestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+      let pending = null;
+      if (this.draftStorage) {
+        const raw = this.draftStorage.getItem(storageKey);
+        if (raw !== null) {
+          try { pending = JSON.parse(raw); }
+          catch (_error) { throw this.pendingOperationError(); }
+          const keys = pending && typeof pending === 'object' && !Array.isArray(pending)
+            ? Object.keys(pending).sort()
+            : [];
+          const expectedKeys = [
+            'actorUserId', 'createdAt', 'operationId', 'pendingKey', 'resultUnknown',
+            'rpcName', 'sensitive'
+          ].sort();
+          if (keys.length !== expectedKeys.length
+            || !keys.every((key, index) => key === expectedKeys[index])
+            || pending.sensitive !== true
+            || pending.resultUnknown !== true
+            || pending.rpcName !== rpcName
+            || pending.pendingKey !== pendingKey
+            || typeof pending.operationId !== 'string' || !operationIdPattern.test(pending.operationId)
+            || typeof pending.createdAt !== 'string'
+            || !canonicalTimestampPattern.test(pending.createdAt)
+            || !Number.isFinite(Date.parse(pending.createdAt))
+            || new Date(pending.createdAt).toISOString() !== pending.createdAt
+            || typeof pending.actorUserId !== 'string' || !pending.actorUserId) {
+            throw this.pendingOperationError();
+          }
+          if (pending.actorUserId !== currentActorId) {
+            throw this.pendingOperationError('PENDING_OPERATION_ACTOR_MISMATCH');
+          }
+        }
+      }
+      const operationId = pending ? pending.operationId : this.operationIdFactory();
+      const startedAt = new Date().toISOString();
+      const envelope = {
+        operationId: String(operationId || ''),
+        createdAt: pending ? pending.createdAt : startedAt,
+        actorUserId: currentActorId,
+        sensitive: true,
+        rpcName: String(rpcName || ''),
+        pendingKey: String(pendingKey || ''),
+        resultUnknown: true
+      };
+      if (this.draftStorage) this.draftStorage.setItem(storageKey, JSON.stringify(envelope));
+      this.setOperationReceipt({
+        state: 'SAVING', rpcName: String(rpcName || ''), pendingKey: String(pendingKey || ''),
+        operationId: String(operationId || ''), requestedOrigin,
+        saveOrigin: pending ? 'pending-replay' : requestedOrigin,
+        attempt: 0, errorCode: '', startedAt, updatedAt: startedAt
+      });
+      const request = Object.assign({}, params, { p_operation_id: operationId });
+      let lastError;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (this.draftStorage) this.draftStorage.setItem(storageKey, JSON.stringify(envelope));
+        this.setOperationReceipt(Object.assign({}, this.operationReceipt, {
+          state: 'SAVING', attempt: attempt + 1, errorCode: '', updatedAt: new Date().toISOString()
+        }));
+        try {
+          const result = await this.rpc(rpcName, request);
+          const preserveMismatch = result && result.ok === false && result.error === 'IDEMPOTENCY_MISMATCH';
+          if (this.draftStorage && !preserveMismatch) this.draftStorage.removeItem(storageKey);
+          const resultCode = result && result.ok === false ? String(result.error || '') : '';
+          this.setOperationReceipt(Object.assign({}, this.operationReceipt, {
+            state: result && result.ok === true
+              ? 'CLOUD_CONFIRMED'
+              : this.operationFailureState(resultCode),
+            errorCode: resultCode,
+            updatedAt: new Date().toISOString()
+          }));
+          return result;
+        } catch (error) {
+          lastError = error;
+          const authorityCode = this.authorityFailureCode(error);
+          const code = authorityCode || String(error && (error.code || error.message) || '');
+          const message = String(error && error.message || error || '');
+          const resultUnknown = code === 'RPC_TIMEOUT'
+            || /failed to fetch|networkerror|network request failed/i.test(message);
+          this.setOperationReceipt(Object.assign({}, this.operationReceipt, {
+            state: this.operationFailureState(code, { error, resultUnknown }),
+            errorCode: code,
+            updatedAt: new Date().toISOString()
+          }));
+          if (!resultUnknown && this.draftStorage) this.draftStorage.removeItem(storageKey);
+          if (authorityCode || this.sessionErrorCode(error) || error?.code === 'STALE_SESSION_RESPONSE') throw error;
+        }
+      }
+      throw lastError;
+    }
+
     async saveModule(item, options = {}) {
       this.requireUserSession();
       const operationContext = this.captureSessionContext();
@@ -2214,7 +2435,7 @@
 
     async createUser(profile) {
       this.requireUserSession();
-      const result = this.commandResult(await this.executeOperation('monthly_v7_create_user', {
+      const result = this.commandResult(await this.executeSensitiveOperation('monthly_v7_create_user', {
         p_workspace_key: this.config.workspaceKey,
         p_user_session_id: this.userSession.id,
         p_client_session_id: this.clientSessionId,
@@ -2229,7 +2450,7 @@
 
     async updateUser(targetUserId, profile) {
       this.requireUserSession();
-      const result = this.commandResult(await this.executeOperation('monthly_v7_update_user', {
+      const params = {
         p_workspace_key: this.config.workspaceKey,
         p_user_session_id: this.userSession.id,
         p_client_session_id: this.clientSessionId,
@@ -2238,7 +2459,13 @@
         p_display_name: String(profile && profile.displayName || profile && profile.username || '').trim(),
         p_role: String(profile && profile.role || 'operator'),
         p_new_password: profile && profile.password ? String(profile.password) : null
-      }, `update_user:${targetUserId}`), 'UPDATE_USER_FAILED');
+      };
+      const execute = params.p_new_password
+        ? this.executeSensitiveOperation.bind(this)
+        : this.executeOperation.bind(this);
+      const result = this.commandResult(await execute(
+        'monthly_v7_update_user', params, `update_user:${targetUserId}`
+      ), 'UPDATE_USER_FAILED');
       if (typeof this.host.onUsersChanged === 'function') this.host.onUsersChanged(result.user);
       return result.user;
     }
@@ -2270,14 +2497,27 @@
 
     async updateSitePassword(newPassword) {
       this.requireUserSession();
-      const result = this.commandResult(await this.executeOperation('monthly_v7_update_site_password', {
-        p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
-        p_new_password: String(newPassword || '')
-      }, `update_site_password:${this.config.workspaceKey}`), 'UPDATE_SITE_PASSWORD_FAILED');
-      this.clearSessions();
-      return result;
+      try {
+        const result = this.commandResult(await this.executeSensitiveOperation('monthly_v7_update_site_password', {
+          p_workspace_key: this.config.workspaceKey,
+          p_user_session_id: this.userSession.id,
+          p_client_session_id: this.clientSessionId,
+          p_new_password: String(newPassword || '')
+        }, `update_site_password:${this.config.workspaceKey}`), 'UPDATE_SITE_PASSWORD_FAILED');
+        this.clearSiteResumeMarker();
+        this.clearSessions('site-password-rotated');
+        return result;
+      } catch (error) {
+        const code = String(error && (error.code || error.message) || '');
+        const message = String(error && error.message || error || '');
+        const resultUnknown = code === 'RPC_TIMEOUT'
+          || /failed to fetch|networkerror|network request failed/i.test(message);
+        if (resultUnknown) {
+          this.clearSiteResumeMarker();
+          this.clearSessions('site-password-rotation-unconfirmed', code);
+        }
+        throw error;
+      }
     }
 
     async getEntity(entityType, entityId) {
@@ -2394,18 +2634,67 @@
 
     async logout() {
       const operationContext = this.captureSessionContext();
+      const hadSiteResumeMarker = !!this.readSiteResumeMarker();
       try {
         if (this.isActive() && operationContext.siteSessionId) {
-          await this.rpc('monthly_v7_logout', {
+          const result = await this.rpc('monthly_v7_logout', {
             p_workspace_key: this.config.workspaceKey,
             p_site_session_id: operationContext.siteSessionId,
             p_user_session_id: operationContext.userSessionId || null
           });
           this.assertSessionContext(operationContext, 'logout_site');
+          const confirmed = this.commandResult(result, 'LOGOUT_NOT_CONFIRMED');
+          const trustedDeviceRevoked = confirmed.trustedDeviceRevoked ?? confirmed.trusted_device_revoked;
+          if (hadSiteResumeMarker && trustedDeviceRevoked !== true) {
+            const error = new Error('TRUSTED_DEVICE_REVOCATION_NOT_CONFIRMED');
+            error.code = 'TRUSTED_DEVICE_REVOCATION_NOT_CONFIRMED';
+            error.result = confirmed;
+            throw error;
+          }
         }
       } finally {
-        if (this.isSessionContextCurrent(operationContext)) this.clearSessions('site-logout');
+        if (this.isSessionContextCurrent(operationContext)) {
+          this.clearSiteResumeMarker();
+          this.clearSessions('site-logout');
+        } else if (!this.hasSiteSession()) {
+          this.clearSiteResumeMarker();
+        }
       }
+    }
+
+    async forgetTrustedDevice() {
+      const operationContext = this.captureSessionContext();
+      try {
+        if (!this.isActive() || !operationContext.siteSessionId) {
+          throw new Error('SITE_SESSION_REQUIRED');
+        }
+        const result = await this.rpc('monthly_v7_forget_trusted_device', {
+          p_workspace_key: this.config.workspaceKey,
+          p_site_session_id: operationContext.siteSessionId,
+          p_client_session_id: this.clientSessionId
+        });
+        this.assertSessionContext(operationContext, 'forget_trusted_device');
+        const confirmed = this.commandResult(result, 'FORGET_TRUSTED_DEVICE_FAILED');
+        if (confirmed.forgotten !== true) {
+          const error = new Error('FORGET_TRUSTED_DEVICE_NOT_CONFIRMED');
+          error.code = 'FORGET_TRUSTED_DEVICE_NOT_CONFIRMED';
+          error.result = confirmed;
+          throw error;
+        }
+        return confirmed;
+      } finally {
+        if (this.isSessionContextCurrent(operationContext)) {
+          this.clearSiteResumeMarker();
+          this.clearSessions('trusted-device-forgotten');
+        } else if (!this.hasSiteSession()) {
+          this.clearSiteResumeMarker();
+        }
+      }
+    }
+
+    clearLocalSiteSession(reason = 'local-site-session-cleared', code = '') {
+      this.clearSessions(reason, code);
+      return true;
     }
 
     clearUserSession(reason = '', code = '') {

@@ -279,7 +279,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.18';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.19';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +319,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.18'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.19'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +522,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.0.18', config: '7.0.18', core: '7.0.18', client: '7.0.18', v7: '7.0.18'
+      page: '7.0.19', config: '7.0.19', core: '7.0.19', client: '7.0.19', v7: '7.0.19'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -774,6 +774,663 @@ test('明確清空部署注入的 legacy 雲端 identity 後不得復活舊設�
   expect(afterReload.rpcCounts.upsert_monthly_report_cloud_data || 0).toBe(afterClear.rpcCounts.upsert_monthly_report_cloud_data || 0);
 });
 
+test('發行 site marker 時 authority changed 必須鎖回 Gate 並停止 boot，不可降級成未記住裝置', async ({ page, request }) => {
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name !== 'monthly_v7_issue_site_resume') return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: false, error: 'AUTHORITY_CHANGED', authority_state: 'MIGRATION_REQUIRED' })
+    });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+
+  await page.getByRole('button', { name: '進入系統' }).click();
+
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  await expect(page.locator('body')).toHaveClass(/site-access-locked/);
+  await expect(page.locator('#site-access-error')).toContainText('雲端權威狀態已變更');
+  const local = await page.evaluate(() => ({
+    marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    site: sessionStorage.getItem('monthly_v7_site_session'),
+    user: sessionStorage.getItem('monthly_v7_user_session')
+  }));
+  expect(local.marker).toBeNull();
+  expect(local.site).toBeNull();
+  expect(local.user).toBeNull();
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_get_snapshot || 0)).toBe(0);
+  expect(Number(state.rpcCounts.monthly_v7_save_module || 0)).toBe(0);
+});
+
+test('發行 site marker 收到 SITE_SESSION_INVALID 必須上拋並清本頁 session，不可當作 optional warning', async ({ page, request }) => {
+  let issueRequests = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name !== 'monthly_v7_issue_site_resume') return route.continue();
+    issueRequests += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: false, error: 'SITE_SESSION_INVALID' })
+    });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect.poll(
+    () => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized)),
+    { timeout: 30000 }
+  ).toBe(true);
+  await page.evaluate(() => {
+    localStorage.setItem('monthly_v7_draft:module:issue-session-invalid', JSON.stringify({
+      payload: { title: '發行失效仍保留' }, baseRevision: 1
+    }));
+    localStorage.setItem('monthly_v7_pending:save_module:issue-session-invalid', '{issue-session-invalid-pending');
+  });
+
+  const outcome = await page.evaluate(async () => {
+    try {
+      await window.MonthlyV7App.openSite('gate-pass', { rememberDevice: true });
+      return { resolved: true, code: '' };
+    } catch (error) {
+      return { resolved: false, code: String(error?.code || error?.message || '') };
+    }
+  });
+
+  expect(outcome).toEqual({ resolved: false, code: 'SITE_SESSION_INVALID' });
+  const local = await page.evaluate(() => ({
+    marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    site: sessionStorage.getItem('monthly_v7_site_session'),
+    user: sessionStorage.getItem('monthly_v7_user_session'),
+    draft: localStorage.getItem('monthly_v7_draft:module:issue-session-invalid'),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:issue-session-invalid'),
+    unlocked: window.MonthlyV7App.isSiteUnlocked()
+  }));
+  expect(local.marker).toBeNull();
+  expect(local.site).toBeNull();
+  expect(local.user).toBeNull();
+  expect(JSON.parse(local.draft).payload.title).toBe('發行失效仍保留');
+  expect(local.pending).toBe('{issue-session-invalid-pending');
+  expect(local.unlocked).toBe(false);
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_open_site || 0)).toBe(1);
+  expect(issueRequests).toBe(1);
+  expect(Number(state.rpcCounts.monthly_v7_issue_site_resume || 0)).toBe(0);
+  expect(Number(state.rpcCounts.monthly_v7_get_snapshot || 0)).toBe(0);
+  expect(Number(state.rpcCounts.monthly_v7_logout || 0)).toBe(0);
+  expect(Number(state.rpcCounts.monthly_v7_save_module || 0)).toBe(0);
+});
+
+test('一般 site marker 發行失敗可繼續進站，但必須顯示可見警告且不得假裝已記住', async ({ page, request }) => {
+  let issueRequests = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name !== 'monthly_v7_issue_site_resume') return route.continue();
+    issueRequests += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: false, error: 'SITE_RESUME_ISSUE_FAILED' })
+    });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect.poll(
+    () => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized)),
+    { timeout: 30000 }
+  ).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+
+  await page.getByRole('button', { name: '進入系統' }).click();
+
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await expect(page.locator('body')).not.toHaveClass(/site-access-locked/);
+  await expect(page.locator('#saveToast')).toHaveClass(/toast-show/);
+  await expect(page.locator('#saveToastMsg')).toContainText('無法記住此裝置');
+  const local = await page.evaluate(() => ({
+    marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    site: sessionStorage.getItem('monthly_v7_site_session'),
+    user: sessionStorage.getItem('monthly_v7_user_session')
+  }));
+  expect(local.marker).toBeNull();
+  expect(local.site).not.toBeNull();
+  expect(local.user).toBeNull();
+  expect(issueRequests).toBe(1);
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_get_snapshot || 0)).toBe(1);
+  expect(Number(state.rpcCounts.monthly_v7_save_module || 0)).toBe(0);
+});
+
+test('未勾選記住此裝置時不發行 durable site marker 或呼叫 resume RPC', async ({ page, request }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await expect(page.locator('#site-remember-device')).not.toBeChecked();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  expect(await page.evaluate(() => localStorage.getItem('monthly_v7_site_resume_marker'))).toBeNull();
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_issue_site_resume || 0)).toBe(0);
+});
+
+test('記住此裝置會跨 browser context 輪替 site marker，snapshot 驗證前 Gate 保持鎖定且不登入 user', async ({ page, browser }) => {
+  test.setTimeout(90000);
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  const remember = page.locator('#site-remember-device');
+  await expect(remember).toBeVisible();
+  await expect(remember).not.toBeChecked();
+  await remember.check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+
+  const first = await page.evaluate(() => ({
+    raw: localStorage.getItem('monthly_v7_site_resume_marker'),
+    user: window.MonthlyV7App.currentUser(),
+    siteSession: window.MonthlyV7App.client.siteSession?.id || ''
+  }));
+  expect(first.raw).toBeTruthy();
+  const firstMarker = JSON.parse(first.raw);
+  expect(firstMarker).toMatchObject({
+    version: 1,
+    purpose: 'site',
+    authorityEpoch: 2
+  });
+  expect(firstMarker).not.toHaveProperty('workspaceKey');
+  expect(firstMarker.token).toMatch(/^[a-f0-9]{64}$/);
+  expect(JSON.stringify(firstMarker)).not.toContain('gate-pass');
+  expect(JSON.stringify(firstMarker)).not.toContain('password');
+  expect(first.user).toBeNull();
+  expect(first.siteSession).not.toBe('');
+
+  const storageState = await page.context().storageState();
+  const origin = storageState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
+  const resumedContext = await browser.newContext({
+    storageState: { cookies: [], origins: origin ? [origin] : [] }
+  });
+  const resumed = await resumedContext.newPage();
+  let releaseSnapshot;
+  let signalSnapshotStarted;
+  const snapshotStarted = new Promise((resolve) => { signalSnapshotStarted = resolve; });
+  const snapshotGate = new Promise((resolve) => { releaseSnapshot = resolve; });
+  await resumed.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_get_snapshot') {
+      signalSnapshotStarted();
+      await snapshotGate;
+    }
+    await route.continue();
+  });
+  await resumed.goto('/', { waitUntil: 'domcontentloaded' });
+  await snapshotStarted;
+  await expect(resumed.locator('#siteAccessGate')).toBeVisible();
+  await expect(resumed.locator('body')).toHaveClass(/site-access-locked/);
+  expect(await resumed.evaluate(() => window.MonthlyV7App.currentUser())).toBeNull();
+  expect(await resumed.evaluate(() => Boolean(window.MonthlyV7App.client.siteSession?.id))).toBe(true);
+  expect(await resumed.evaluate(() => window.MonthlyV7App.client.isSiteSessionPendingValidation())).toBe(true);
+
+  releaseSnapshot();
+  await expect(resumed.locator('#siteAccessGate')).toBeHidden();
+  await expect.poll(() => resumed.evaluate(() => window.MonthlyV7App.client.isSiteUnlocked())).toBe(true);
+  expect(await resumed.evaluate(() => window.MonthlyV7App.currentUser())).toBeNull();
+  const rotated = await resumed.evaluate(() => JSON.parse(localStorage.getItem('monthly_v7_site_resume_marker') || 'null'));
+  expect(rotated.token).toMatch(/^[a-f0-9]{64}$/);
+  expect(rotated.token).not.toBe(firstMarker.token);
+  expect(await resumed.evaluate(() => sessionStorage.getItem('monthly_v7_user_session'))).toBeNull();
+  await resumedContext.close();
+});
+
+test('authority epoch 改變時在 exchange 前清除 site marker、保留證據並維持 Gate', async ({ page, browser, request }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+
+  const storageState = await page.context().storageState();
+  const origin = storageState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
+  expect(origin).toBeTruthy();
+  const resumedContext = await browser.newContext({ storageState: { cookies: [], origins: [origin] } });
+  await resumedContext.addInitScript(() => {
+    localStorage.setItem('monthly_v7_draft:module:authority-epoch', JSON.stringify({
+      payload: { title: 'authority 改變仍保留' }, baseRevision: 1
+    }));
+    localStorage.setItem('monthly_v7_pending:save_module:authority-epoch', '{authority-epoch-pending-evidence');
+  });
+  await resumedContext.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name !== 'monthly_v7_get_status') return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        authority_state: 'NORMALIZED_ACTIVE',
+        authority_epoch: 3,
+        minimum_client_version: 7
+      })
+    });
+  });
+  const resumed = await resumedContext.newPage();
+  await resumed.goto('/');
+
+  await expect.poll(() => resumed.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await expect(resumed.locator('#siteAccessGate')).toBeVisible();
+  await expect(resumed.locator('#site-access-error')).toContainText('雲端權威版本已變更');
+  const local = await resumed.evaluate(() => ({
+    marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    site: sessionStorage.getItem('monthly_v7_site_session'),
+    draft: localStorage.getItem('monthly_v7_draft:module:authority-epoch'),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:authority-epoch')
+  }));
+  expect(local.marker).toBeNull();
+  expect(local.site).toBeNull();
+  expect(JSON.parse(local.draft).payload.title).toBe('authority 改變仍保留');
+  expect(local.pending).toBe('{authority-epoch-pending-evidence');
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_exchange_site_resume || 0)).toBe(0);
+  expect(Number(state.rpcCounts.monthly_v7_save_module || 0)).toBe(0);
+  await resumedContext.close();
+});
+
+test('缺少 site resume migration 時保留 marker 並允許手動密碼進站，不偽造自動恢復', async ({ page, request }) => {
+  const marker = JSON.stringify({
+    version: 1,
+    purpose: 'site',
+    token: 'e'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    authorityEpoch: 2
+  });
+  await page.addInitScript((value) => {
+    localStorage.setItem('monthly_v7_site_resume_marker', value);
+    localStorage.setItem('monthly_v7_draft:module:migration-missing', JSON.stringify({
+      payload: { title: 'migration missing 仍保留' }, baseRevision: 1
+    }));
+  }, marker);
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name !== 'monthly_v7_exchange_site_resume') return route.continue();
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        code: 'PGRST202',
+        message: 'Could not find the function public.monthly_v7_exchange_site_resume'
+      })
+    });
+  });
+
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  await expect(page.locator('#site-access-error')).toContainText('可信裝置恢復尚未啟用');
+  expect(await page.evaluate(() => localStorage.getItem('monthly_v7_site_resume_marker'))).toBe(marker);
+  expect(await page.evaluate(() => sessionStorage.getItem('monthly_v7_site_session'))).toBeNull();
+
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  expect(JSON.parse(await page.evaluate(() => localStorage.getItem('monthly_v7_draft:module:migration-missing'))).payload.title)
+    .toBe('migration missing 仍保留');
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_open_site || 0)).toBe(1);
+  expect(Number(state.rpcCounts.monthly_v7_save_module || 0)).toBe(0);
+});
+
+test('site marker exchange timeout 時保留原 marker 與恢復證據並回到手動 Gate', async ({ page, browser, request }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+
+  const firstMarker = await page.evaluate(() => JSON.parse(localStorage.getItem('monthly_v7_site_resume_marker') || 'null'));
+  expect(firstMarker?.token).toMatch(/^[a-f0-9]{64}$/);
+  const storageState = await page.context().storageState();
+  const origin = storageState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
+  expect(origin).toBeTruthy();
+
+  const resumedContext = await browser.newContext({ storageState: { cookies: [], origins: [origin] } });
+  await resumedContext.addInitScript(() => {
+    window.MONTHLY_V7_RPC_TIMEOUT_MS = 75;
+    localStorage.setItem('monthly_v7_draft:module:exchange-timeout', JSON.stringify({
+      payload: { title: 'exchange timeout 仍保留' }, baseRevision: 1
+    }));
+    localStorage.setItem('monthly_v7_pending:save_module:exchange-timeout', '{exchange-timeout-pending-evidence');
+  });
+  await request.post('/__fake_hang_rpc?name=monthly_v7_exchange_site_resume&count=1');
+  const resumed = await resumedContext.newPage();
+  await resumed.goto('/', { waitUntil: 'domcontentloaded' });
+
+  await expect.poll(() => resumed.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await expect(resumed.locator('#siteAccessGate')).toBeVisible();
+  await expect(resumed.locator('#site-access-error')).toContainText('自動進站暫時失敗');
+  const local = await resumed.evaluate(() => ({
+    marker: JSON.parse(localStorage.getItem('monthly_v7_site_resume_marker') || 'null'),
+    site: sessionStorage.getItem('monthly_v7_site_session'),
+    draft: localStorage.getItem('monthly_v7_draft:module:exchange-timeout'),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:exchange-timeout')
+  }));
+  expect(local.marker?.token).toBe(firstMarker.token);
+  expect(local.site).toBeNull();
+  expect(JSON.parse(local.draft).payload.title).toBe('exchange timeout 仍保留');
+  expect(local.pending).toBe('{exchange-timeout-pending-evidence');
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_logout || 0)).toBe(0);
+  expect(Number(state.rpcCounts.monthly_v7_save_module || 0)).toBe(0);
+  expect(state.activeTrustedDeviceCount).toBe(1);
+  expect(state.activeSiteResumeCount).toBe(1);
+  await resumedContext.close();
+});
+
+test('server 明確拒絕已消耗的 site marker 時清 marker、保留證據並顯示精確原因', async ({ page, browser, request }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+
+  const storageState = await page.context().storageState();
+  const origin = storageState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
+  expect(origin).toBeTruthy();
+  const staleOrigin = JSON.parse(JSON.stringify(origin));
+
+  const consumerContext = await browser.newContext({ storageState: { cookies: [], origins: [origin] } });
+  const consumer = await consumerContext.newPage();
+  await consumer.goto('/');
+  await expect(consumer.locator('#siteAccessGate')).toBeHidden();
+  await consumerContext.close();
+
+  const rejectedContext = await browser.newContext({ storageState: { cookies: [], origins: [staleOrigin] } });
+  await rejectedContext.addInitScript(() => {
+    localStorage.setItem('monthly_v7_draft:module:server-reject', JSON.stringify({
+      payload: { title: 'server 拒絕仍保留' }, baseRevision: 1
+    }));
+    localStorage.setItem('monthly_v7_pending:save_module:server-reject', '{server-reject-pending-evidence');
+  });
+  const rejected = await rejectedContext.newPage();
+  await rejected.goto('/');
+  await expect.poll(() => rejected.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await expect(rejected.locator('#siteAccessGate')).toBeVisible();
+  await expect(rejected.locator('#site-access-error')).toContainText('此裝置的進站恢復已失效');
+  const local = await rejected.evaluate(() => ({
+    marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    site: sessionStorage.getItem('monthly_v7_site_session'),
+    draft: localStorage.getItem('monthly_v7_draft:module:server-reject'),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:server-reject')
+  }));
+  expect(local.marker).toBeNull();
+  expect(local.site).toBeNull();
+  expect(JSON.parse(local.draft).payload.title).toBe('server 拒絕仍保留');
+  expect(local.pending).toBe('{server-reject-pending-evidence');
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_exchange_site_resume || 0)).toBe(2);
+  expect(Number(state.rpcCounts.monthly_v7_logout || 0)).toBe(0);
+  expect(Number(state.rpcCounts.monthly_v7_save_module || 0)).toBe(0);
+  await rejectedContext.close();
+});
+
+test('退出網站會撤銷 trusted device 並回到 Gate，但保留 draft 與 pending', async ({ page, request }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await expect(page.locator('#v5-login-username')).toBeVisible();
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+  await page.evaluate(() => {
+    localStorage.setItem('monthly_v7_draft:module:exit-site', JSON.stringify({
+      payload: { title: '退出網站仍保留' }, baseRevision: 1
+    }));
+    localStorage.setItem('monthly_v7_pending:save_module:exit-site', '{exit-site-pending-evidence');
+  });
+  expect(await page.evaluate(() => localStorage.getItem('monthly_v7_site_resume_marker'))).not.toBeNull();
+
+  await page.getByRole('button', { name: '退出網站', exact: true }).click();
+
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  const local = await page.evaluate(() => ({
+    marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    site: sessionStorage.getItem('monthly_v7_site_session'),
+    user: sessionStorage.getItem('monthly_v7_user_session'),
+    projection: sessionStorage.getItem('monthly_v7_user_projection'),
+    draft: localStorage.getItem('monthly_v7_draft:module:exit-site'),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:exit-site')
+  }));
+  expect(local.marker).toBeNull();
+  expect(local.site).toBeNull();
+  expect(local.user).toBeNull();
+  expect(local.projection).toBeNull();
+  expect(JSON.parse(local.draft).payload.title).toBe('退出網站仍保留');
+  expect(local.pending).toBe('{exit-site-pending-evidence');
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_logout || 0)).toBe(1);
+  expect(state.activeSiteResumeCount).toBe(0);
+  expect(state.activeTrustedDeviceCount).toBe(0);
+});
+
+test('忘記此裝置走專用 RPC，不混用 full logout，並保留恢復證據', async ({ page, request }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await page.evaluate(() => {
+    localStorage.setItem('monthly_v7_draft:module:forget-device', JSON.stringify({
+      payload: { title: '忘記裝置仍保留' }, baseRevision: 1
+    }));
+    localStorage.setItem('monthly_v7_pending:save_module:forget-device', '{forget-device-pending-evidence');
+    renderV5SessionBar();
+  });
+  expect(await page.evaluate(() => localStorage.getItem('monthly_v7_site_resume_marker'))).not.toBeNull();
+
+  await page.getByRole('button', { name: '忘記此裝置', exact: true }).click();
+
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  const local = await page.evaluate(() => ({
+    marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    site: sessionStorage.getItem('monthly_v7_site_session'),
+    draft: localStorage.getItem('monthly_v7_draft:module:forget-device'),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:forget-device')
+  }));
+  expect(local.marker).toBeNull();
+  expect(local.site).toBeNull();
+  expect(JSON.parse(local.draft).payload.title).toBe('忘記裝置仍保留');
+  expect(local.pending).toBe('{forget-device-pending-evidence');
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_forget_trusted_device || 0)).toBe(1);
+  expect(Number(state.rpcCounts.monthly_v7_logout || 0)).toBe(0);
+  expect(state.activeTrustedDeviceCount).toBe(0);
+  expect(state.activeSiteResumeCount).toBe(0);
+});
+
+test('進站密碼 rotation 撤銷舊 trusted device、回到 Gate 並保留 recovery evidence', async ({ page, browser, request }) => {
+  test.setTimeout(150000);
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  await page.locator('#v5-login-username').fill('owner');
+  await page.locator('#v5-login-password').fill('owner-pass');
+  await page.getByRole('button', { name: '登入', exact: true }).click();
+  await expect(page.locator('#v5TopStatus')).toContainText('Owner A');
+  await page.evaluate(() => {
+    localStorage.setItem('monthly_v7_draft:module:rotate-site-password', JSON.stringify({
+      payload: { title: '密碼 rotation 仍保留' }, baseRevision: 1
+    }));
+    localStorage.setItem('monthly_v7_pending:save_module:rotate-site-password', '{rotate-site-password-pending-evidence');
+    switchV1Tab('cloud');
+  });
+  await expect(page.locator('#site-access-new-password')).toBeVisible();
+  const staleState = await page.context().storageState();
+  const staleOrigin = staleState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
+  expect(staleOrigin).toBeTruthy();
+  const oldMarker = await page.evaluate(() => localStorage.getItem('monthly_v7_site_resume_marker'));
+  expect(oldMarker).not.toBeNull();
+
+  const beforeShortPassword = await (await request.get('/__fake_state')).json();
+  let shortPasswordMessage = '';
+  page.once('dialog', async (dialog) => {
+    shortPasswordMessage = dialog.message();
+    await dialog.accept();
+  });
+  await page.locator('#site-access-new-password').fill('short77');
+  await page.locator('#site-access-confirm-password').fill('short77');
+  await page.getByRole('button', { name: /更新網站進入密碼/ }).click();
+  await expect.poll(() => shortPasswordMessage).toContain('至少 8 個字元');
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+  const afterShortPassword = await (await request.get('/__fake_state')).json();
+  expect(Number(afterShortPassword.rpcCounts.monthly_v7_update_site_password || 0))
+    .toBe(Number(beforeShortPassword.rpcCounts.monthly_v7_update_site_password || 0));
+
+  let successMessage = '';
+  page.once('dialog', async (dialog) => {
+    successMessage = dialog.message();
+    await dialog.accept();
+  });
+  await page.locator('#site-access-new-password').fill('rotated-gate-pass');
+  await page.locator('#site-access-confirm-password').fill('rotated-gate-pass');
+  await page.getByRole('button', { name: /更新網站進入密碼/ }).click();
+
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  await expect.poll(() => successMessage).toContain('網站進入密碼已更新');
+  const local = await page.evaluate((secret) => {
+    const entries = [];
+    for (const storage of [localStorage, sessionStorage]) {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        entries.push([key, storage.getItem(key)]);
+      }
+    }
+    const serialized = JSON.stringify(entries);
+    return {
+      marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+      site: sessionStorage.getItem('monthly_v7_site_session'),
+      user: sessionStorage.getItem('monthly_v7_user_session'),
+      projection: sessionStorage.getItem('monthly_v7_user_projection'),
+      draft: localStorage.getItem('monthly_v7_draft:module:rotate-site-password'),
+      pending: localStorage.getItem('monthly_v7_pending:save_module:rotate-site-password'),
+      sensitivePending: localStorage.getItem('monthly_v7_pending:update_site_password:workspace-test'),
+      containsSecret: serialized.includes(secret) || serialized.includes('p_new_password')
+    };
+  }, 'rotated-gate-pass');
+  expect(local.marker).toBeNull();
+  expect(local.site).toBeNull();
+  expect(local.user).toBeNull();
+  expect(local.projection).toBeNull();
+  expect(JSON.parse(local.draft).payload.title).toBe('密碼 rotation 仍保留');
+  expect(local.pending).toBe('{rotate-site-password-pending-evidence');
+  expect(local.sensitivePending).toBeNull();
+  expect(local.containsSecret).toBe(false);
+
+  const staleContext = await browser.newContext({ storageState: { cookies: [], origins: [staleOrigin] } });
+  const stalePage = await staleContext.newPage();
+  await stalePage.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect.poll(() => stalePage.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await expect(stalePage.locator('#siteAccessGate')).toBeVisible();
+  await expect(stalePage.locator('#site-access-error')).toContainText('此裝置的進站恢復已失效');
+  await staleContext.close();
+
+  await page.locator('#site-remember-device').uncheck();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  await page.locator('#site-access-password').fill('rotated-gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_update_site_password || 0)).toBe(1);
+  expect(state.activeTrustedDeviceCount).toBe(0);
+  expect(state.activeSiteResumeCount).toBe(0);
+  expect(JSON.stringify(state)).not.toContain('rotated-gate-pass');
+});
+
+test('site resume 後 snapshot timeout 保留輪替 marker 與恢復證據且不撤銷 trusted device', async ({ page, browser, request }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await page.locator('#site-remember-device').check();
+  await page.locator('#site-access-password').fill('gate-pass');
+  await page.getByRole('button', { name: '進入系統' }).click();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+
+  const firstMarker = await page.evaluate(() => JSON.parse(localStorage.getItem('monthly_v7_site_resume_marker') || 'null'));
+  expect(firstMarker?.token).toMatch(/^[a-f0-9]{64}$/);
+  const storageState = await page.context().storageState();
+  const origin = storageState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
+  const resumedContext = await browser.newContext({
+    storageState: { cookies: [], origins: origin ? [origin] : [] }
+  });
+  await resumedContext.addInitScript(() => {
+    window.MONTHLY_V7_RPC_TIMEOUT_MS = 75;
+    localStorage.setItem('monthly_v7_draft:module:timeout-draft', JSON.stringify({
+      payload: { title: 'timeout 仍保留' }, baseRevision: 1
+    }));
+    localStorage.setItem('monthly_v7_pending:save_module:timeout-draft', '{timeout-pending-evidence');
+  });
+  await request.post('/__fake_hang_rpc?name=monthly_v7_get_snapshot&count=1');
+  const resumed = await resumedContext.newPage();
+  await resumed.goto('/', { waitUntil: 'domcontentloaded' });
+
+  await expect(resumed.locator('#siteAccessGate')).toBeVisible({ timeout: 5000 });
+  await expect(resumed.locator('body')).toHaveClass(/site-access-locked/);
+  await expect(resumed.locator('#site-access-error')).toContainText('雲端帳號資料讀取失敗');
+  const local = await resumed.evaluate(() => ({
+    marker: JSON.parse(localStorage.getItem('monthly_v7_site_resume_marker') || 'null'),
+    siteSession: sessionStorage.getItem('monthly_v7_site_session'),
+    draft: localStorage.getItem('monthly_v7_draft:module:timeout-draft'),
+    pending: localStorage.getItem('monthly_v7_pending:save_module:timeout-draft')
+  }));
+  expect(local.marker?.token).toMatch(/^[a-f0-9]{64}$/);
+  expect(local.marker.token).not.toBe(firstMarker.token);
+  expect(local.siteSession).toBeNull();
+  expect(JSON.parse(local.draft).payload.title).toBe('timeout 仍保留');
+  expect(local.pending).toBe('{timeout-pending-evidence');
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_exchange_site_resume || 0)).toBe(1);
+  expect(Number(state.rpcCounts.monthly_v7_logout || 0)).toBe(0);
+  expect(state.trustedDeviceCount).toBe(1);
+  expect(state.activeSiteResumeCount).toBe(1);
+  await resumedContext.close();
+});
+
+test('損壞或過期 site marker 只清除 marker，草稿與 pending 原封不動且零 resume/save RPC', async ({ page, request }) => {
+  const draftKey = 'monthly_v7_draft:module:marker-draft';
+  const pendingKey = 'monthly_v7_pending:save_module:marker-draft';
+  const draft = JSON.stringify({ payload: { title: 'marker 失效仍保留' }, baseRevision: 1 });
+  const pending = '{marker-pending-evidence';
+  await page.addInitScript(({ draftKey, pendingKey, draft, pending }) => {
+    localStorage.setItem('monthly_v7_site_resume_marker', '{broken-marker');
+    localStorage.setItem(draftKey, draft);
+    localStorage.setItem(pendingKey, pending);
+  }, { draftKey, pendingKey, draft, pending });
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => Boolean(window.MonthlyV7App?.initialized))).toBe(true);
+  await expect(page.locator('#siteAccessGate')).toBeVisible();
+  expect(await page.evaluate(({ draftKey, pendingKey }) => ({
+    marker: localStorage.getItem('monthly_v7_site_resume_marker'),
+    draft: localStorage.getItem(draftKey),
+    pending: localStorage.getItem(pendingKey)
+  }), { draftKey, pendingKey })).toEqual({ marker: null, draft, pending });
+  const state = await (await request.get('/__fake_state')).json();
+  expect(Number(state.rpcCounts.monthly_v7_exchange_site_resume || 0)).toBe(0);
+  expect(Number(state.rpcCounts.monthly_v7_save_module || 0)).toBe(0);
+});
+
 test('恢復的 V7 site session 必須等權威 snapshot 驗證後才解除 Gate，失效時保留草稿', async ({ page }) => {
   test.setTimeout(90000);
   await page.addInitScript(() => {
@@ -936,7 +1593,9 @@ test('權威帳號名冊等待與失敗期間禁止登入同步，logout 失敗�
       { disabled: true },
       { disabled: true },
       { text: '登入', disabled: true },
-      { text: expect.stringContaining('同步最新'), disabled: true }
+      { text: expect.stringContaining('同步最新'), disabled: true },
+      { text: '忘記此裝置', disabled: false },
+      { text: '退出網站', disabled: false }
     ]
   });
   expect(await page.locator('#v5TopStatus').textContent()).not.toMatch(/尚未建立 owner|雲端未找到 Owner/);
@@ -3003,6 +3662,7 @@ test(`${authorityCode} 後全頁停止寫入、不降級 legacy 並保留草稿`
 
   const editor = page.locator(`#tableBody tr[data-v7-entity-id="${moduleId}"] .module-title-editor`);
   await editor.click();
+  await expect(editor).toHaveAttribute('contenteditable', 'true');
   await editor.fill('authority 變更時保留的草稿');
 
   await expect.poll(() => saveCalls, { timeout: 15000 }).toBe(1);
@@ -3171,6 +3831,7 @@ test('列印目前內容依勾選與 PDF 順序輸出，不帶版本提示，且
   });
   const editor = page.locator('#tableBody .module-title-editor').first();
   await editor.click();
+  await expect(editor).toHaveAttribute('contenteditable', 'true');
   await editor.fill('只在目前畫面的草稿標題');
   await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=always');
   const before = await (await request.get('/__fake_state')).json();

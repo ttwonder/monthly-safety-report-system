@@ -3,7 +3,7 @@
 const http = require('node:http');
 const { readFileSync, existsSync, statSync } = require('node:fs');
 const { extname, join, normalize } = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { createHash, randomBytes, randomUUID } = require('node:crypto');
 
 const root = join(__dirname, '..');
 const port = Number(process.env.PORT || 4187);
@@ -27,7 +27,8 @@ function freshState() {
     ],
     passwords: { owner: 'owner-pass', operator: 'operator-pass' },
     sitePassword: 'gate-pass',
-    siteSessions: new Map(), userSessions: new Map(), leases: new Map(), operations: new Map(), deletedModules: [], snapshots: [],
+    siteSessions: new Map(), userSessions: new Map(), trustedDevices: new Map(), resumeTokens: new Map(),
+    leases: new Map(), operations: new Map(), deletedModules: [], snapshots: [],
     hangRpcCounts: new Map(), hangAfterCommitCounts: new Map(),
     sequence: 0, events: []
   };
@@ -36,6 +37,7 @@ function freshState() {
 let state = freshState();
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const now = () => Date.now();
+const sha256 = (value) => createHash('sha256').update(String(value), 'utf8').digest('hex');
 const canonical = (value) => {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
@@ -82,7 +84,12 @@ function resultState() {
       requestHash: operation.requestHash || '',
       result: operation.result || operation
     })),
-    leases: Array.from(state.leases.entries()).map(([key, value]) => ({ key, ...value }))
+    leases: Array.from(state.leases.entries()).map(([key, value]) => ({ key, ...value })),
+    trustedDeviceCount: state.trustedDevices.size,
+    activeTrustedDeviceCount: Array.from(state.trustedDevices.values())
+      .filter((device) => !device.revoked && device.expiresAt > now()).length,
+    activeSiteResumeCount: Array.from(state.resumeTokens.values())
+      .filter((token) => token.purpose === 'site' && !token.consumed && !token.revoked && token.expiresAt > now()).length
   };
 }
 
@@ -102,6 +109,83 @@ function rpc(name, p) {
     state.siteSessions.set(id, { clientSessionId: p.p_client_session_id });
     return { ok: true, site_session_id: id, expires_at: new Date(now() + 3600000).toISOString() };
   }
+  if (name === 'monthly_v7_issue_site_resume') {
+    const session = state.siteSessions.get(p.p_site_session_id);
+    if (!session || session.clientSessionId !== p.p_client_session_id) {
+      return { ok: false, error: 'SITE_SESSION_INVALID' };
+    }
+    let deviceId = session.trustedDeviceId;
+    if (!deviceId || !state.trustedDevices.has(deviceId)) {
+      deviceId = randomUUID();
+      state.trustedDevices.set(deviceId, { expiresAt: now() + 12 * 60 * 60 * 1000, revoked: false });
+      session.trustedDeviceId = deviceId;
+    }
+    for (const token of state.resumeTokens.values()) {
+      if (token.deviceId === deviceId && token.purpose === 'site' && !token.consumed) token.revoked = true;
+    }
+    const rawToken = randomBytes(32).toString('hex');
+    const expiresAt = state.trustedDevices.get(deviceId).expiresAt;
+    state.resumeTokens.set(rawToken, { deviceId, purpose: 'site', expiresAt, consumed: false, revoked: false });
+    return {
+      ok: true,
+      trusted_device_id: deviceId,
+      resume_token: rawToken,
+      expires_at: new Date(expiresAt).toISOString(),
+      authority_epoch: 2,
+      site_policy_generation: 1
+    };
+  }
+  if (name === 'monthly_v7_exchange_site_resume') {
+    const token = state.resumeTokens.get(p.p_resume_token);
+    const device = token && state.trustedDevices.get(token.deviceId);
+    if (!token || token.purpose !== 'site' || token.consumed || token.revoked
+      || token.expiresAt <= now() || !device || device.revoked || device.expiresAt <= now()) {
+      return { ok: false, error: 'SITE_RESUME_INVALID' };
+    }
+    token.consumed = true;
+    const replacement = randomBytes(32).toString('hex');
+    state.resumeTokens.set(replacement, {
+      deviceId: token.deviceId, purpose: 'site', expiresAt: device.expiresAt, consumed: false, revoked: false
+    });
+    const siteSessionId = randomUUID();
+    state.siteSessions.set(siteSessionId, {
+      clientSessionId: p.p_client_session_id,
+      trustedDeviceId: token.deviceId
+    });
+    return {
+      ok: true,
+      site_session_id: siteSessionId,
+      trusted_device_id: token.deviceId,
+      resume_token: replacement,
+      expires_at: new Date(device.expiresAt).toISOString(),
+      authority_state: 'NORMALIZED_ACTIVE',
+      authority_epoch: 2,
+      minimum_client_version: 7
+    };
+  }
+  if (name === 'monthly_v7_forget_trusted_device') {
+    const siteSession = state.siteSessions.get(p.p_site_session_id);
+    const deviceId = siteSession && siteSession.clientSessionId === p.p_client_session_id
+      ? siteSession.trustedDeviceId
+      : '';
+    const device = deviceId && state.trustedDevices.get(deviceId);
+    if (!device) return { ok: false, error: 'TRUSTED_DEVICE_NOT_FOUND' };
+    device.revoked = true;
+    for (const token of state.resumeTokens.values()) {
+      if (token.deviceId === deviceId) token.revoked = true;
+    }
+    const revokedSiteIds = new Set();
+    for (const [siteSessionId, session] of state.siteSessions.entries()) {
+      if (session.trustedDeviceId === deviceId) {
+        revokedSiteIds.add(siteSessionId);
+        state.siteSessions.delete(siteSessionId);
+      }
+    }
+    for (const [userSessionId, session] of state.userSessions.entries()) {
+      if (revokedSiteIds.has(session.siteSessionId)) state.userSessions.delete(userSessionId);
+    }
+    return { ok: true, forgotten: true, trusted_device_id: deviceId };
+  }
   if (name === 'monthly_v7_login_user') {
     if (!state.siteSessions.has(p.p_site_session_id) || state.passwords[p.p_username] !== p.p_password) return { ok: false, error: 'INVALID_CREDENTIALS' };
     const user = state.users.find((entry) => entry.username === p.p_username);
@@ -116,9 +200,58 @@ function rpc(name, p) {
     return { ok: true, revoked: Boolean(belongsToSite) };
   }
   if (name === 'monthly_v7_logout') {
+    const siteSession = state.siteSessions.get(p.p_site_session_id);
+    const deviceId = siteSession && siteSession.trustedDeviceId;
+    if (deviceId && state.trustedDevices.has(deviceId)) {
+      state.trustedDevices.get(deviceId).revoked = true;
+      for (const token of state.resumeTokens.values()) {
+        if (token.deviceId === deviceId) token.revoked = true;
+      }
+      const revokedSiteIds = new Set();
+      for (const [siteSessionId, session] of state.siteSessions.entries()) {
+        if (session.trustedDeviceId === deviceId) {
+          revokedSiteIds.add(siteSessionId);
+          state.siteSessions.delete(siteSessionId);
+        }
+      }
+      for (const [userSessionId, session] of state.userSessions.entries()) {
+        if (revokedSiteIds.has(session.siteSessionId)) state.userSessions.delete(userSessionId);
+      }
+      return { ok: true, revoked: true, trustedDeviceRevoked: true };
+    }
     state.userSessions.delete(p.p_user_session_id);
     state.siteSessions.delete(p.p_site_session_id);
-    return { ok: true, revoked: true };
+    return { ok: true, revoked: true, trustedDeviceRevoked: false };
+  }
+  if (name === 'monthly_v7_update_site_password') {
+    const session = state.userSessions.get(p.p_user_session_id);
+    const actor = session && session.clientSessionId === p.p_client_session_id
+      ? state.users.find((entry) => entry.id === session.userId)
+      : null;
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    if (!['owner', 'admin'].includes(actor.role)) return { ok: false, error: 'FORBIDDEN' };
+    if (String(p.p_new_password || '').length < 8) return { ok: false, error: 'INVALID_PAYLOAD' };
+    const requestHash = sha256(canonical({
+      command: 'update_site_password',
+      password_digest: sha256(p.p_new_password)
+    }));
+    const replay = replayOperation(p.p_operation_id, actor.id, requestHash);
+    if (replay) return replay;
+
+    state.sitePassword = String(p.p_new_password);
+    for (const device of state.trustedDevices.values()) device.revoked = true;
+    for (const token of state.resumeTokens.values()) token.revoked = true;
+    state.siteSessions.clear();
+    state.userSessions.clear();
+    const result = {
+      ok: true,
+      entityType: 'site_policy',
+      entityId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      generation: 2,
+      requiresReauth: true,
+      operationId: p.p_operation_id
+    };
+    return storeOperation(p.p_operation_id, actor.id, requestHash, result);
   }
   if (name === 'monthly_v7_get_snapshot') {
     if (!state.siteSessions.has(p.p_site_session_id)) return { ok: false, error: 'SITE_SESSION_INVALID' };
@@ -488,7 +621,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/supabase-config.js') {
     res.writeHead(200, { 'Content-Type': mime['.js'] });
-    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace'};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.0.18'});`);
+    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace'};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.0.19'});`);
   }
   if (url.pathname === '/vendor/supabase-2.112.2.js') { res.writeHead(200, { 'Content-Type': mime['.js'] }); return res.end(fakeSdk); }
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;
