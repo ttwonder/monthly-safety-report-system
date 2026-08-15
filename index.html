@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.24';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.25';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -2336,6 +2336,21 @@
         </div>
     </div>
 
+    <!-- 同步最新：保留或明確捨棄本機草稿 -->
+    <div id="v7-sync-choice-modal" class="fixed inset-0 z-[9000] hidden items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm no-print" role="dialog" aria-modal="true" aria-labelledby="v7-sync-choice-title">
+        <div class="w-full max-w-lg rounded-2xl border border-sky-200 bg-white p-5 shadow-2xl">
+            <h3 id="v7-sync-choice-title" class="text-lg font-black text-slate-800"><i class="fas fa-cloud-arrow-down mr-2 text-sky-600"></i>同步最新雲端資料</h3>
+            <p class="mt-2 text-sm leading-6 text-slate-600">選擇本機草稿如何處理。同步與上傳是不同操作；保留草稿同步不會先把草稿上傳。</p>
+            <div id="v7-sync-choice-summary" class="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold text-slate-700"></div>
+            <div id="v7-sync-choice-warning" class="mt-2 text-xs leading-5 text-amber-700"></div>
+            <div class="mt-5 grid gap-2 sm:grid-cols-3">
+                <button id="v7-sync-keep" type="button" class="v1-small-btn v1-primary-btn justify-center" onmousedown="event.preventDefault()" onclick="v7ChooseSyncLatest('keep')">保留草稿同步</button>
+                <button id="v7-sync-discard" type="button" class="v1-small-btn justify-center !border-rose-300 !text-rose-700" onmousedown="event.preventDefault()" onclick="v7ChooseSyncLatest('discard')">捨棄草稿用雲端</button>
+                <button id="v7-sync-cancel" type="button" class="v1-small-btn justify-center" onmousedown="event.preventDefault()" onclick="v7ChooseSyncLatest('cancel')">取消</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 載入中遮罩 -->
     <div id="loader" class="fixed inset-0 bg-white/70 flex items-center justify-center z-[100] hidden">
         <div class="text-indigo-600 text-lg font-bold"><i class="fas fa-spinner fa-spin mr-2"></i>處理中...</div>
@@ -3937,7 +3952,7 @@
         }
 
         async function triggerAutoSave(element) {
-            if (!element) return;
+            if (!element || V7_SYNC_DISCARD_ACTIVE) return;
             v7MarkLocalDraftDirty(element);
             const anchor = (element.closest && (element.closest('.editable-div') || element.closest('tr') || element.closest('.custom-data-table'))) || element;
             const viewportState = captureEditorViewportState(anchor);
@@ -6299,6 +6314,8 @@
         let V7_LAST_CLOUD_SAVED_AT = 0;
         let V7_CRITICAL_STATUS_UNTIL = 0;
         let V7_TRANSIENT_STATUS_UNTIL = 0;
+        let V7_SYNC_CHOICE_BUSY = false;
+        let V7_SYNC_DISCARD_ACTIVE = false;
         let V4_STARTUP_SYNC_DONE = false;
         let V4_SYNC_INTERVAL_ID = null;
         let V6_ACTIVE_TAB = 'editor';
@@ -7294,7 +7311,17 @@
                 const restoringSiteSession = window.MonthlyV7App.isSiteSessionPendingValidation?.() === true;
                 if (!window.MonthlyV7App.isSiteUnlocked() && !restoringSiteSession) return false;
                 try {
-                    if (v5CurrentUser()) await window.MonthlyV7App.syncLatest();
+                    if (v5CurrentUser()) {
+                        if (options.fullSnapshot === true) {
+                            await window.MonthlyV7App.loadSnapshot({
+                                preserveLocalIntents: options.preserveLocalIntents !== false,
+                                preserveLegacyLocal: false,
+                                retryTransient: true
+                            });
+                        } else {
+                            await window.MonthlyV7App.syncLatest();
+                        }
+                    }
                     else await window.MonthlyV7App.loadSnapshot();
                     const restoredDraftCount = reportData.filter(item => item?._v7Id
                         && window.MonthlyV7App?.client?.readDraft?.('module', item._v7Id)).length;
@@ -7632,7 +7659,7 @@
                         </section>
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
-                            <div class="text-xs text-slate-500 mb-2">V7 會先保存本機草稿，並將有變更的項目每分鐘合併上傳；「保存修改」會立即提交最新草稿。同步只重讀變動項目，有草稿的項目不會被遠端覆蓋。</div>
+                            <div class="text-xs text-slate-500 mb-2">V7 會先保存本機草稿，並將有變更的項目每分鐘合併上傳；「保存修改」會立即提交最新草稿。「同步最新」可選擇保留草稿同步、明確捨棄普通草稿使用雲端，或取消；pending／異常保存證據仍會先阻擋並要求對帳。</div>
                             <div class="v1-action-row">
                                 <button class="v1-small-btn v1-primary-btn" onclick="v4UploadToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>上傳本機到雲端</button>
                                 <button class="v1-small-btn" onclick="v4DownloadFromCloud()"><i class="fas fa-cloud-arrow-down mr-1"></i>下載雲端覆蓋本機</button>
@@ -8262,7 +8289,308 @@
             }
             return serverRevoked;
         }
+        function v7CurrentReportSyncTargets() {
+            const client = window.MonthlyV7App?.client;
+            const targets = new Map();
+            const add = (entityType, entityId) => {
+                const type = String(entityType || '');
+                const id = String(entityId || '');
+                if (!type || !id) return;
+                targets.set(`${type}:${id}`, { entityType: type, entityId: id });
+            };
+            const reportId = String(client?.currentReport?.()?.id || '');
+            add('report_meta', reportId);
+            reportData.forEach(item => add('module', item?._v7Id));
+            (client?.snapshot?.modules || []).forEach(item => add('module', item?.id));
+            (client?.snapshot?.records || []).forEach(item => {
+                add(`record:${String(item?.recordType || item?.record_type || '')}`, item?.id);
+            });
+            return Array.from(targets.values());
+        }
+
+        function v7HasCurrentWorkspacePendingOperation() {
+            const client = window.MonthlyV7App?.client;
+            const storage = client?.draftStorage;
+            const workspaceKey = String(client?.config?.workspaceKey || '').trim();
+            if (!storage || !workspaceKey) return true;
+            for (let index = 0; index < storage.length; index += 1) {
+                const storageKey = String(storage.key(index) || '');
+                if (!storageKey.startsWith('monthly_v7_pending:')) continue;
+                try {
+                    const pending = JSON.parse(storage.getItem(storageKey));
+                    const params = client.validatePendingEnvelope(pending);
+                    const pendingWorkspaceValue = params?.p_workspace_key;
+                    if (typeof pendingWorkspaceValue !== 'string'
+                        || !pendingWorkspaceValue || pendingWorkspaceValue.trim() !== pendingWorkspaceValue) return true;
+                    if (pendingWorkspaceValue === workspaceKey) return true;
+                } catch (_error) {
+                    // Malformed or legacy evidence cannot prove that it is safe to
+                    // ignore during a destructive full-workspace cloud reload.
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function v7CurrentReportSyncInventory() {
+            const app = window.MonthlyV7App;
+            const client = app?.client;
+            const targets = v7CurrentReportSyncTargets();
+            const targetKeys = new Set(targets.map(target => `${target.entityType}:${target.entityId}`));
+            const drafts = [];
+            const invalidDrafts = [];
+            for (const target of targets) {
+                const storageKey = client?.draftKey?.(target.entityType, target.entityId);
+                const raw = storageKey && client?.draftStorage?.getItem?.(storageKey);
+                if (raw === null || raw === undefined) continue;
+                const draft = client?.readDraft?.(target.entityType, target.entityId);
+                const savedAt = typeof draft?.savedAt === 'string' ? draft.savedAt : '';
+                const savedAtMs = Date.parse(savedAt);
+                const hasSupersedes = Boolean(draft
+                    && Object.prototype.hasOwnProperty.call(draft, 'supersedesOperation'));
+                const validSupersedes = !hasSupersedes
+                    || Boolean(draft.supersedesOperation && typeof draft.supersedesOperation === 'object'
+                        && !Array.isArray(draft.supersedesOperation));
+                if (!draft || typeof draft !== 'object' || Array.isArray(draft)
+                    || draft.entityType !== target.entityType
+                    || typeof draft.entityId !== 'string' || draft.entityId !== target.entityId
+                    || typeof draft.baseRevision !== 'number'
+                    || !Number.isSafeInteger(draft.baseRevision) || draft.baseRevision < 0
+                    || !draft.payload || typeof draft.payload !== 'object' || Array.isArray(draft.payload)
+                    || !savedAt || !Number.isFinite(savedAtMs)
+                    || new Date(savedAtMs).toISOString() !== savedAt
+                    || !validSupersedes) {
+                    invalidDrafts.push(Object.assign({ storageKey }, target));
+                    continue;
+                }
+                drafts.push(Object.assign({ draft, storageKey, raw }, target));
+            }
+            const durableDraftKeys = new Set(drafts.map(target => `${target.entityType}:${target.entityId}`));
+            const visibleDrafts = [];
+            document.querySelectorAll('#tableBody tr[data-index][data-v7-entity-id]').forEach(row => {
+                const entityId = String(row.dataset.v7EntityId || '');
+                const key = `module:${entityId}`;
+                if (!entityId || durableDraftKeys.has(key) || !targetKeys.has(key)) return;
+                const index = Number(row.dataset.index);
+                const item = Number.isInteger(index) ? reportData[index] : null;
+                const snapshotRow = (client?.snapshot?.modules || []).find(entry => String(entry?.id || '') === entityId);
+                if (!item || !snapshotRow) return;
+                const baseline = snapshotRow._serverPayload || snapshotRow.payload || {};
+                const title = row.querySelector('.module-title-editor');
+                const titleChanged = Number(title?.dataset?.v7LocalDraftDirtyAt || 0) > 0
+                    && sanitizeModuleTitleHtml(title?.innerHTML || '') !== String(baseline.title || '');
+                const columnChanged = Array.from(row.querySelectorAll('[data-col-index]')).some(node => {
+                    if (!(Number(node.dataset.v7LocalDraftDirtyAt || 0) > 0)) return false;
+                    const colIndex = Number(node.dataset.colIndex);
+                    const baselineValue = Array.isArray(baseline.columns) ? String(baseline.columns[colIndex] || '') : '';
+                    return Number.isInteger(colIndex)
+                        && sanitizeTrendChartHtml(node.innerHTML) !== baselineValue;
+                });
+                if (titleChanged || columnChanged) {
+                    visibleDrafts.push({ entityType: 'module', entityId, visibleOnly: true });
+                }
+            });
+            const reportId = String(client?.currentReport?.()?.id || '');
+            if (reportId && !durableDraftKeys.has(`report_meta:${reportId}`)
+                && Number(document.documentElement.dataset.v7ReportMetaDirtyAt || 0) > 0) {
+                const report = client.currentReport();
+                const local = v7CurrentReportMeta();
+                const localCore = { title: local.title, date: local.date, period: local.period };
+                const serverCore = {
+                    title: report.title || '月度安全會議報告',
+                    date: report.date || '',
+                    period: report.period || {}
+                };
+                if (JSON.stringify(localCore) !== JSON.stringify(serverCore)) {
+                    visibleDrafts.push({ entityType: 'report_meta', entityId: reportId, visibleOnly: true });
+                }
+            }
+            const supersedingDrafts = drafts.filter(target => target.draft?.supersedesOperation);
+            const ordinaryDrafts = drafts.filter(target => !target.draft?.supersedesOperation).concat(visibleDrafts);
+            const conflictBlocks = Array.from(app?.revisionConflictBlocks?.values?.() || [])
+                .filter(block => targetKeys.has(`${String(block?.entityType || '')}:${String(block?.entityId || '')}`));
+            let hasPending = false;
+            let pendingCheckFailed = false;
+            try {
+                // Destructive sync is workspace-scoped. Do not infer ownership
+                // from a storage-key/entity alias; inspect the signed params so
+                // an unrelated workspace with the same entity ID cannot block.
+                hasPending = v7HasCurrentWorkspacePendingOperation();
+            } catch (_error) {
+                pendingCheckFailed = true;
+            }
+            const blockers = [];
+            if (!client?.currentUser?.()) blockers.push('請先登入後再選擇捨棄草稿。');
+            if (hasPending || pendingCheckFailed) blockers.push('有結果尚未確認的保存操作，必須先完成對帳。');
+            if (supersedingDrafts.length) blockers.push('有與未知保存結果綁定的後續草稿，不能直接刪除。');
+            if (invalidDrafts.length) blockers.push('有格式異常的草稿證據，不能當作普通草稿刪除。');
+            if (V7_CLOUD_SAVE_PROMISE || V4_CLOUD_SAVING) blockers.push('目前仍在保存，請等待結果確認。');
+            if (V4_CLOUD_APPLYING) blockers.push('目前仍在套用雲端資料，請稍後再試。');
+            if (Number(app?.claimPromises?.size || 0) > 0) blockers.push('目前仍在取得編輯權，請稍後再試。');
+            if (app?.isPendingRecoveryBlocked?.()) blockers.push('尚有保存重試證據等待對帳。');
+            if (app?.isWriteFailureBlocked?.()) blockers.push('尚有未處理的保存失敗證據。');
+            if (app?.authorityWriteBlock) blockers.push('雲端authority狀態尚未恢復，不能捨棄草稿。');
+            if (client?.snapshot?.legacyLocalRecovery) blockers.push('仍有切換前救援資料，必須先人工處理。');
+            return {
+                targets, drafts, ordinaryDrafts, supersedingDrafts, invalidDrafts, conflictBlocks,
+                hasPending: hasPending || pendingCheckFailed,
+                blockers,
+                canDiscard: blockers.length === 0
+            };
+        }
+
+        function v7CloseSyncChoiceModal() {
+            const modal = document.getElementById('v7-sync-choice-modal');
+            if (!modal) return;
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        }
+
+        function v7RenderSyncChoiceModal(inventory = v7CurrentReportSyncInventory()) {
+            const modal = document.getElementById('v7-sync-choice-modal');
+            if (!modal) return false;
+            const summary = document.getElementById('v7-sync-choice-summary');
+            const warning = document.getElementById('v7-sync-choice-warning');
+            const discard = document.getElementById('v7-sync-discard');
+            const parts = [`${inventory.ordinaryDrafts.length} 個普通本機草稿`];
+            if (inventory.invalidDrafts.length) parts.push(`${inventory.invalidDrafts.length} 個格式異常草稿`);
+            if (inventory.conflictBlocks.length) parts.push(`${inventory.conflictBlocks.length} 個revision conflict`);
+            if (inventory.hasPending) parts.push('有pending待對帳');
+            if (summary) summary.textContent = `目前偵測：${parts.join('｜')}`;
+            if (warning) warning.textContent = inventory.blockers.length
+                ? `目前不能捨棄：${inventory.blockers.join(' ')}`
+                : '選擇「捨棄草稿用雲端」後，會先確認雲端快照可讀，成功套用後才移除上述普通草稿與已明確拒絕的衝突草稿。';
+            if (discard) {
+                discard.disabled = V7_SYNC_CHOICE_BUSY || !inventory.canDiscard;
+                discard.setAttribute('aria-disabled', discard.disabled ? 'true' : 'false');
+            }
+            ['v7-sync-keep', 'v7-sync-cancel'].forEach(id => {
+                const button = document.getElementById(id);
+                if (button) button.disabled = V7_SYNC_CHOICE_BUSY;
+            });
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            return true;
+        }
+
+        async function v7ChooseSyncLatest(choice) {
+            if (V7_SYNC_CHOICE_BUSY) return false;
+            if (choice === 'cancel') {
+                v7CloseSyncChoiceModal();
+                return false;
+            }
+            if (choice === 'keep') {
+                V7_SYNC_CHOICE_BUSY = true;
+                v7SyncFocusedEditorToModel(document.activeElement);
+                v7PreserveVisibleEditorDrafts();
+                clearTimeout(window._globalInputSaveTimer);
+                window._globalInputSaveTimer = null;
+                v7RenderSyncChoiceModal();
+                try {
+                    const synced = await v4AutoSyncLatestFromCloud({
+                        silent: false,
+                        source: '正在同步最新雲端資料...',
+                        fullSnapshot: true,
+                        preserveLocalIntents: true
+                    });
+                    if (synced) v7CloseSyncChoiceModal();
+                    return synced;
+                } finally {
+                    V7_SYNC_CHOICE_BUSY = false;
+                    if (!document.getElementById('v7-sync-choice-modal')?.classList.contains('hidden')) v7RenderSyncChoiceModal();
+                }
+            }
+            if (choice !== 'discard') return false;
+            let inventory = v7CurrentReportSyncInventory();
+            if (!inventory.canDiscard) {
+                v7RenderSyncChoiceModal(inventory);
+                return false;
+            }
+            V7_SYNC_CHOICE_BUSY = true;
+            V7_SYNC_DISCARD_ACTIVE = true;
+            clearTimeout(window._globalInputSaveTimer);
+            window._globalInputSaveTimer = null;
+            v7ClearCloudAutoSaveTimer();
+            v7RenderSyncChoiceModal(inventory);
+            const confirmedDraftEvidence = new Map(inventory.drafts.map(target => [
+                `${target.entityType}:${target.entityId}`,
+                { entityType: target.entityType, entityId: target.entityId, storageKey: target.storageKey, raw: target.raw }
+            ]));
+            const confirmedConflicts = inventory.conflictBlocks.map(block => ({
+                entityType: String(block.entityType || ''),
+                entityId: String(block.entityId || '')
+            })).filter(target => target.entityType && target.entityId);
+            const markConcurrentDraftChange = (currentInventory) => {
+                const currentDrafts = new Map(currentInventory.drafts.map(target => [
+                    `${target.entityType}:${target.entityId}`,
+                    target.raw
+                ]));
+                const changedExisting = Array.from(confirmedDraftEvidence.entries()).some(([key, evidence]) => (
+                    currentDrafts.has(key) && currentDrafts.get(key) !== evidence.raw
+                ));
+                const addedDraft = Array.from(currentDrafts.keys()).some(key => !confirmedDraftEvidence.has(key));
+                if (changedExisting || addedDraft) {
+                    currentInventory.blockers.push('同步期間本機草稿已更新，未套用原先捨棄決定。');
+                    currentInventory.canDiscard = false;
+                }
+                return currentInventory;
+            };
+            try {
+                await window.MonthlyV7App.releaseAllLeasesForAuthoritativeReload();
+                inventory = markConcurrentDraftChange(v7CurrentReportSyncInventory());
+                if (!inventory.canDiscard) {
+                    await window.MonthlyV7App.reapplyProtectedLocalIntents();
+                    const error = new Error(inventory.blockers.join(' ') || 'LOCAL_INTENTS_NOT_SAFE_TO_DISCARD');
+                    error.code = 'LOCAL_INTENTS_NOT_SAFE_TO_DISCARD';
+                    throw error;
+                }
+                await window.MonthlyV7App.syncLatest({
+                    preserveLocalIntents: false,
+                    preserveLegacyLocal: false,
+                    retryTransient: true
+                });
+                inventory = markConcurrentDraftChange(v7CurrentReportSyncInventory());
+                if (!inventory.canDiscard) {
+                    await window.MonthlyV7App.reapplyProtectedLocalIntents();
+                    const error = new Error(inventory.blockers.join(' ') || 'LOCAL_INTENTS_NOT_SAFE_TO_DISCARD');
+                    error.code = 'LOCAL_INTENTS_NOT_SAFE_TO_DISCARD';
+                    throw error;
+                }
+                for (const target of confirmedDraftEvidence.values()) {
+                    window.MonthlyV7App.client.clearDraft(target.entityType, target.entityId);
+                }
+                for (const target of confirmedConflicts) {
+                    window.MonthlyV7App.clearRevisionConflict?.(target.entityType, target.entityId);
+                }
+                document.documentElement.removeAttribute('data-v7-report-meta-dirty-at');
+                document.querySelectorAll('[data-v7-local-draft-dirty-at]').forEach(node => {
+                    node.removeAttribute('data-v7-local-draft-dirty-at');
+                });
+                V7_CLOUD_SAVED_GENERATION = V7_CLOUD_DIRTY_GENERATION;
+                v7ClearCloudAutoSaveTimer();
+                v4SetCloudRuntimeStatus(`已捨棄普通本機草稿並套用雲端最新資料｜${v7FormatCloudSaveTime()}`, 'ok', {
+                    allowCriticalOverride: true,
+                    allowPendingFailureOverride: true
+                });
+                v7CloseSyncChoiceModal();
+                showToast('已捨棄本機草稿並載入雲端最新資料');
+                return true;
+            } catch (error) {
+                v4SetCloudRuntimeStatus('捨棄草稿同步失敗：' + String(error?.message || error), 'error', { preferOverRecovery: true });
+                alert('目前不能捨棄草稿：' + String(error?.message || error));
+                return false;
+            } finally {
+                V7_SYNC_DISCARD_ACTIVE = false;
+                V7_SYNC_CHOICE_BUSY = false;
+                if (!document.getElementById('v7-sync-choice-modal')?.classList.contains('hidden')) v7RenderSyncChoiceModal(inventory);
+            }
+        }
+
         async function v5SyncLatest() {
+            if (window.MonthlyV7App?.isActive?.() && v5CurrentUser()) {
+                v7RenderSyncChoiceModal(v7CurrentReportSyncInventory());
+                return;
+            }
             await v4AutoSyncLatestFromCloud({ silent: false, source: '正在同步最新雲端資料...' });
         }
         async function v5SaveChangesToCloud() {
@@ -8316,7 +8644,7 @@
             root.innerHTML = user ? `
                 <div class="v5-session-bar">
                     <span class="v5-role-pill"><i class="fas fa-user-shield"></i>${v2RecordText(user.displayName || user.username)}｜${v5RoleLabel(user.role)}</span>
-                    <button class="v5-sync-btn" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
+                    <button class="v5-sync-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="v5SyncLatest()"><i class="fas fa-rotate mr-1"></i>同步最新</button>
                     <button class="v5-sync-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改</button>
                     <button class="v5-sync-btn" onclick="v5Logout()">登出</button>
                     <button class="v5-sync-btn" onclick="siteAccessForgetTrustedDevice()">忘記此裝置</button>
@@ -8337,7 +8665,7 @@
                         保持登入
                     </label>` : ''}
                     <button class="v5-sync-btn" onclick="v5Login()"${disabledAttr}>登入</button>
-                    <button class="v5-sync-btn" onclick="v5SyncLatest()"${disabledAttr}><i class="fas fa-rotate mr-1"></i>同步最新</button>
+                    <button class="v5-sync-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="v5SyncLatest()"${disabledAttr}><i class="fas fa-rotate mr-1"></i>同步最新</button>
                     <button class="v5-sync-btn" onclick="siteAccessForgetTrustedDevice()">忘記此裝置</button>
                     <button class="v5-sync-btn" onclick="siteAccessExitSite()">退出網站</button>
                     ${v4CloudStatusHtml()}
@@ -8427,9 +8755,9 @@
                         ${supabaseConfigHtml}
                         <section class="v1-category-card">
                             <div class="v1-category-title mb-2">同步操作</div>
-                            <div class="text-xs text-slate-500 mb-2">V7 會先保存本機草稿，並將有變更的項目每分鐘合併上傳；「保存修改」會立即提交最新草稿。同步只重讀變動項目，有草稿的項目不會被遠端覆蓋。</div>
+                            <div class="text-xs text-slate-500 mb-2">V7 會先保存本機草稿，並將有變更的項目每分鐘合併上傳；「保存修改」會立即提交最新草稿。「同步最新」可選擇保留草稿同步、明確捨棄普通草稿使用雲端，或取消；pending／異常保存證據仍會先阻擋並要求對帳。</div>
                             <div class="v1-action-row">
-                                <button class="v1-small-btn" onclick="v5SyncLatest()"><i class="fas fa-cloud-arrow-down mr-1"></i>同步最新 / 下載雲端</button>
+                                <button class="v1-small-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="v5SyncLatest()"><i class="fas fa-cloud-arrow-down mr-1"></i>同步最新 / 下載雲端</button>
                                 <button class="v1-small-btn v1-primary-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="v5SaveChangesToCloud()"><i class="fas fa-cloud-arrow-up mr-1"></i>保存修改 / 上傳雲端</button>
                             </div>
                             <div class="text-sm text-slate-600 leading-6"><div><b>最近同步：</b>${v4FmtTime(c.lastSyncAt)}</div><div><b>authority：</b>${window.MonthlyV7App?.status?.authorityState || 'LEGACY_ACTIVE'}</div><div><b>change watermark：</b>${window.MonthlyV7App?.client?.watermark || c.cloudRevision || '尚未同步'}</div><div><b>目前身份：</b>${v2RecordText(v5CurrentUser()?.displayName || '未登入')}</div></div>

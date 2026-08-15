@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.24';
+  const buildId = '7.0.25';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
@@ -1042,6 +1042,20 @@
       } else if (siteSessionWasPendingValidation) {
         this.notifySessionStateChanged('site-session-validated');
       }
+      return merged;
+    }
+
+    async reapplyProtectedLocalIntents() {
+      if (!this.snapshot) return null;
+      const operationContext = this.captureSessionContext();
+      const candidate = this.cloneJson(this.snapshot, {});
+      const merged = await this.mergeSnapshotWithProtectedLocal(candidate);
+      this.assertSessionContext(operationContext, 'reapply_protected_local_intents');
+      this.applyPendingReorderDisplay(merged);
+      this.snapshot = merged;
+      const bundle = this.core.legacyBundleFromSnapshot(merged);
+      if (typeof this.host.applyBundle === 'function') await this.host.applyBundle(bundle, merged);
+      this.assertSessionContext(operationContext, 'reapply_protected_local_intents_complete');
       return merged;
     }
 

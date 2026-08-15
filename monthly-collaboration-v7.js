@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.24';
+  const buildId = '7.0.25';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -492,8 +492,8 @@
       return cleared;
     }
 
-    async loadSnapshot() {
-      const result = await this.client.loadSnapshot();
+    async loadSnapshot(options = {}) {
+      const result = await this.client.loadSnapshot(options);
       if (!this.client.currentUser()) await this.resumeUserFromMarker();
       if (this.client.currentUser()) {
         this.client.startHeartbeat();
@@ -503,9 +503,37 @@
       return this.client.snapshot || result;
     }
 
-    async syncLatest() {
-      if (!this.client.currentUser()) return this.loadSnapshot();
+    async syncLatest(options = {}) {
+      if (options.preserveLocalIntents === false) return this.loadSnapshot(options);
+      if (!this.client.currentUser()) return this.loadSnapshot(options);
       return this.client.catchUp();
+    }
+
+    async releaseAllLeasesForAuthoritativeReload() {
+      if (!this.client) return true;
+      const client = this.client;
+      const operationContext = this.captureOperationContext();
+      for (const timer of this.moduleReleaseTimers.values()) root.clearTimeout(timer);
+      this.moduleReleaseTimers.clear();
+      const leases = Array.from(client.leases.values());
+      const results = await Promise.all(
+        leases.map((lease) => client.releaseCapturedLease(lease, operationContext))
+      );
+      this.assertOperationContext(operationContext, 'authoritative_reload_release');
+      if (results.some((confirmed) => confirmed !== true)) {
+        const error = new Error('LEASE_RELEASE_NOT_CONFIRMED');
+        error.code = 'LEASE_RELEASE_NOT_CONFIRMED';
+        throw error;
+      }
+      this.decorateEditorRows();
+      return true;
+    }
+
+    async reapplyProtectedLocalIntents() {
+      if (!this.client || typeof this.client.reapplyProtectedLocalIntents !== 'function') return null;
+      const result = await this.client.reapplyProtectedLocalIntents();
+      this.decorateEditorRows();
+      return result;
     }
 
     captureOperationContext() {
