@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.23';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.24';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -684,7 +684,7 @@
 
         // --- 全新升級：插入多維度動態趨勢圖 ---
         function insertTrendChart() {
-            const layout = layoutStyle({ inlineWidth: '48%' });
+            const layout = layoutStyle({ inlineWidth: '45%' });
             const html = `
             <div class="trend-chart-container ${layout.extraClass}" data-layout="${layout.dataLayout}" data-trend-chart="1" contenteditable="false" style="border: 2px solid #cbd5e1; padding: 8px; border-radius: 6px; background-color: #ffffff; ${layout.style}; break-inside: avoid; page-break-inside: avoid;">
                 
@@ -2148,7 +2148,7 @@
                     <span class="mx-1 text-gray-300">|</span>
                     <select id="insertLayoutSelector" class="toolbar-btn" title="控制新插入物件並排或換行">
                         <option value="inline-30" selected>並排 30%</option>
-                        <option value="inline-48">半寬 48%</option>
+                        <option value="inline-45">半寬 45%</option>
                         <option value="block-100">整行 100%</option>
                         <option value="newline-100">換行整行</option>
                     </select>
@@ -2193,8 +2193,13 @@
         </div>
     </div>
 
-    <!-- 數值框專屬懸浮刪除工具列 -->
-    <div id="highlightFloatToolbar" class="fixed hidden bg-white shadow-lg border border-red-200 rounded p-1 z-50 flex items-center">
+    <!-- 數值框專屬懸浮設定工具列 -->
+    <div id="highlightFloatToolbar" class="fixed hidden bg-white shadow-lg border border-indigo-200 rounded px-2 py-1 z-50 flex items-center gap-1 text-xs">
+        <span class="text-gray-500 font-bold ml-1">寬度:</span>
+        <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setHighlightWidth('25%')">25%</button>
+        <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setHighlightWidth('45%')">45%</button>
+        <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setHighlightWidth('100%')">100%</button>
+        <span class="w-px h-4 bg-gray-300 mx-1"></span>
         <button class="px-2 py-1 text-red-600 hover:bg-red-50 hover:text-red-700 rounded transition font-bold text-xs" onclick="deleteSelectedHighlight()" title="刪除此數值框">
             <i class="fas fa-trash-alt mr-1"></i>刪除
         </button>
@@ -2204,7 +2209,7 @@
     <div id="imgFloatToolbar" class="fixed hidden bg-white shadow-lg border border-indigo-200 rounded px-2 py-1 z-50 flex items-center gap-1 text-xs">
         <span class="text-gray-500 font-bold ml-1">寬度:</span>
         <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setImgWidth('24%')">25%</button>
-        <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setImgWidth('48%')">50%</button>
+        <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setImgWidth('45%')">45%</button>
         <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setImgWidth('100%')">100%</button>
         <span class="w-px h-4 bg-gray-300 mx-1"></span>
         <span class="text-gray-500 font-bold ml-1">間距:</span>
@@ -2224,7 +2229,7 @@
         <button class="px-1.5 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setTableWidth('28%')">28%</button>
         <button class="px-1.5 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setTableWidth('30%')">30%</button>
         <button class="px-1.5 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setTableWidth('40%')">40%</button>
-        <button class="px-1.5 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setTableWidth('50%')">50%</button>
+        <button class="px-1.5 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setTableWidth('45%')">45%</button>
         <button class="px-1.5 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setTableWidth('70%')">70%</button>
         <button class="px-1.5 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setTableWidth('100%')">100%</button>
         <span class="w-px h-4 bg-gray-300 mx-1"></span>
@@ -2241,8 +2246,13 @@
         <button class="px-2 py-1 text-red-500 hover:bg-red-50 rounded transition ml-1" onclick="deleteSelectedTable()" title="刪除整個表格/指標卡"><i class="fas fa-trash"></i></button>
     </div>
     
-    <!-- 區塊專屬懸浮刪除工具列 -->
-    <div id="blockFloatToolbar" class="fixed hidden bg-white shadow-lg border border-red-200 rounded p-1 z-50 flex items-center">
+    <!-- 區塊專屬懸浮設定工具列 -->
+    <div id="blockFloatToolbar" class="fixed hidden bg-white shadow-lg border border-indigo-200 rounded px-2 py-1 z-50 flex items-center gap-1 text-xs">
+        <span class="text-gray-500 font-bold ml-1">寬度:</span>
+        <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setBlockWidth('25%')">25%</button>
+        <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setBlockWidth('45%')">45%</button>
+        <button class="px-2 py-1 hover:bg-indigo-50 text-indigo-700 rounded transition" onclick="setBlockWidth('100%')">100%</button>
+        <span class="w-px h-4 bg-gray-300 mx-1"></span>
         <button class="px-2 py-1 text-red-600 hover:bg-red-50 hover:text-red-700 rounded transition font-bold text-xs" onclick="deleteSelectedBlock()" title="一鍵刪除此區塊">
             <i class="fas fa-trash-alt mr-1"></i>刪除區塊
         </button>
@@ -2651,11 +2661,43 @@
             document.getElementById('endDay').value = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
         }
 
+        const INSERTED_HALF_WIDTH_CLASSES = new Set([
+            'content-block',
+            'highlight-val',
+            'content-inline-img',
+            'custom-data-table',
+            'kpi-card-container',
+            'progress-card-container',
+            'zone-card-container',
+            'trend-chart-container'
+        ]);
+
+        function normalizeInsertedHalfWidthHtml(html) {
+            return String(html ?? '').replace(/<(?:div|span|img|table)\b[^>]*>/gi, (tag) => {
+                const classAttribute = tag.match(/\bclass\s*=\s*(["'])(.*?)\1/i);
+                if (!classAttribute) return tag;
+                const isInsertedElement = classAttribute[2]
+                    .split(/\s+/)
+                    .some((className) => INSERTED_HALF_WIDTH_CLASSES.has(className));
+                if (!isInsertedElement) return tag;
+                return tag.replace(/\bstyle\s*=\s*(["'])(.*?)\1/i, (attribute, quote, cssText) => {
+                    const normalizedCss = cssText.replace(
+                        /(^|;)(\s*width\s*:\s*)(?:48|50)%(\s*(?:!important\s*)?)(?=;|$)/i,
+                        (match, prefix, declaration, suffix) => `${prefix}${declaration}45%${suffix}`
+                    );
+                    return `style=${quote}${normalizedCss}${quote}`;
+                });
+            });
+        }
+
         function normalizeData(dataArray) {
             return dataArray.map(item => {
                 item.title = sanitizeModuleTitleHtml(item.title || '');
                 if (item.content !== undefined) { item.columns = [item.content]; delete item.content; }
                 if (!item.columns) item.columns = [''];
+                item.columns = item.columns.map((column) => (
+                    typeof column === 'string' ? normalizeInsertedHalfWidthHtml(column) : column
+                ));
                 if (!item.colLayout) item.colLayout = item.colCount ? Array(item.colCount).fill('1').join(':') : '1';
                 if (typeof item.selectedForPdf === 'undefined') item.selectedForPdf = true;
                 if (typeof item.pdfOrder === 'undefined') item.pdfOrder = 0;
@@ -3533,7 +3575,7 @@
                 extraClass: 'layout-inline',
                 dataLayout: 'inline'
             };
-            if (mode === 'inline-48') return { ...base, width: '48%', extraClass: 'layout-inline layout-half' };
+            if (mode === 'inline-45') return { ...base, width: '45%', extraClass: 'layout-inline layout-half' };
             if (mode === 'block-100') return { ...base, inline: false, width: '100%', display: preferred.blockDisplay || 'block', suffix: '<div class="block-spacer"><br></div>', extraClass: 'layout-block', dataLayout: 'block' };
             if (mode === 'newline-100') return { ...base, inline: false, width: '100%', display: preferred.blockDisplay || 'block', prefix: '<div class="block-spacer"><br></div>', suffix: '<div class="block-spacer"><br></div>', extraClass: 'layout-newline layout-block', dataLayout: 'block' };
             return base;
@@ -3578,7 +3620,7 @@
 
         function insertContentTable() {
             restoreSelection();
-            const layout = layoutStyle({ inlineWidth: '48%', display: 'inline-table', blockDisplay: 'table' });
+            const layout = layoutStyle({ inlineWidth: '45%', display: 'inline-table', blockDisplay: 'table' });
             const html = `
             <table class="custom-data-table ${layout.extraClass}" data-layout="${layout.dataLayout}" data-resizable-table="1" style="${layout.style}; border-collapse: collapse; table-layout: fixed;">
                 <colgroup>
@@ -3628,7 +3670,7 @@
 
             Promise.all(promises).then(bases => {
                 let html = '';
-                const layout = layoutStyle({ inlineWidth: '48%' });
+                const layout = layoutStyle({ inlineWidth: '45%' });
                 bases.forEach(base64 => {
                     html += `<img src="${base64}" class="content-inline-img ${layout.extraClass}" data-layout="${layout.dataLayout}" style="${layout.style}; cursor: pointer; border-radius: 4px;">`;
                 });
@@ -3647,7 +3689,7 @@
                 const rect = activeHighlight.getBoundingClientRect();
                 const toolbar = document.getElementById('highlightFloatToolbar');
                 toolbar.classList.remove('hidden');
-                toolbar.style.top = (rect.top - 28) + 'px';
+                toolbar.style.top = (rect.top - 45) + 'px';
                 toolbar.style.left = rect.left + 'px';
                 if (parseInt(toolbar.style.top) < 0) toolbar.style.top = (rect.bottom + 5) + 'px';
             }
@@ -3702,8 +3744,8 @@
                 const rect = activeBlock.getBoundingClientRect();
                 const toolbar = document.getElementById('blockFloatToolbar');
                 toolbar.classList.remove('hidden');
-                toolbar.style.top = (rect.top - 20) + 'px';
-                toolbar.style.left = (rect.right - 90) + 'px';
+                toolbar.style.top = (rect.top - 45) + 'px';
+                toolbar.style.left = rect.left + 'px';
                 if (parseInt(toolbar.style.top) < 0) toolbar.style.top = (rect.bottom + 5) + 'px';
             } else {
                 if (!e.target.closest('#imgFloatToolbar') && !e.target.closest('.toolbar-btn')) hideImgToolbar();
@@ -3720,6 +3762,7 @@
             if (toolbar) toolbar.classList.add('hidden');
             if (activeHighlight) activeHighlight = null;
         }
+        function setHighlightWidth(w) { if(activeHighlight) applyElementLayoutWidth(activeHighlight, w); }
         function deleteSelectedHighlight() {
             if (activeHighlight) {
                 const editableDiv = activeHighlight.closest('.editable-div');
@@ -3872,6 +3915,7 @@
             if (toolbar) toolbar.classList.add('hidden');
             if (activeBlock) { activeBlock.style.outline = 'none'; activeBlock = null; }
         }
+        function setBlockWidth(w) { if(activeBlock) applyElementLayoutWidth(activeBlock, w); }
         function deleteSelectedBlock() {
             if (activeBlock) {
                 const editableDiv = activeBlock.closest('.editable-div');

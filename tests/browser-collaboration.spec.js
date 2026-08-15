@@ -279,7 +279,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.23';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.24';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +319,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.23'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.24'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +522,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.0.23', config: '7.0.23', core: '7.0.23', client: '7.0.23', v7: '7.0.23'
+      page: '7.0.24', config: '7.0.24', core: '7.0.24', client: '7.0.24', v7: '7.0.24'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -2716,6 +2716,97 @@ test('100% 縮放時工具列換行、文字可讀且無水平破版', async ({ 
     expect(geometry.stackMinWidth).toBe(0);
     expect(geometry.toolbar.height).toBeLessThan(520);
   }
+});
+
+test('半寬與所有插入元件的50%寬度控制統一為45%', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+
+  const contract = await page.evaluate(() => {
+    const selector = document.getElementById('insertLayoutSelector');
+    const widths = (id) => Array.from(document.querySelectorAll(`#${id} button`))
+      .map((button) => button.textContent.trim())
+      .filter((label) => /^\d+%$/.test(label));
+    const legacy = `
+      <div class="content-block" style="width:48%;"><span class="kpi-marker" style="left:50%;">A</span></div>
+      <span class="highlight-val" style="width:50%;">B</span>
+      <img class="content-inline-img" style="width:48%;">
+      <table class="custom-data-table" style="width:50%;"><tbody><tr><td>C</td></tr></tbody></table>
+      <div class="kpi-card-container" style="width:50%;">D</div>
+      <div class="progress-card-container" style="width:48%;">E</div>
+      <div class="zone-card-container" style="width:50%;">F</div>
+      <div class="trend-chart-container" style="width:48%;">G</div>
+      <div class="unrelated-width" style="width:50%;">KEEP</div>`;
+    const normalized = normalizeData([{ title: '舊半寬', columns: [legacy], colLayout: '1' }])[0].columns[0];
+    const host = document.createElement('div');
+    host.innerHTML = normalized;
+    const insertedSelector = '.content-block, .highlight-val, .content-inline-img, .custom-data-table, .kpi-card-container, .progress-card-container, .zone-card-container, .trend-chart-container';
+    return {
+      options: Array.from(selector.options).map((option) => `${option.value}:${option.textContent.trim()}`),
+      halfLayoutWidth: getInsertLayout('inline-45', { inlineWidth: '48%' }).width,
+      toolbarWidths: {
+        block: widths('blockFloatToolbar'),
+        highlight: widths('highlightFloatToolbar'),
+        image: widths('imgFloatToolbar'),
+        table: widths('tableFloatToolbar')
+      },
+      normalizedWidths: Array.from(host.querySelectorAll(insertedSelector)).map((element) => element.style.width),
+      unrelatedWidth: host.querySelector('.unrelated-width').style.width,
+      kpiMarkerLeft: host.querySelector('.kpi-marker').style.left
+    };
+  });
+
+  expect(contract.options).toContain('inline-45:半寬 45%');
+  expect(contract.options.some((option) => /48%|inline-48/.test(option))).toBe(false);
+  expect(contract.halfLayoutWidth).toBe('45%');
+  for (const labels of Object.values(contract.toolbarWidths)) {
+    expect(labels).toContain('45%');
+    expect(labels).not.toContain('50%');
+  }
+  expect(contract.normalizedWidths).toEqual(Array(8).fill('45%'));
+  expect(contract.unrelatedWidth).toBe('50%');
+  expect(contract.kpiMarkerLeft).toBe('50%');
+
+  await page.evaluate(() => {
+    const fixture = document.createElement('div');
+    fixture.id = 'half-width-control-fixture';
+    fixture.style.cssText = 'position:fixed;left:20px;bottom:20px;width:1000px;z-index:40;background:#fff;padding:4px;';
+    fixture.innerHTML = `
+      <div id="fixture-block" class="content-block">區塊</div>
+      <span id="fixture-highlight" class="highlight-val">數值</span>
+      <img id="fixture-image" class="content-inline-img" alt="插圖" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">
+      <table id="fixture-table" class="custom-data-table"><tbody><tr><td>表格</td></tr></tbody></table>`;
+    document.body.appendChild(fixture);
+  });
+
+  const cases = [
+    ['#fixture-block', '#blockFloatToolbar'],
+    ['#fixture-highlight', '#highlightFloatToolbar'],
+    ['#fixture-image', '#imgFloatToolbar'],
+    ['#fixture-table td', '#tableFloatToolbar']
+  ];
+  for (const [target, toolbar] of cases) {
+    await page.locator(target).click();
+    await expect(page.locator(toolbar)).toBeVisible();
+    await page.locator(toolbar).getByRole('button', { name: '45%', exact: true }).click();
+    const element = target.includes('table') ? page.locator('#fixture-table') : page.locator(target);
+    await expect.poll(() => element.evaluate((node) => ({
+      width: node.style.width,
+      layout: node.dataset.layout,
+      half: node.classList.contains('layout-half')
+    }))).toEqual({ width: '45%', layout: 'inline', half: true });
+  }
+
+  const pairGeometry = await page.evaluate(() => {
+    const fixture = document.getElementById('half-width-control-fixture');
+    const first = document.getElementById('fixture-block');
+    const second = document.getElementById('fixture-table');
+    fixture.replaceChildren(first, second);
+    const fixtureRect = fixture.getBoundingClientRect();
+    const secondRect = second.getBoundingClientRect();
+    return { fixtureRight: fixtureRect.right, secondRight: secondRect.right };
+  });
+  expect(pairGeometry.secondRight).toBeLessThanOrEqual(pairGeometry.fixtureRight + 1);
 });
 
 test('項目內容統一放大，部件標題維持原尺寸且圖表數值可讀', async ({ page }) => {
