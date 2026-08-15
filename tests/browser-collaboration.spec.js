@@ -279,7 +279,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.21';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.22';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +319,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.21'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.22'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +522,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.0.21', config: '7.0.21', core: '7.0.21', client: '7.0.21', v7: '7.0.21'
+      page: '7.0.22', config: '7.0.22', core: '7.0.22', client: '7.0.22', v7: '7.0.22'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -2836,6 +2836,39 @@ test('項目內容統一放大，部件標題維持原尺寸且圖表數值可�
   expect(printTypography.dataCardValue).toBeGreaterThanOrEqual(17);
   await page.emulateMedia({ media: 'screen' });
   expect(errors).toEqual([]);
+});
+
+test('螢幕趨勢表格外框貼合內容高度，不被右側 canvas 拉長', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await installTrendPdfGeometryFixture(page);
+
+  const geometry = await page.evaluate(async () => {
+    const chart = document.querySelector('#tableBody .trend-chart-container');
+    const table = chart.querySelector('.chart-data-table');
+    Array.from(table.tBodies[0].rows).slice(0, 4).forEach((row) => row.remove());
+    window.renderAllCharts();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    const areaRect = chart.querySelector('.chart-table-area').getBoundingClientRect();
+    const tableRect = table.getBoundingClientRect();
+    const canvasRect = chart.querySelector('.chart-canvas-area').getBoundingClientRect();
+    return {
+      rowCount: table.tBodies[0].rows.length,
+      areaHeight: areaRect.height,
+      tableHeight: tableRect.height,
+      trailingSpace: areaRect.height - tableRect.height,
+      canvasHeight: canvasRect.height,
+      areaBottom: areaRect.bottom,
+      canvasBottom: canvasRect.bottom
+    };
+  });
+
+  expect(geometry.rowCount).toBe(8);
+  expect(geometry.canvasHeight).toBe(200);
+  expect(geometry.tableHeight).toBeLessThan(geometry.canvasHeight - 20);
+  expect(geometry.trailingSpace).toBeLessThanOrEqual(4.5);
+  expect(geometry.areaBottom).toBeLessThan(geometry.canvasBottom - 20);
 });
 
 test('長月報捲動時頁首與工具列保持可見，不會只剩固定漸層遮罩', async ({ page }) => {

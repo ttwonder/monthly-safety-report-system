@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.21';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.22';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -1881,6 +1881,11 @@
             padding: 1px 4px !important;
             font-size: var(--report-trend-table-font-size) !important;
             line-height: 1.15 !important;
+        }
+        @media screen {
+            #tableBody .module-content-cell .chart-table-area {
+                align-self: flex-start !important;
+            }
         }
         .module-content-cell .trend-chart-container > div:first-child .no-print {
             flex-wrap: wrap;

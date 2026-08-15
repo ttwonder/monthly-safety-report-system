@@ -9,4 +9,4 @@ window.MONTHLY_REPORT_SUPABASE_CONFIG = {
   autoSave: true,
   autoSaveDelayMs: 2500
 };
-window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { config: '7.0.21' });
+window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { config: '7.0.22' });
