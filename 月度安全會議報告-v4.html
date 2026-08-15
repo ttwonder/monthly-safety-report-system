@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.25';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.26';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -1213,6 +1213,28 @@
         .v1-preview-shell .v1-selected-editor-print-clone .print-only { display:block !important; text-align:center; font-size:14px; margin-bottom:6px; }
         .v1-preview-shell .v1-selected-editor-print-clone .print-icon-show { display:block !important; }
         #pdfPrintArea .v1-selected-editor-print-clone { width: 100%; }
+        .v1-selected-editor-print-clone .pdf-inline-layout-row {
+            display:flex;
+            flex-wrap:nowrap;
+            align-items:flex-start;
+            width:100%;
+            max-width:100%;
+            min-width:0;
+            box-sizing:border-box;
+            break-inside:avoid;
+            page-break-inside:avoid;
+        }
+        .v1-selected-editor-print-clone .pdf-inline-layout-row > .layout-inline,
+        .v1-selected-editor-print-clone .pdf-inline-layout-row > [data-layout="inline"] {
+            flex:0 0 auto;
+            max-width:100%;
+        }
+        .v1-selected-editor-print-clone .pdf-inline-layout-row > img.content-inline-img {
+            position:static !important;
+            float:none !important;
+            height:auto !important;
+            object-fit:contain;
+        }
         .v1-empty-state { color:#94a3b8; text-align:center; padding:24px; border:1px dashed #cbd5e1; border-radius:12px; background:#fff; }
         .v1-history-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
         .v1-note-box { border-left:4px solid #8b5cf6; background:#faf5ff; color:#5b21b6; padding:10px 12px; border-radius:8px; font-size:13px; }
@@ -4790,6 +4812,53 @@
             });
         }
 
+        function normalizeV1PdfInlineLayoutRows(row) {
+            const inlineWidth = (element) => {
+                const value = parseFloat(element?.style?.width || '');
+                return Number.isFinite(value) && value > 0 ? Math.min(100, value) : 100;
+            };
+            const isInlineLayout = (element) => {
+                if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+                if (element.classList.contains('layout-block') || element.dataset.layout === 'block') return false;
+                if (element.classList.contains('layout-inline') || element.dataset.layout === 'inline') return true;
+                if (!element.classList.contains('content-inline-img')) return false;
+                return String(element.style.display || '').includes('inline') || inlineWidth(element) < 99;
+            };
+            const isLayoutWhitespace = (node) => node?.nodeType === Node.TEXT_NODE
+                && String(node.textContent || '').replace(/\u00a0/g, '').trim() === '';
+
+            row.querySelectorAll('.module-content-cell .editable-div').forEach((editable) => {
+                const nodes = Array.from(editable.childNodes);
+                let flowRow = null;
+                let usedWidth = 0;
+                let interstitialWhitespace = [];
+                nodes.forEach((node) => {
+                    if (isLayoutWhitespace(node)) {
+                        if (flowRow) interstitialWhitespace.push(node);
+                        return;
+                    }
+                    if (!isInlineLayout(node)) {
+                        flowRow = null;
+                        usedWidth = 0;
+                        interstitialWhitespace = [];
+                        return;
+                    }
+                    const width = inlineWidth(node);
+                    if (!flowRow || (usedWidth > 0 && usedWidth + width > 100)) {
+                        flowRow = document.createElement('div');
+                        flowRow.className = 'pdf-inline-layout-row';
+                        flowRow.dataset.pdfInlineLayoutRow = 'true';
+                        editable.insertBefore(flowRow, node);
+                        usedWidth = 0;
+                    }
+                    interstitialWhitespace.forEach((space) => space.remove());
+                    interstitialWhitespace = [];
+                    flowRow.appendChild(node);
+                    usedWidth += width;
+                });
+            });
+        }
+
         function normalizeSelectedPdfRow(row, originalIndex, selectedOrder) {
             // PDF 輸出中心只篩選/排序模塊，不重新編項次；保留月報編輯中的原始項次，避免把原 6 顯示成 2 而誤認為取消的第 2 項仍在。
             row.dataset.pdfSelectedOrder = String(selectedOrder);
@@ -4800,6 +4869,7 @@
             if (printOnly) printOnly.textContent = String(displayNumber);
             row.querySelectorAll('[contenteditable="true"]').forEach(el => el.removeAttribute('contenteditable'));
             row.querySelectorAll('.no-print:not(.chart-table-area)').forEach(el => el.remove());
+            normalizeV1PdfInlineLayoutRows(row);
             stripCloneIds(row);
             return row;
         }
@@ -4862,6 +4932,45 @@
 
         function buildV1PdfModuleHtml(item, displayIndex) {
             return '';
+        }
+
+        async function waitForV1PdfImages(printArea, timeoutMs = 5000) {
+            const images = Array.from(printArea?.querySelectorAll?.('img') || []);
+            if (!images.length) return true;
+            const waitForEvent = (image) => new Promise((resolve) => {
+                if (image.complete) return resolve(true);
+                let settled = false;
+                const finish = (ready) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    image.removeEventListener('load', onLoad);
+                    image.removeEventListener('error', onError);
+                    resolve(ready);
+                };
+                const onLoad = () => finish(true);
+                const onError = () => finish(true);
+                const timer = setTimeout(() => finish(false), timeoutMs);
+                image.addEventListener('load', onLoad, { once: true });
+                image.addEventListener('error', onError, { once: true });
+            });
+            const loaded = await Promise.all(images.map(waitForEvent));
+            if (!loaded.every(Boolean)) return false;
+            const decodeOne = async (image) => {
+                if (!(image.naturalWidth > 0) || typeof image.decode !== 'function') return true;
+                let timer = null;
+                const timeout = new Promise((resolve) => {
+                    timer = setTimeout(() => resolve(false), timeoutMs);
+                });
+                const decoded = await Promise.race([
+                    image.decode().then(() => true).catch(() => image.complete),
+                    timeout
+                ]);
+                clearTimeout(timer);
+                return decoded;
+            };
+            const decoded = await Promise.all(images.map(decodeOne));
+            return decoded.every(Boolean) && images.every((image) => image.complete);
         }
 
         function waitForV1PdfCharts(timeoutMs = 900) {
@@ -5038,6 +5147,7 @@
             v1ApplyPdfPrintSettings(printArea);
             document.body.classList.add('pdf-render-prep');
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            if (!await waitForV1PdfImages(printArea)) return false;
             if (window.renderAllCharts) window.renderAllCharts();
             await waitForV1PdfCharts();
             if (window.renderAllCharts) window.renderAllCharts();

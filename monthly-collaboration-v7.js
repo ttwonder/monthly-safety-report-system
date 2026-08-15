@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.25';
+  const buildId = '7.0.26';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
