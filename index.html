@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.22';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.23';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -1216,6 +1216,10 @@
         .v1-empty-state { color:#94a3b8; text-align:center; padding:24px; border:1px dashed #cbd5e1; border-radius:12px; background:#fff; }
         .v1-history-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
         .v1-note-box { border-left:4px solid #8b5cf6; background:#faf5ff; color:#5b21b6; padding:10px 12px; border-radius:8px; font-size:13px; }
+        .v1-pdf-print-settings { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px 10px; align-items:center; margin:0 0 10px; padding:9px 10px; border:1px solid #c7d2fe; border-radius:10px; background:#eef2ff; color:#312e81; font-size:12px; font-weight:800; }
+        .v1-pdf-print-settings select { min-width:82px; border:1px solid #a5b4fc; border-radius:7px; background:#fff; color:#312e81; padding:4px 7px; font-size:12px; font-weight:800; }
+        .v1-pdf-compact-toggle { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
+        .v1-pdf-print-settings-note { grid-column:1 / -1; color:#6366f1; font-size:11px; font-weight:700; }
         .v5-session-bar { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:7px 8px; margin:-4px 0 10px; border:1px solid #bae6fd; border-radius:12px; background:#f0f9ff; color:#075985; font-size:12px; font-weight:800; }
         .v5-role-pill { display:inline-flex; align-items:center; gap:4px; border-radius:999px; padding:3px 8px; background:#e0f2fe; color:#075985; }
         .v5-sync-btn { border:1px solid #7dd3fc; background:#fff; color:#0369a1; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:800; cursor:pointer; }
@@ -1237,8 +1241,10 @@
             z-index: -1 !important;
         }
         body.pdf-render-prep #pdfPrintArea .v1-selected-editor-print-clone {
-            width: 285mm !important;
-            max-width: 285mm !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            margin-left: 0 !important;
+            zoom: var(--v1-pdf-print-scale, .95);
             box-shadow: none !important;
         }
         body.pdf-render-prep #pdfPrintArea .chart-layout-wrapper,
@@ -1313,6 +1319,7 @@
             body.pdf-print-mode #pdfPrintArea .v1-selected-editor-print-clone {
                 width: 100% !important;
                 max-width: 100% !important;
+                zoom: var(--v1-pdf-print-scale, .95);
                 box-shadow: none !important;
                 border-radius: 0 !important;
                 padding: 0 !important;
@@ -1345,6 +1352,19 @@
             body.pdf-print-mode #pdfPrintArea .v1-selected-editor-print-clone [data-cloned-id="tableBody"] .module-card-row.pdf-keep-together {
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
+            }
+            body.pdf-print-mode #pdfPrintArea[data-pdf-compact-pagination="true"] .v1-selected-editor-print-clone [data-cloned-id="tableBody"] {
+                display: block !important;
+            }
+            body.pdf-print-mode #pdfPrintArea[data-pdf-compact-pagination="true"] .v1-selected-editor-print-clone [data-cloned-id="tableBody"] .module-card-row {
+                margin-bottom: 12px !important;
+            }
+            body.pdf-print-mode #pdfPrintArea[data-pdf-compact-pagination="true"] .v1-selected-editor-print-clone [data-cloned-id="tableBody"] .module-card-row:last-child {
+                margin-bottom: 0 !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-compact-split {
+                page-break-inside: auto !important;
+                break-inside: auto !important;
             }
             body.pdf-print-mode #pdfPrintArea .content-block,
             body.pdf-print-mode #pdfPrintArea .custom-data-table,
@@ -4552,11 +4572,56 @@
             `;
         }
 
+        const V1_PDF_PRINT_SETTINGS_KEY = 'monthly_pdf_print_settings_v1';
+        const V1_PDF_SCALE_OPTIONS = Object.freeze([85, 90, 95, 100]);
+
+        function v1NormalizePdfPrintSettings(value) {
+            const requestedScale = Number(value?.scalePercent);
+            const scalePercent = V1_PDF_SCALE_OPTIONS.includes(requestedScale) ? requestedScale : 95;
+            return { scalePercent, compact: value?.compact !== false };
+        }
+
+        function v1GetPdfPrintSettings() {
+            try {
+                const saved = JSON.parse(localStorage.getItem(V1_PDF_PRINT_SETTINGS_KEY) || 'null');
+                return v1NormalizePdfPrintSettings(saved);
+            } catch (_) {
+                return v1NormalizePdfPrintSettings(null);
+            }
+        }
+
+        function v1SavePdfPrintSettings(next) {
+            const normalized = v1NormalizePdfPrintSettings(next);
+            try { localStorage.setItem(V1_PDF_PRINT_SETTINGS_KEY, JSON.stringify(normalized)); } catch (_) {}
+            return normalized;
+        }
+
+        window.v1SetPdfPrintScale = function(value) {
+            const current = v1GetPdfPrintSettings();
+            return v1SavePdfPrintSettings({ scalePercent: Number(value), compact: current.compact });
+        };
+
+        window.v1SetPdfCompactPagination = function(checked) {
+            const current = v1GetPdfPrintSettings();
+            return v1SavePdfPrintSettings({ scalePercent: current.scalePercent, compact: checked === true });
+        };
+
+        function v1ApplyPdfPrintSettings(printArea) {
+            if (!printArea) return v1GetPdfPrintSettings();
+            const settings = v1GetPdfPrintSettings();
+            const scale = settings.scalePercent / 100;
+            printArea.dataset.pdfPrintScale = String(settings.scalePercent);
+            printArea.dataset.pdfCompactPagination = String(settings.compact);
+            printArea.style.setProperty('--v1-pdf-print-scale', String(scale));
+            return settings;
+        }
+
         function renderV1PdfCenter() {
             const root = document.getElementById('v1-pane-pdf');
             if (!root) return;
             v1EnsureModuleFields();
             const selected = v1GetSelectedModules();
+            const printSettings = v1GetPdfPrintSettings();
             root.innerHTML = `
                 <div class="v1-page-card">
                     <h2 class="v1-page-title"><i class="fas fa-file-pdf mr-2"></i>正式 PDF 輸出中心</h2>
@@ -4567,6 +4632,18 @@
                                 <button class="v1-small-btn v1-primary-btn" onclick="printV1SelectedPdf()"><i class="fas fa-print mr-1"></i>輸出正式 PDF</button>
                                 <button class="v1-small-btn" onclick="syncV1PdfSelectionFromDom(); renderV1PdfCenter()"><i class="fas fa-rotate mr-1"></i>刷新預覽</button>
                                 <button class="v1-small-btn" onclick="switchV1Tab('modules')"><i class="fas fa-check-square mr-1"></i>管理模塊</button>
+                            </div>
+                            <div class="v1-pdf-print-settings">
+                                <label for="v1-pdf-print-scale">PDF 比例</label>
+                                <select id="v1-pdf-print-scale" onchange="v1SetPdfPrintScale(this.value)">
+                                    ${V1_PDF_SCALE_OPTIONS.map(value => `<option value="${value}" ${printSettings.scalePercent === value ? 'selected' : ''}>${value}%</option>`).join('')}
+                                </select>
+                                <span>分頁方式</span>
+                                <label class="v1-pdf-compact-toggle" for="v1-pdf-compact-pagination">
+                                    <input id="v1-pdf-compact-pagination" type="checkbox" ${printSettings.compact ? 'checked' : ''} onchange="v1SetPdfCompactPagination(this.checked)">
+                                    緊湊分頁
+                                </label>
+                                <div class="v1-pdf-print-settings-note">設定也會套用「列印目前內容」；趨勢圖仍保持整卡、不會拆開。瀏覽器列印視窗的縮放請維持 100%，避免重複縮放。</div>
                             </div>
                             <div class="v1-note-box mb-2">目前已選 ${selected.length} 個模塊。若有趨勢圖，請先在「月報編輯」中確認圖表已正常顯示，再輸出 PDF。</div>
                             <div class="v1-check-list">
@@ -4759,16 +4836,70 @@
             return true;
         }
 
+        function v1PdfPrintScaleFactor(printArea) {
+            const percent = Number(printArea?.dataset?.pdfPrintScale || 100);
+            return Number.isFinite(percent) && percent > 0 ? percent / 100 : 1;
+        }
+
+        function v1MeasurePdfElementHeight(element, scale) {
+            if (!element) return 0;
+            const rectHeight = element.getBoundingClientRect().height || 0;
+            const scaledScrollHeight = (element.scrollHeight || 0) * scale;
+            return Math.ceil(Math.max(rectHeight, scaledScrollHeight));
+        }
+
+        function stabilizeV1PdfTrendChartGeometry(printArea) {
+            const scale = v1PdfPrintScaleFactor(printArea);
+            const charts = Array.from(printArea?.querySelectorAll?.('.trend-chart-container') || []);
+            charts.forEach((chart) => {
+                const wrapper = chart.querySelector('.chart-layout-wrapper');
+                const canvasArea = chart.querySelector('.chart-canvas-area');
+                if (!wrapper || !canvasArea) return;
+                const requestedHeight = parseFloat(canvasArea.style.height || canvasArea.getAttribute('data-chart-height') || '200') || 200;
+                const canvasHeight = Math.max(100, requestedHeight);
+                wrapper.style.minHeight = `${canvasHeight}px`;
+                const chartRect = chart.getBoundingClientRect();
+                const wrapperRect = wrapper.getBoundingClientRect();
+                const style = getComputedStyle(chart);
+                const beforeWrapper = Math.max(0, (wrapperRect.top - chartRect.top) / scale);
+                const bottomSpace = (parseFloat(style.paddingBottom) || 0) + (parseFloat(style.borderBottomWidth) || 0);
+                const minimumCardHeight = Math.ceil(beforeWrapper + canvasHeight + bottomSpace);
+                chart.style.minHeight = `${minimumCardHeight}px`;
+                chart.dataset.pdfTrendCanvasHeight = String(canvasHeight);
+            });
+        }
+
+        function v1CanCompactSplitPdfModule(row) {
+            if (!row || row.querySelector('.trend-chart-container')) return false;
+            if (row.querySelector('table.pdf-splittable-table')) return true;
+            const visibleBlocks = Array.from(row.querySelectorAll('.module-content-cell .editable-div')).flatMap((editable) =>
+                Array.from(editable.children).filter((child) => {
+                    const rect = child.getBoundingClientRect();
+                    const style = getComputedStyle(child);
+                    return rect.height > 1 && style.display !== 'none' && style.position !== 'absolute' && style.position !== 'fixed';
+                })
+            );
+            return visibleBlocks.length >= 2;
+        }
+
         function classifyV1PdfModulePageBreaks(printArea) {
             const pageContentHeight = (210 - 6 - 12) * 96 / 25.4;
             const maxSinglePageHeight = Math.floor(pageContentHeight) - 2;
+            const scale = v1PdfPrintScaleFactor(printArea);
+            const compact = printArea?.dataset?.pdfCompactPagination !== 'false';
+            stabilizeV1PdfTrendChartGeometry(printArea);
             const rows = Array.from(printArea?.querySelectorAll?.('.module-card-row') || []);
-            rows.forEach((row) => row.classList.remove('pdf-keep-together', 'pdf-splittable-module'));
+            rows.forEach((row) => row.classList.remove(
+                'pdf-keep-together',
+                'pdf-splittable-module',
+                'pdf-compact-split',
+                'pdf-has-trend-chart'
+            ));
             const contentTables = Array.from(printArea?.querySelectorAll?.('.module-content-cell table') || []);
             contentTables.forEach((table) => {
                 normalizeV1PdfTableHeader(table);
                 table.classList.remove('pdf-splittable-table');
-                const measuredHeight = Math.ceil(Math.max(table.getBoundingClientRect().height || 0, table.scrollHeight || 0));
+                const measuredHeight = v1MeasurePdfElementHeight(table, scale);
                 table.dataset.pdfTableHeight = String(measuredHeight);
                 if (measuredHeight > maxSinglePageHeight) {
                     table.classList.add('pdf-splittable-table');
@@ -4783,16 +4914,56 @@
                 printArea.dataset.pdfPageContentHeight = String(pageContentHeight);
                 printArea.dataset.pdfFirstPageRemaining = String(firstPageRemaining);
             }
+
+            const visualGap = 12 * scale;
+            let usedOnPage = firstPageOffset;
+            let estimatedUnusedHeight = 0;
             rows.forEach((row, index) => {
-                const measuredHeight = Math.ceil(Math.max(row.getBoundingClientRect().height || 0, row.scrollHeight || 0));
-                row.dataset.pdfModuleHeight = String(measuredHeight);
+                let measuredHeight = v1MeasurePdfElementHeight(row, scale);
+                const hasTrend = Boolean(row.querySelector('.trend-chart-container'));
                 const fitsWholePage = measuredHeight > 0 && measuredHeight <= maxSinglePageHeight;
-                const wouldLeaveHeaderOnlyFirstPage = index === 0 && measuredHeight > firstPageRemaining;
-                if (fitsWholePage && !wouldLeaveHeaderOnlyFirstPage) row.classList.add('pdf-keep-together');
+                const remaining = usedOnPage < 1 ? pageContentHeight : pageContentHeight - usedOnPage;
+                row.classList.toggle('pdf-has-trend-chart', hasTrend);
+
+                let keepTogether = false;
+                let splitAcrossRemainder = false;
+                if (!fitsWholePage) {
+                    row.classList.add('pdf-splittable-module');
+                    splitAcrossRemainder = true;
+                } else if (hasTrend) {
+                    keepTogether = true;
+                } else if (!compact) {
+                    keepTogether = !(index === 0 && measuredHeight > firstPageRemaining);
+                    splitAcrossRemainder = !keepTogether;
+                } else if (measuredHeight <= remaining) {
+                    keepTogether = true;
+                } else if (v1CanCompactSplitPdfModule(row)) {
+                    row.classList.add('pdf-compact-split', 'pdf-splittable-module');
+                    splitAcrossRemainder = true;
+                } else {
+                    keepTogether = true;
+                }
+
+                if (keepTogether) row.classList.add('pdf-keep-together');
+                measuredHeight = v1MeasurePdfElementHeight(row, scale);
+                row.dataset.pdfModuleHeight = String(measuredHeight);
+                if (keepTogether && measuredHeight > remaining) {
+                    estimatedUnusedHeight += remaining;
+                    usedOnPage = measuredHeight + visualGap;
+                } else if (splitAcrossRemainder) {
+                    const overflow = Math.max(0, measuredHeight - remaining);
+                    usedOnPage = overflow + visualGap;
+                } else {
+                    usedOnPage += measuredHeight + visualGap;
+                }
+                if (usedOnPage >= pageContentHeight) usedOnPage %= pageContentHeight;
             });
+            if (printArea?.dataset) printArea.dataset.pdfEstimatedUnusedHeight = String(Math.round(estimatedUnusedHeight));
             return rows.map((row) => ({
                 height: Number(row.dataset.pdfModuleHeight || 0),
-                keepTogether: row.classList.contains('pdf-keep-together')
+                keepTogether: row.classList.contains('pdf-keep-together'),
+                compactSplit: row.classList.contains('pdf-compact-split'),
+                hasTrend: row.classList.contains('pdf-has-trend-chart')
             }));
         }
 
@@ -4805,6 +4976,7 @@
             const printArea = document.getElementById('pdfPrintArea');
             if (!printArea) return false;
             printArea.innerHTML = buildV1PdfHtml({ syncFromDom: false, selectAll: options.selectAll === true });
+            v1ApplyPdfPrintSettings(printArea);
             document.body.classList.add('pdf-render-prep');
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             if (window.renderAllCharts) window.renderAllCharts();

@@ -279,7 +279,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.22';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.23';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +319,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.22'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.23'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +522,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.0.22', config: '7.0.22', core: '7.0.22', client: '7.0.22', v7: '7.0.22'
+      page: '7.0.23', config: '7.0.23', core: '7.0.23', client: '7.0.23', v7: '7.0.23'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -3306,6 +3306,8 @@ test('背景保存期間的新輸入只合併成一個後繼保存，不平行�
   const row = page.locator('#tableBody tr').first();
   const title = row.locator('td').nth(1).locator('.editable-div');
   await title.click();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveAttribute('contenteditable', 'true');
   await title.fill('第一輪送出內容');
   await expect.poll(() => saveCalls, { timeout: 10000 }).toBe(1);
 
@@ -5012,6 +5014,206 @@ test('V7 PDF 列印區直接使用 immutable snapshot，而非 live editor', asy
   expect(errors).toEqual([]);
 });
 
+test('PDF輸出提供85至100比例，預設95並套用緊湊分頁', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    switchV1Tab('pdf');
+    renderV1PdfCenter();
+  });
+
+  const scale = page.locator('#v1-pdf-print-scale');
+  const compact = page.locator('#v1-pdf-compact-pagination');
+  await expect(scale).toHaveValue('95');
+  expect(await scale.locator('option').evaluateAll((options) => options.map((option) => option.value)))
+    .toEqual(['85', '90', '95', '100']);
+  await expect(compact).toBeChecked();
+
+  await scale.selectOption('85');
+  await expect(compact).toBeChecked();
+  expect(await page.evaluate(() => v1GetPdfPrintSettings())).toEqual({ scalePercent: 85, compact: true });
+
+  await page.evaluate(() => {
+    window.__pdfScalePrepareState = { status: 'pending', error: '' };
+    window.__pdfScalePreparePromise = prepareV1PdfPrintArea().then((ok) => {
+      if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+      window.__pdfScalePrepareState = { status: 'done', error: '' };
+    }).catch((error) => {
+      window.__pdfScalePrepareState = { status: 'error', error: String(error?.message || error) };
+    });
+  });
+  await expect.poll(() => page.evaluate(() => window.__pdfScalePrepareState?.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__pdfScalePrepareState)).toEqual({ status: 'done', error: '' });
+
+  const applied = await page.evaluate(() => {
+    const area = document.getElementById('pdfPrintArea');
+    const clone = area.querySelector('.v1-selected-editor-print-clone');
+    return {
+      scale: area.dataset.pdfPrintScale,
+      compact: area.dataset.pdfCompactPagination,
+      zoom: parseFloat(getComputedStyle(clone).zoom),
+      areaWidth: area.getBoundingClientRect().width,
+      cloneWidth: clone.getBoundingClientRect().width
+    };
+  });
+  expect(applied.scale).toBe('85');
+  expect(applied.compact).toBe('true');
+  expect(applied.zoom).toBeCloseTo(0.85, 2);
+  expect(Math.abs((applied.cloneWidth * applied.zoom) - (applied.areaWidth * applied.zoom))).toBeLessThanOrEqual(2);
+});
+
+test('接近頁尾的趨勢圖模塊整體移頁，canvas留在卡片內且不壓到下一模塊', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await installTrendPdfGeometryFixture(page);
+  await page.evaluate(() => {
+    const header = document.querySelector('.report-header-section');
+    header.style.height = '520px';
+    reportData[1].title = 'NEXT-MODULE-AFTER-TREND';
+    reportData[1].columns = ['<div style="height:80px">NEXT-MODULE-CONTENT</div>'];
+    reportData[1].selectedForPdf = true;
+    reportData[1].pdfOrder = 2;
+    renderTable();
+    v1EnsureModuleFields();
+  });
+
+  await page.evaluate(() => {
+    window.__nearPageTrendPrepareState = { status: 'pending', error: '' };
+    window.__nearPageTrendPreparePromise = prepareV1PdfPrintArea().then((ok) => {
+      if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+      document.body.classList.add('pdf-print-mode');
+      window.__nearPageTrendPrepareState = { status: 'done', error: '' };
+    }).catch((error) => {
+      window.__nearPageTrendPrepareState = { status: 'error', error: String(error?.message || error) };
+    });
+  });
+  await expect.poll(() => page.evaluate(() => window.__nearPageTrendPrepareState?.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__nearPageTrendPrepareState)).toEqual({ status: 'done', error: '' });
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+
+  const geometry = await page.evaluate(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const area = document.getElementById('pdfPrintArea');
+    const rows = Array.from(area.querySelectorAll('.module-card-row'));
+    const trendRow = rows[0];
+    const nextRow = rows[1];
+    const areaRect = area.getBoundingClientRect();
+    const trendRowRect = trendRow.getBoundingClientRect();
+    const nextRowRect = nextRow.getBoundingClientRect();
+    const charts = Array.from(trendRow.querySelectorAll('.trend-chart-container')).map((chart) => {
+      const card = chart.getBoundingClientRect();
+      const canvasArea = chart.querySelector('.chart-canvas-area').getBoundingClientRect();
+      return {
+        cardBottom: card.bottom,
+        canvasBottom: canvasArea.bottom,
+        cardRight: card.right,
+        canvasRight: canvasArea.right
+      };
+    });
+    return {
+      pageContentHeight: Number(area.dataset.pdfPageContentHeight || 0),
+      firstPageRemaining: Number(area.dataset.pdfFirstPageRemaining || 0),
+      moduleHeight: Number(trendRow.dataset.pdfModuleHeight || 0),
+      keepTogether: trendRow.classList.contains('pdf-keep-together'),
+      hasTrend: trendRow.classList.contains('pdf-has-trend-chart'),
+      pageRight: areaRect.right,
+      rowRight: trendRowRect.right,
+      rowBottom: trendRowRect.bottom,
+      nextTop: nextRowRect.top,
+      charts
+    };
+  });
+
+  expect(geometry.moduleHeight).toBeGreaterThan(geometry.firstPageRemaining);
+  expect(geometry.moduleHeight).toBeLessThanOrEqual(geometry.pageContentHeight);
+  expect(geometry.hasTrend).toBe(true);
+  expect(geometry.keepTogether).toBe(true);
+  expect(geometry.rowRight).toBeLessThanOrEqual(geometry.pageRight + 1);
+  for (const chart of geometry.charts) {
+    expect(chart.canvasBottom).toBeLessThanOrEqual(chart.cardBottom + 1);
+    expect(chart.canvasRight).toBeLessThanOrEqual(chart.cardRight + 1);
+    expect(chart.cardRight).toBeLessThanOrEqual(geometry.pageRight + 1);
+  }
+  expect(geometry.rowBottom).toBeLessThanOrEqual(geometry.nextTop + 1);
+
+  const pdfPath = testInfo.outputPath('near-page-trend-no-overlap.pdf');
+  const pdf = await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
+  await testInfo.attach('near-page-trend-no-overlap.pdf', { body: pdf, contentType: 'application/pdf' });
+});
+
+test('95%緊湊分頁只拆安全的非趨勢模塊，減少整塊跳頁空白', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const originals = reportData.map((item) => JSON.parse(JSON.stringify(item)));
+    reportData = Array.from({ length: 4 }, (_, index) => {
+      const item = JSON.parse(JSON.stringify(originals[index % originals.length]));
+      item.id = 2100 + index;
+      item._v7Id = `compact-fixture-${index + 1}`;
+      item.title = `緊湊分頁模塊-${index + 1}`;
+      item.columns = [`<div class="content-block compact-page-segment" style="height:125px">緊湊內容 ${index + 1}-A</div><div class="content-block compact-page-segment" style="height:125px">緊湊內容 ${index + 1}-B</div>`];
+      item.colLayout = '1';
+      item.selectedForPdf = true;
+      item.pdfOrder = index + 1;
+      return item;
+    });
+    document.querySelector('.report-header-section').style.height = '120px';
+    renderTable();
+    v1EnsureModuleFields();
+  });
+
+  await page.evaluate(() => {
+    window.__compactPaginationPrepareState = { status: 'pending', error: '' };
+    window.__compactPaginationPreparePromise = prepareV1PdfPrintArea().then((ok) => {
+      if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+      document.body.classList.add('pdf-print-mode');
+      window.__compactPaginationPrepareState = { status: 'done', error: '' };
+    }).catch((error) => {
+      window.__compactPaginationPrepareState = { status: 'error', error: String(error?.message || error) };
+    });
+  });
+  await expect.poll(() => page.evaluate(() => window.__compactPaginationPrepareState?.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__compactPaginationPrepareState)).toEqual({ status: 'done', error: '' });
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  const compactState = await page.evaluate(() => {
+    const area = document.getElementById('pdfPrintArea');
+    return {
+      scale: area.dataset.pdfPrintScale,
+      compact: area.dataset.pdfCompactPagination,
+      unused: Number(area.dataset.pdfEstimatedUnusedHeight || 0),
+      rows: Array.from(area.querySelectorAll('.module-card-row')).map((row) => ({
+        trend: row.classList.contains('pdf-has-trend-chart'),
+        keepTogether: row.classList.contains('pdf-keep-together'),
+        compactSplit: row.classList.contains('pdf-compact-split'),
+        breakInside: getComputedStyle(row).breakInside
+      }))
+    };
+  });
+  const compactPdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
+
+  const standardUnused = await page.evaluate(async () => {
+    document.body.classList.add('pdf-render-prep', 'pdf-print-mode');
+    const area = document.getElementById('pdfPrintArea');
+    area.dataset.pdfCompactPagination = 'false';
+    classifyV1PdfModulePageBreaks(area);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return Number(area.dataset.pdfEstimatedUnusedHeight || 0);
+  });
+  const standardPdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
+  const countPages = (pdf) => (pdf.toString('latin1').match(/\/Type\s*\/Page\b/g) || []).length;
+  const compactPages = countPages(compactPdf);
+  const standardPages = countPages(standardPdf);
+
+  expect(compactState.scale).toBe('95');
+  expect(compactState.compact).toBe('true');
+  expect(compactState.rows.every((row) => row.trend === false)).toBe(true);
+  expect(compactState.rows.some((row) => row.compactSplit && !row.keepTogether && row.breakInside === 'auto')).toBe(true);
+  expect(compactState.unused).toBeLessThan(standardUnused);
+  expect(compactPages).toBeLessThanOrEqual(standardPages);
+});
+
 test('PDF 卡片保留螢幕主要視覺比例，只移除編輯控制並配合紙張寬度', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await enterAndLogin(page, 'owner', 'owner-pass');
@@ -5062,14 +5264,15 @@ test('PDF 卡片保留螢幕主要視覺比例，只移除編輯控制並配合�
       contentPaddingLeft: px(contentCell, 'paddingLeft'),
       borderRadius: getComputedStyle(row).borderRadius,
       borderColor: getComputedStyle(row).borderColor,
-      actionCount: row.querySelectorAll('.module-actions-cell').length
+      actionCount: row.querySelectorAll('.module-actions-cell').length,
+      scale: Number(row.closest('#pdfPrintArea')?.dataset?.pdfPrintScale || 100) / 100
     };
   });
 
   expect(printed.actionCount).toBe(0);
   expect(printed.borderRadius).toBe(screen.borderRadius);
   expect(printed.borderColor).toBe(screen.borderColor);
-  expect(Math.abs(printed.indexWidth - screen.indexWidth)).toBeLessThanOrEqual(1);
+  expect(Math.abs((printed.indexWidth / printed.scale) - screen.indexWidth)).toBeLessThanOrEqual(1);
   expect(printed.indexFont).toBeGreaterThanOrEqual(screen.indexFont);
   expect(printed.titleFont).toBeGreaterThanOrEqual(screen.titleFont);
   expect(Math.abs(printed.titlePaddingLeft - screen.titlePaddingLeft)).toBeLessThanOrEqual(1);
@@ -5352,14 +5555,16 @@ test('PDF 只對單頁可容納的臨界項目啟用 keep-together，長項目�
   await page.emulateMedia({ media: 'print' });
   await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
 
-  const modules = await page.evaluate(() => Array.from(
-    document.querySelectorAll('#pdfPrintArea .module-card-row')
-  ).map((row) => ({
-    keepTogether: row.classList.contains('pdf-keep-together'),
-    measuredHeight: Number(row.dataset.pdfModuleHeight || 0),
-    actualPrintHeight: Math.ceil(Math.max(row.getBoundingClientRect().height || 0, row.scrollHeight || 0)),
-    breakInside: getComputedStyle(row).breakInside
-  })));
+  const modules = await page.evaluate(() => {
+    const area = document.getElementById('pdfPrintArea');
+    const scale = Number(area?.dataset?.pdfPrintScale || 100) / 100;
+    return Array.from(area.querySelectorAll('.module-card-row')).map((row) => ({
+      keepTogether: row.classList.contains('pdf-keep-together'),
+      measuredHeight: Number(row.dataset.pdfModuleHeight || 0),
+      actualPrintHeight: Math.ceil(Math.max(row.getBoundingClientRect().height || 0, (row.scrollHeight || 0) * scale)),
+      breakInside: getComputedStyle(row).breakInside
+    }));
+  });
 
   expect(modules).toHaveLength(2);
   expect(modules[0].measuredHeight).toBe(modules[0].actualPrintHeight);
