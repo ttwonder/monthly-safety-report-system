@@ -279,7 +279,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.20';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.21';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +319,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.20'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.21'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +522,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.0.20', config: '7.0.20', core: '7.0.20', client: '7.0.20', v7: '7.0.20'
+      page: '7.0.21', config: '7.0.21', core: '7.0.21', client: '7.0.21', v7: '7.0.21'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -2739,6 +2739,8 @@ test('項目內容統一放大，部件標題維持原尺寸且圖表數值可�
     const pointLabelMatch = String(pointLabelPlugin.afterDatasetsDraw).match(/bold\s+(\d+)px/);
     const svgFonts = Array.from(root.querySelectorAll('svg[aria-label="KPI 趨勢圖"] text'))
       .map((node) => parseFloat(getComputedStyle(node).fontSize));
+    const chartTableCell = root.querySelector('.chart-data-table td');
+    const chartTableCellStyle = getComputedStyle(chartTableCell);
     return {
       blockTitle: px('.block-title'),
       blockBody: px('.block-body'),
@@ -2760,6 +2762,9 @@ test('項目內容統一放大，部件標題維持原尺寸且圖表數值可�
       chartTitle: px('.chart-title'),
       chartControl: px('.trend-chart-container > div:first-child .no-print span'),
       chartTableCell: px('.chart-data-table td'),
+      chartTablePaddingTop: parseFloat(chartTableCellStyle.paddingTop),
+      chartTablePaddingBottom: parseFloat(chartTableCellStyle.paddingBottom),
+      chartTableRowHeight: chartTableCell.parentElement.getBoundingClientRect().height,
       reportKpiValue: px('.report-kpi-value'),
       reportKpiNote: px('.report-kpi-note'),
       reportTableHeader: px('.report-detail-table th'),
@@ -2792,7 +2797,10 @@ test('項目內容統一放大，部件標題維持原尺寸且圖表數值可�
   expect(typography.zoneLimit).toBeGreaterThanOrEqual(13);
   expect(typography.zoneLimitRowHeight).toBeGreaterThanOrEqual(18);
   expect(typography.chartControl).toBeGreaterThanOrEqual(12);
-  expect(typography.chartTableCell).toBeGreaterThanOrEqual(13);
+  expect(typography.chartTableCell).toBe(12);
+  expect(typography.chartTablePaddingTop).toBe(1);
+  expect(typography.chartTablePaddingBottom).toBe(1);
+  expect(typography.chartTableRowHeight).toBeLessThanOrEqual(18);
   expect(typography.reportKpiValue).toBeGreaterThanOrEqual(32);
   expect(typography.reportKpiNote).toBeGreaterThanOrEqual(14);
   expect(typography.reportTableHeader).toBeGreaterThanOrEqual(14);
@@ -3166,6 +3174,28 @@ test('格子停頓只保存本機草稿，週期上雲後仍保持編輯並顯�
   expect(state.modules[0].payload.title.replace(/<br>$/i, '')).toBe('分鐘級背景保存內容');
   await expect(title).toHaveText('分鐘級背景保存內容，仍可繼續輸入');
   await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+});
+
+test('主標題 blur 自動保存不會搶回下方內容焦點', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const row = page.locator('#tableBody tr').first();
+  const mainTitle = page.locator('#mainTitle');
+  const lowerEditor = row.locator('[data-col-index="0"]');
+
+  // 先取得第一個項目的編輯權，重現截圖中已在編輯下方內容的狀態。
+  await lowerEditor.click();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(lowerEditor).toHaveAttribute('contenteditable', 'true');
+
+  await mainTitle.click();
+  await expect(mainTitle).toBeFocused();
+  await lowerEditor.click();
+  await expect(lowerEditor).toBeFocused();
+
+  // blur 自動保存包含 50ms 本機草稿排程與下一個 frame 的畫面恢復。
+  await page.waitForTimeout(300);
+  await expect(lowerEditor).toBeFocused();
+  await expect(mainTitle).not.toBeFocused();
 });
 
 test('手動保存保留目前格子的焦點、caret 與 module lease', async ({ page, request }) => {

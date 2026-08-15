@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.20';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.21';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -1817,6 +1817,7 @@
             --report-detail-line-height: 1.6;
             --report-compact-font-size: 14px;
             --report-chart-font-size: 13px;
+            --report-trend-table-font-size: 12px;
             --report-key-value-font-size: 17px;
         }
         .module-content-cell .editable-div,
@@ -1871,15 +1872,15 @@
             line-height: 1.35 !important;
         }
         .module-content-cell .chart-data-table {
-            font-size: var(--report-chart-font-size) !important;
-            line-height: 1.3 !important;
+            font-size: var(--report-trend-table-font-size) !important;
+            line-height: 1.15 !important;
         }
         .module-content-cell .chart-data-table th,
         .module-content-cell .chart-data-table td {
             min-width: 36px !important;
-            padding: 3px 5px !important;
-            font-size: var(--report-chart-font-size) !important;
-            line-height: 1.3 !important;
+            padding: 1px 4px !important;
+            font-size: var(--report-trend-table-font-size) !important;
+            line-height: 1.15 !important;
         }
         .module-content-cell .trend-chart-container > div:first-child .no-print {
             flex-wrap: wrap;
@@ -3107,7 +3108,13 @@
             if (!state) return;
             const restore = () => {
                 try {
-                    if (state.active && document.body.contains(state.active) && typeof state.active.focus === 'function') {
+                    const currentActive = document.activeElement && document.body.contains(document.activeElement)
+                        ? document.activeElement
+                        : null;
+                    const hasSuccessorFocus = currentActive
+                        && currentActive !== document.body
+                        && currentActive !== state.active;
+                    if (!hasSuccessorFocus && state.active && document.body.contains(state.active) && typeof state.active.focus === 'function') {
                         state.active.focus({ preventScroll: true });
                         if (state.selectionRange) {
                             const selection = window.getSelection();
