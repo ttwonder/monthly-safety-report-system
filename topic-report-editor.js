@@ -11,7 +11,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi) {
   'use strict';
 
-  const BUILD_ID = '1.3.0';
+  const BUILD_ID = '1.4.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -31,7 +31,7 @@
   const SAFE_TAGS = new Set([
     'P', 'BR', 'DIV', 'SPAN', 'STRONG', 'B', 'I', 'EM', 'U', 'S', 'UL', 'OL', 'LI',
     'H1', 'H2', 'H3', 'H4', 'BLOCKQUOTE', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR',
-    'TH', 'TD', 'CAPTION', 'IMG', 'A', 'HR', 'SMALL', 'SUP', 'SUB', 'CANVAS'
+    'TH', 'TD', 'CAPTION', 'COLGROUP', 'COL', 'IMG', 'A', 'HR', 'SMALL', 'SUP', 'SUB', 'CANVAS'
   ]);
   const DROP_TAGS = new Set([
     'SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'BASE', 'FORM',
@@ -175,6 +175,22 @@
     return PDF_SCALES.includes(numeric) ? numeric : 100;
   }
 
+  function normalizePrintObjectWidth(value, layout, columnIndex) {
+    const match = /^([0-9]{1,3}(?:\.[0-9]+)?)%$/.exec(String(value || '').trim());
+    if (!match) return '';
+    const numeric = Number(match[1]);
+    if (!(numeric > 0 && numeric <= 100)) return '';
+    const fractions = {
+      '1': [1],
+      '1:1': [0.5, 0.5],
+      '1:2': [1 / 3, 2 / 3],
+      '2:1': [2 / 3, 1 / 3]
+    }[normalizeLayout(layout)] || [1];
+    const fraction = fractions[Math.max(0, Math.min(fractions.length - 1, Number(columnIndex) || 0))] || 1;
+    const converted = Math.min(100, numeric / fraction);
+    return `${Math.round(converted * 1000) / 1000}%`;
+  }
+
   function isAllowedImage(file) {
     return !!file && SAFE_IMAGE_TYPES.has(String(file.type || '').toLowerCase())
       && Number(file.size) > 0 && Number(file.size) <= IMAGE_MAX_BYTES;
@@ -202,7 +218,7 @@
 
   function buildBlockHtml(type) {
     const templates = {
-      highlight: '<span class="topic-inline-block topic-highlight" data-topic-block="highlight" style="width:25%" data-topic-editable="true" contenteditable="true">重要數值 100</span>',
+      highlight: '<span class="topic-inline-block topic-highlight" data-topic-block="highlight" data-topic-editable="true" contenteditable="true">  重要數值 100  </span>',
       'indicator-blue': '<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#2563eb" contenteditable="false"><thead><tr><th class="topic-indicator-title" colspan="2" data-topic-editable="true" contenteditable="true">指標名稱</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">檢查次數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">檢查缺失數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">平均缺失數</td><td data-topic-editable="true" contenteditable="true">0.0</td></tr></tbody></table>',
       'indicator-orange': '<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#f97316" contenteditable="false"><thead><tr><th class="topic-indicator-title" colspan="2" data-topic-editable="true" contenteditable="true">指標名稱</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">檢查次數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">檢查缺失數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">平均缺失數</td><td data-topic-editable="true" contenteditable="true">0.0</td></tr></tbody></table>',
       kpi: '<div class="topic-inline-block topic-kpi-card" data-topic-block="kpi" data-topic-show-avg="true" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">KPI 指標</strong><div class="topic-card-values"><span class="topic-kpi-avg-group"><span data-topic-editable="true" contenteditable="true">Avg</span> <b class="topic-metric-avg" data-topic-editable="true" contenteditable="true">65</b></span><span><span data-topic-editable="true" contenteditable="true">現值</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">50</b></span><span><span data-topic-editable="true" contenteditable="true">KPI</span> <b class="topic-metric-target" data-topic-editable="true" contenteditable="true">80</b></span><span class="topic-kpi-avg-toggle" data-topic-kpi-toggle="true" role="button" aria-label="顯示或隱藏Avg標線" contenteditable="false">Avg◉</span></div></div><div class="topic-kpi-track"><span class="topic-kpi-marker topic-kpi-target-marker"></span><span class="topic-kpi-marker topic-kpi-current-marker"></span><span class="topic-kpi-marker topic-kpi-avg-marker topic-kpi-avg-group"></span></div><div class="topic-card-boundaries"><span class="topic-metric-min" data-topic-editable="true" contenteditable="true">0</span><span class="topic-metric-max" data-topic-editable="true" contenteditable="true">100</span></div></div>',
@@ -290,6 +306,7 @@
     lastRange: null,
     activeEditor: null,
     activeObject: null,
+    tableResize: null,
     pendingFileModuleId: '',
     broadcastChannel: null,
     released: false
@@ -598,8 +615,6 @@
   }
   function updateMeta() {
     if (!state.report) return;
-    $('topicSystemNumber').textContent = state.report.systemNumber;
-    $('topicRevision').textContent = String(state.report.revision);
     root.document.title = `${state.report.systemNumber} · ${state.report.title} · 專題報告編輯器`;
     const badge = $('topicModeBadge');
     badge.dataset.mode = state.mode;
@@ -652,6 +667,12 @@
     setLeaseNotice(message || (state.mode === 'edit' ? '已取得整份報告編輯權。' : '本窗口目前只讀。'), tone);
   }
 
+  function serializeEditorHtml(editor) {
+    const cloneNode = editor.cloneNode(true);
+    cloneNode.querySelectorAll('[data-topic-table-resize-handle]').forEach((handle) => handle.remove());
+    return sanitizeStoredHtml(cloneNode.innerHTML);
+  }
+
   function collectContent() {
     const base = state.currentContent || core.createBlankTopicContent();
     const modules = Array.from($('topicModules').querySelectorAll('.topic-module')).map((article, index) => {
@@ -660,7 +681,7 @@
       const layout = normalizeLayout(article.querySelector('[data-module-layout]').value);
       const columns = Array.from(article.querySelectorAll('.topic-editable'))
         .slice(0, layout === '1' ? 1 : 2)
-        .map((editor) => sanitizeStoredHtml(editor.innerHTML));
+        .map((editor) => serializeEditorHtml(editor));
       while (columns.length < (layout === '1' ? 1 : 2)) columns.push('');
       return {
         id: moduleId,
@@ -871,9 +892,10 @@
     const left = Math.max(gap, Math.min(root.innerWidth - toolbar.offsetWidth - gap, rect.left));
     toolbar.style.top = `${Math.max(gap, top)}px`;
     toolbar.style.left = `${left}px`;
-    const current = normalizeObjectWidth(object.style.width || '100%');
+    const explicitWidth = String(object.style.width || '').trim();
+    const current = explicitWidth ? normalizeObjectWidth(explicitWidth) : '';
     toolbar.querySelectorAll('[data-topic-object-width]').forEach((button) => {
-      button.setAttribute('aria-pressed', String(`${button.dataset.topicObjectWidth}%` === current));
+      button.setAttribute('aria-pressed', String(Boolean(current) && `${button.dataset.topicObjectWidth}%` === current));
     });
   }
   function selectObject(object) {
@@ -893,6 +915,7 @@
   function setObjectWidth(value) {
     if (state.mode !== 'edit' || !state.activeObject || !root.document.contains(state.activeObject)) return;
     state.activeObject.style.width = normalizeObjectWidth(value);
+    if (state.activeObject.classList.contains('topic-highlight')) state.activeObject.dataset.topicWidthUser = 'true';
     markDirty();
     updateDynamic(state.activeObject.closest('.topic-module') || $('topicModules'));
     positionObjectToolbar();
@@ -961,7 +984,10 @@
   function makeTable() {
     const rows = Math.max(1, Math.min(20, Number(root.prompt('表格列數', '3')) || 3));
     const columns = Math.max(1, Math.min(10, Number(root.prompt('表格欄數', '3')) || 3));
-    let html = '<table class="topic-data-table" style="width:100%"><tbody>';
+    const columnWidth = Math.round((100 / columns) * 1000) / 1000;
+    let html = '<table class="topic-data-table topic-resizable-table" data-topic-table="resizable" style="width:100%"><colgroup>';
+    for (let column = 0; column < columns; column += 1) html += `<col style="width:${columnWidth}%">`;
+    html += '</colgroup><tbody>';
     for (let row = 0; row < rows; row += 1) {
       html += '<tr>';
       for (let column = 0; column < columns; column += 1) {
@@ -973,6 +999,110 @@
     return `${html}</tbody></table>`;
   }
 
+  function normalizeTableColumns(table) {
+    const firstRow = table.rows && table.rows[0];
+    const count = firstRow ? firstRow.cells.length : 0;
+    if (count < 2) return [];
+    let colgroup = Array.from(table.children).find((child) => child.tagName === 'COLGROUP');
+    if (!colgroup) {
+      colgroup = root.document.createElement('colgroup');
+      table.insertBefore(colgroup, table.firstChild);
+    }
+    let columns = Array.from(colgroup.children).filter((child) => child.tagName === 'COL');
+    if (columns.length !== count) {
+      colgroup.replaceChildren();
+      const width = 100 / count;
+      for (let index = 0; index < count; index += 1) {
+        const column = root.document.createElement('col');
+        column.style.width = `${Math.round(width * 1000) / 1000}%`;
+        colgroup.appendChild(column);
+      }
+      columns = Array.from(colgroup.children);
+    }
+    const parsed = columns.map((column) => Number.parseFloat(column.style.width));
+    const valid = parsed.every((width) => Number.isFinite(width) && width > 0);
+    const total = valid ? parsed.reduce((sum, width) => sum + width, 0) : 0;
+    if (!valid || total <= 0) {
+      const width = 100 / count;
+      columns.forEach((column) => { column.style.width = `${Math.round(width * 1000) / 1000}%`; });
+    } else if (Math.abs(total - 100) > 0.01) {
+      columns.forEach((column, index) => {
+        column.style.width = `${Math.round((parsed[index] / total * 100) * 1000) / 1000}%`;
+      });
+    }
+    return columns;
+  }
+
+  function prepareResizableTables(scope) {
+    scope.querySelectorAll('table.topic-resizable-table,table.topic-data-table:not(.topic-indicator-card):not(.topic-chart-data):not([data-topic-block])').forEach((table) => {
+      const columns = normalizeTableColumns(table);
+      if (columns.length < 2) return;
+      table.classList.add('topic-resizable-table');
+      table.dataset.topicTable = 'resizable';
+      table.querySelectorAll('[data-topic-table-resize-handle]').forEach((handle) => handle.remove());
+      const headerCells = Array.from(table.rows[0].cells);
+      headerCells.slice(0, -1).forEach((cell, index) => {
+        const handle = root.document.createElement('span');
+        handle.className = 'topic-table-resize-handle';
+        handle.dataset.topicTableResizeHandle = String(index);
+        handle.contentEditable = 'false';
+        handle.title = '拖曳調整欄寬';
+        handle.setAttribute('aria-hidden', 'true');
+        cell.appendChild(handle);
+      });
+    });
+  }
+
+  function startTableResize(event, handle) {
+    if (state.mode !== 'edit') return;
+    const table = handle.closest('table.topic-resizable-table');
+    const columns = table ? normalizeTableColumns(table) : [];
+    const index = Number.parseInt(handle.dataset.topicTableResizeHandle, 10);
+    if (!table || !Number.isInteger(index) || index < 0 || index >= columns.length - 1) return;
+    const widths = columns.map((column) => Number.parseFloat(column.style.width));
+    const tableWidth = table.getBoundingClientRect().width;
+    if (!(tableWidth > 0)) return;
+    state.tableResize = {
+      pointerId: event.pointerId,
+      table,
+      columns,
+      index,
+      startX: event.clientX,
+      tableWidth,
+      startLeft: widths[index],
+      startRight: widths[index + 1],
+      moved: false
+    };
+    try { handle.setPointerCapture(event.pointerId); } catch (_error) { /* document listeners still complete the drag */ }
+    root.document.body.classList.add('topic-table-resizing');
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function moveTableResize(event) {
+    const resize = state.tableResize;
+    if (!resize || event.pointerId !== resize.pointerId) return;
+    const pairTotal = resize.startLeft + resize.startRight;
+    const maximumMinimum = Math.max(1, pairTotal / 2 - 0.1);
+    const minimum = Math.min(maximumMinimum, Math.max(8, 70 / resize.tableWidth * 100));
+    const delta = (event.clientX - resize.startX) / resize.tableWidth * 100;
+    const left = Math.max(minimum, Math.min(pairTotal - minimum, resize.startLeft + delta));
+    const roundedLeft = Math.round(left * 1000) / 1000;
+    const roundedRight = Math.round((pairTotal - roundedLeft) * 1000) / 1000;
+    resize.columns[resize.index].style.width = `${roundedLeft}%`;
+    resize.columns[resize.index + 1].style.width = `${roundedRight}%`;
+    resize.moved = resize.moved || Math.abs(delta) > 0.05;
+    event.preventDefault();
+  }
+
+  function finishTableResize(event) {
+    const resize = state.tableResize;
+    if (!resize || (event && event.pointerId !== resize.pointerId)) return;
+    state.tableResize = null;
+    root.document.body.classList.remove('topic-table-resizing');
+    if (resize.moved) markDirty();
+  }
+
   function numericText(container, selector, fallback) {
     const value = Number(String(container.querySelector(selector)?.textContent || '').replace(/[^0-9.-]/g, ''));
     return Number.isFinite(value) ? value : fallback;
@@ -980,6 +1110,12 @@
   function updateDynamic(container) {
     const scope = container || $('topicModules');
     if (!scope) return;
+    prepareResizableTables(scope);
+    scope.querySelectorAll('.topic-highlight').forEach((highlight) => {
+      if (highlight.style.width === '25%' && highlight.dataset.topicWidthUser !== 'true') {
+        highlight.style.removeProperty('width');
+      }
+    });
     scope.querySelectorAll('.topic-kpi-card').forEach((card) => {
       const min = numericText(card, '.topic-metric-min', 0);
       const max = numericText(card, '.topic-metric-max', 100);
@@ -1559,6 +1695,17 @@
     toast(`已匯入 ${content.modules.length} 個項次，尚未保存`, 'success');
   }
 
+  function applyPrintObjectWidths(column, layout, columnIndex) {
+    column.querySelectorAll('[data-topic-block]').forEach((block) => {
+      if (block.classList.contains('topic-highlight')) {
+        block.style.removeProperty('width');
+        return;
+      }
+      const width = normalizePrintObjectWidth(block.style.width, layout, columnIndex);
+      if (width) block.style.width = width;
+    });
+  }
+
   function buildPrintArea(reportProjection) {
     const content = core.normalizeTopicContent(reportProjection.content);
     const scale = normalizePdfScale($('topicPdfScale') && $('topicPdfScale').value);
@@ -1582,9 +1729,10 @@
       const heading = root.document.createElement('h2'); heading.textContent = module.title;
       const columns = root.document.createElement('div');
       columns.className = 'topic-print-columns'; columns.dataset.layout = module.colLayout;
-      module.columns.forEach((html) => {
+      module.columns.forEach((html, columnIndex) => {
         const column = root.document.createElement('div'); column.className = 'topic-print-column';
         setSanitizedHtml(column, html);
+        applyPrintObjectWidths(column, module.colLayout, columnIndex);
         column.querySelectorAll('canvas.topic-chart-canvas').forEach((canvas) => {
           const source = liveImages[chartIndex++] || '';
           if (source) {
@@ -1702,6 +1850,13 @@
       const object = objectFromTarget(event.target);
       if (object) selectObject(object);
     });
+    $('topicModules').addEventListener('pointerdown', (event) => {
+      const handle = event.target.closest('[data-topic-table-resize-handle]');
+      if (handle) startTableResize(event, handle);
+    });
+    root.document.addEventListener('pointermove', moveTableResize);
+    root.document.addEventListener('pointerup', finishTableResize);
+    root.document.addEventListener('pointercancel', finishTableResize);
     $('topicObjectToolbar').addEventListener('click', (event) => {
       const width = event.target.closest('[data-topic-object-width]');
       if (width) { setObjectWidth(width.dataset.topicObjectWidth); return; }
@@ -1873,6 +2028,7 @@
     normalizeObjectWidth,
     normalizeChartHeight,
     normalizePdfScale,
+    normalizePrintObjectWidth,
     mount,
     getIdentity: () => state.identity ? clone(state.identity) : null,
     getState: () => ({

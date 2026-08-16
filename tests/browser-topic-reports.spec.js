@@ -74,6 +74,13 @@ async function createTopic(list, title) {
   return editor;
 }
 
+async function expectEditorRevision(editor, revision) {
+  await expect.poll(
+    () => editor.evaluate(() => window.TopicReportEditor.getState().revision),
+    { timeout: 20000 }
+  ).toBe(revision);
+}
+
 async function completeEditing(editor) {
   editor.once('dialog', (dialog) => dialog.accept());
   await editor.locator('#topicComplete').click();
@@ -116,7 +123,7 @@ test('建立、完整編輯工具、保存與完成只改topic資料且ACK後才
   const list = await openTopicList(page);
   const editor = await createTopic(list, '繫泊作業安全專題');
 
-  await expect(editor.locator('#topicSystemNumber')).toHaveText(/^SR-\d{8}-\d{3}$/);
+  await expect.poll(() => editor.title()).toMatch(/^SR-\d{8}-\d{3}/);
   await expect(editor.locator('.topic-module')).toHaveCount(1);
   await editor.locator('#topicAddModule').click();
   await expect(editor.locator('.topic-module')).toHaveCount(2);
@@ -126,7 +133,7 @@ test('建立、完整編輯工具、保存與完成只改topic資料且ACK後才
   await editor.locator('#topicReportTitle').fill('繫泊作業安全專題（修訂）');
   await editor.locator('.topic-editable').first().pressSequentially(' 已完成風險盤點');
   await editor.locator('#topicSave').click();
-  await expect(editor.locator('#topicRevision')).toHaveText('2', { timeout: 20000 });
+  await expectEditorRevision(editor, 2);
   await expect(editor.locator('#topicLeaseNotice')).toContainText('已保存');
 
   const savedState = await (await request.get('/__fake_state')).json();
@@ -318,7 +325,7 @@ test('完整內容模塊、圖片附件、雙欄、Excel與正式snapshot PDF都
   await expect(editor.locator('.topic-attachment')).toContainText('anonymous.txt');
 
   await editor.locator('#topicSave').click();
-  await expect(editor.locator('#topicRevision')).toHaveText('2', { timeout: 20000 });
+  await expectEditorRevision(editor, 2);
   const state = await (await request.get('/__fake_state')).json();
   const module = state.topicReports[0].content.modules[0];
   expect(module.colLayout).toBe('1:1');
@@ -700,6 +707,115 @@ test('專題項次標頭、操作列與空白內容區保持緊湊', async ({ pa
   expect(Math.abs(geometry.titleCenterY - geometry.indexCenterY)).toBeLessThanOrEqual(4);
 });
 
+test('數值框貼合相鄰文字大小並保留可選取的前後雙空格', async ({ page, request }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '數值框尺寸專題');
+  const editable = editor.locator('.topic-editable').first();
+  await editable.evaluate((node) => {
+    const reference = document.createElement('span');
+    reference.className = 'topic-reference-text';
+    reference.textContent = '督導';
+    node.replaceChildren(reference, document.createTextNode(' '));
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    node.focus();
+  });
+  await editor.locator('[data-insert="highlight"]').click();
+  await editor.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(editor.locator('#topicObjectToolbar [data-topic-object-width][aria-pressed="true"]')).toHaveCount(0);
+  const geometry = await editor.locator('.topic-highlight').evaluate((highlight) => {
+    const reference = highlight.closest('.topic-editable').querySelector('.topic-reference-text');
+    const highlightStyle = getComputedStyle(highlight);
+    const referenceStyle = getComputedStyle(reference);
+    return {
+      text: highlight.textContent,
+      inlineWidth: highlight.style.width,
+      whiteSpace: highlightStyle.whiteSpace,
+      fontSize: Number.parseFloat(highlightStyle.fontSize),
+      referenceFontSize: Number.parseFloat(referenceStyle.fontSize),
+      height: highlight.getBoundingClientRect().height,
+      referenceHeight: reference.getBoundingClientRect().height,
+      width: highlight.getBoundingClientRect().width
+    };
+  });
+  expect(geometry.text).toBe('  重要數值 100  ');
+  expect(geometry.inlineWidth).toBe('');
+  expect(geometry.whiteSpace).toBe('pre-wrap');
+  expect(geometry.fontSize).toBe(geometry.referenceFontSize);
+  expect(geometry.height).toBeLessThanOrEqual(geometry.referenceHeight * 1.45);
+  expect(geometry.width).toBeLessThan(240);
+  await testInfo.attach('topic-editor-highlight-compact.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
+
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 2);
+  const state = await (await request.get('/__fake_state')).json();
+  const savedHtml = state.topicReports[0].content.modules[0].columns[0];
+  expect(savedHtml).toContain('>  重要數值 100  </span>');
+  await editor.reload();
+  await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+  expect(await editor.locator('.topic-highlight').evaluate((node) => node.textContent)).toBe('  重要數值 100  ');
+});
+
+test('插入表格可拖曳欄界並在保存重開後保留欄寬', async ({ page, request }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '可調欄寬表格專題');
+  const editable = editor.locator('.topic-editable').first();
+  await editable.click();
+
+  const answers = ['3', '4'];
+  const promptHandler = async (dialog) => dialog.accept(answers.shift());
+  editor.on('dialog', promptHandler);
+  await editor.locator('[data-insert="table"]').click();
+  await expect.poll(() => answers.length).toBe(0);
+  editor.off('dialog', promptHandler);
+
+  const table = editor.locator('table.topic-resizable-table');
+  await expect(table).toHaveCount(1);
+  await expect(table.locator('colgroup col')).toHaveCount(4);
+  await expect(table.locator('[data-topic-table-resize-handle]')).toHaveCount(3);
+  const initial = await table.locator('colgroup col').evaluateAll((cols) => cols.map((col) => Number.parseFloat(col.style.width)));
+  expect(initial).toEqual([25, 25, 25, 25]);
+
+  const handle = table.locator('[data-topic-table-resize-handle="0"]');
+  const box = await handle.boundingBox();
+  await editor.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await editor.mouse.down();
+  await editor.mouse.move(box.x + box.width / 2 + 90, box.y + box.height / 2, { steps: 6 });
+  await editor.mouse.up();
+
+  const resized = await table.locator('colgroup col').evaluateAll((cols) => cols.map((col) => Number.parseFloat(col.style.width)));
+  expect(resized[0]).toBeGreaterThan(29);
+  expect(resized[1]).toBeLessThan(21);
+  expect(resized[0] + resized[1]).toBeCloseTo(50, 2);
+  await testInfo.attach('topic-editor-resizable-table.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
+
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 2);
+  const state = await (await request.get('/__fake_state')).json();
+  const savedHtml = state.topicReports[0].content.modules[0].columns[0];
+  expect(savedHtml).toMatch(/<colgroup>/);
+  expect(savedHtml).toContain('topic-resizable-table');
+  expect(savedHtml).not.toContain('data-topic-table-resize-handle');
+
+  await editor.reload();
+  await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+  const reopened = editor.locator('table.topic-resizable-table');
+  await expect(reopened.locator('[data-topic-table-resize-handle]')).toHaveCount(3);
+  const reopenedWidths = await reopened.locator('colgroup col').evaluateAll((cols) => cols.map((col) => Number.parseFloat(col.style.width)));
+  expect(reopenedWidths[0]).toBeCloseTo(resized[0], 2);
+  expect(reopenedWidths[1]).toBeCloseTo(resized[1], 2);
+});
+
 test('專題PDF百分比縮放會套用到列印區且不修改報告Revision', async ({ page, request }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);
@@ -730,15 +846,32 @@ test('專題PDF百分比縮放會套用到列印區且不修改報告Revision', 
   expect(state.topicSnapshots).toHaveLength(1);
 });
 
-test('專題PDF中的30%資訊卡維持可讀橫排並產生A4檔', async ({ page }, testInfo) => {
+test('雙欄專題PDF維持整頁物件百分比並產生可讀A4檔', async ({ page }, testInfo) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);
   const editor = await createTopic(list, 'PDF資訊卡版面專題');
-  const editable = editor.locator('.topic-editable').first();
-  await editable.fill('PDF資訊卡版面驗證 ');
-  await editable.click();
-  await editable.press('End');
-  for (const type of ['indicator-blue', 'kpi', 'progress', 'zone']) {
+  await editor.locator('[data-module-layout]').first().selectOption('1:1');
+  await expect(editor.locator('.topic-editable')).toHaveCount(2);
+  const leftColumn = editor.locator('.topic-editable').nth(0);
+  const rightColumn = editor.locator('.topic-editable').nth(1);
+
+  await leftColumn.fill('督導 ');
+  await leftColumn.click();
+  await leftColumn.press('End');
+  for (const type of ['highlight', 'indicator-blue']) {
+    await editor.locator(`[data-insert="${type}"]`).click();
+  }
+  const answers = ['3', '4'];
+  const promptHandler = async (dialog) => dialog.accept(answers.shift());
+  editor.on('dialog', promptHandler);
+  await editor.locator('[data-insert="table"]').click();
+  await expect.poll(() => answers.length).toBe(0);
+  editor.off('dialog', promptHandler);
+
+  await rightColumn.fill('右欄 ');
+  await rightColumn.click();
+  await rightColumn.press('End');
+  for (const type of ['kpi', 'progress', 'zone']) {
     await editor.locator(`[data-insert="${type}"]`).click();
   }
   await expect(editor.locator('.topic-kpi-card')).toHaveCount(1);
@@ -755,19 +888,37 @@ test('專題PDF中的30%資訊卡維持可讀橫排並產生A4檔', async ({ pag
   const geometry = await editor.evaluate(() => {
     document.body.classList.add('topic-printing-report');
     const area = document.querySelector('#topicPrintArea');
-    const cards = Array.from(area.querySelectorAll('.topic-kpi-card,.topic-progress-card,.topic-zone-card'));
+    const printColumns = Array.from(area.querySelectorAll('.topic-print-column'));
+    const cards = Array.from(area.querySelectorAll('.topic-indicator-card,.topic-kpi-card,.topic-progress-card,.topic-zone-card'));
     const labels = [
       ...area.querySelectorAll('.topic-kpi-card .topic-card-values > span:not(.topic-kpi-avg-toggle)'),
       ...area.querySelectorAll('.topic-progress-card .topic-card-head > span'),
       ...area.querySelectorAll('.topic-zone-card .topic-card-head > span')
     ];
     return {
+      layout: area.querySelector('.topic-print-columns').dataset.layout,
+      columnWidths: printColumns.map((column) => column.getBoundingClientRect().width),
       cards: cards.map((card) => ({
+        inlineWidth: card.style.width,
         width: card.getBoundingClientRect().width,
         height: card.getBoundingClientRect().height,
         clientWidth: card.clientWidth,
-        scrollWidth: card.scrollWidth
+        scrollWidth: card.scrollWidth,
+        columnWidth: card.closest('.topic-print-column').getBoundingClientRect().width
       })),
+      highlight: (() => {
+        const highlight = area.querySelector('.topic-highlight');
+        return {
+          text: highlight.textContent,
+          inlineWidth: highlight.style.width,
+          width: highlight.getBoundingClientRect().width,
+          whiteSpace: getComputedStyle(highlight).whiteSpace
+        };
+      })(),
+      tableRatio: (() => {
+        const table = area.querySelector('table.topic-resizable-table');
+        return table.getBoundingClientRect().width / table.closest('.topic-print-column').getBoundingClientRect().width;
+      })(),
       labels: labels.map((label) => {
         const style = getComputedStyle(label);
         return {
@@ -779,8 +930,17 @@ test('專題PDF中的30%資訊卡維持可讀橫排並產生A4檔', async ({ pag
       toggleDisplay: getComputedStyle(area.querySelector('.topic-kpi-avg-toggle')).display
     };
   });
-  expect(geometry.cards).toHaveLength(3);
-  expect(geometry.cards.every((card) => card.width >= 170 && card.scrollWidth <= card.clientWidth + 1)).toBe(true);
+  expect(geometry.layout).toBe('1:1');
+  expect(geometry.columnWidths).toHaveLength(2);
+  expect(geometry.cards).toHaveLength(4);
+  expect(geometry.cards.every((card) => card.inlineWidth === '60%')).toBe(true);
+  expect(geometry.cards.every((card) => card.width >= 200 && card.scrollWidth <= card.clientWidth + 1)).toBe(true);
+  expect(geometry.cards.every((card) => card.width / card.columnWidth >= 0.56 && card.width / card.columnWidth <= 0.64)).toBe(true);
+  expect(geometry.highlight).toEqual(expect.objectContaining({
+    text: '  重要數值 100  ', inlineWidth: '', whiteSpace: 'pre-wrap'
+  }));
+  expect(geometry.highlight.width).toBeLessThan(150);
+  expect(geometry.tableRatio).toBeGreaterThan(0.97);
   expect(geometry.labels.length).toBeGreaterThanOrEqual(5);
   expect(
     geometry.labels.every((label) => label.whiteSpace === 'nowrap' && label.height <= label.fontSize * 2.1),
@@ -788,13 +948,16 @@ test('專題PDF中的30%資訊卡維持可讀橫排並產生A4檔', async ({ pag
   ).toBe(true);
   expect(geometry.toggleDisplay).toBe('none');
 
+  await testInfo.attach('topic-layout-dual-column-100-percent.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
   const pdf = await editor.pdf({
     format: 'A4', printBackground: true,
     margin: { top: '10mm', right: '10mm', bottom: '10mm', left: '10mm' }
   });
   expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
   expect(pdf.length).toBeGreaterThan(5000);
-  await testInfo.attach('topic-layout-100-percent.pdf', { body: pdf, contentType: 'application/pdf' });
+  await testInfo.attach('topic-layout-dual-column-100-percent.pdf', { body: pdf, contentType: 'application/pdf' });
 });
 
 test('編輯區塊在標題操作下方，色塊、字級、自動編號及物件百分比與刪除可保存', async ({ page, request }) => {
@@ -849,7 +1012,7 @@ test('編輯區塊在標題操作下方，色塊、字級、自動編號及物�
   await expect.poll(() => kpi.locator('.topic-kpi-target-marker').evaluate((node) => node.style.left)).toBe('75%');
 
   await editor.locator('#topicSave').click();
-  await expect(editor.locator('#topicRevision')).toHaveText('2', { timeout: 20000 });
+  await expectEditorRevision(editor, 2);
   const saved = await (await request.get('/__fake_state')).json();
   const html = saved.topicReports[0].content.modules[0].columns[0];
   expect(html).toMatch(/<ol>/);
@@ -905,7 +1068,7 @@ test('趨勢圖固定高度不延伸，可增減指標與週期並保存重開',
   expect(await trend.evaluate((node) => node.style.width)).toBe('70%');
 
   await editor.locator('#topicSave').click();
-  await expect(editor.locator('#topicRevision')).toHaveText('2', { timeout: 20000 });
+  await expectEditorRevision(editor, 2);
   const state = await (await request.get('/__fake_state')).json();
   const html = state.topicReports[0].content.modules[0].columns[0];
   expect(html).toContain('事故率');

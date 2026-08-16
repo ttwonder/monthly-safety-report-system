@@ -31,6 +31,13 @@ test('所有進階模塊模板不含全域id且包含可辨識class', () => {
   }
 });
 
+test('數值框預設貼合內容並保留前後各兩個空格', () => {
+  const html = editor.buildBlockHtml('highlight');
+  assert.doesNotMatch(html, /style=["'][^"']*width\s*:/i);
+  const text = html.match(/>([^<]*)<\/span>$/)?.[1];
+  assert.equal(text, '  重要數值 100  ');
+});
+
 test('趨勢與動態卡片具備月報同級資料結構及固定圖表容器', () => {
   const trend = editor.buildBlockHtml('trend');
   assert.match(trend, /topic-chart-canvas-area/);
@@ -78,6 +85,18 @@ test('Excel export不把附件base64資料嵌入儲存格', () => {
   const text = JSON.stringify(rows);
   assert.match(text, /manual\.pdf/);
   assert.doesNotMatch(text, /base64|QUJDREVGRw/);
+});
+
+test('雙欄PDF依欄比例換算物件寬度以維持整頁實體百分比', () => {
+  assert.equal(editor.normalizePrintObjectWidth('30%', '1', 0), '30%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '1:1', 0), '60%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '1:1', 1), '60%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '1:2', 0), '90%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '1:2', 1), '45%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '2:1', 0), '45%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '2:1', 1), '90%');
+  assert.equal(editor.normalizePrintObjectWidth('70%', '1:1', 0), '100%');
+  assert.equal(editor.normalizePrintObjectWidth('', '1:1', 0), '');
 });
 
 test('圖片與附件限制在明確類型及payload邊界', () => {
