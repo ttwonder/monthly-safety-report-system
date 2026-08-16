@@ -707,6 +707,72 @@ test('專題項次標頭、操作列與空白內容區保持緊湊', async ({ pa
   expect(Math.abs(geometry.titleCenterY - geometry.indexCenterY)).toBeLessThanOrEqual(4);
 });
 
+test('桌面工具列退出按鈕、名稱日期與編輯權資訊維持單行', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '桌面單行工具與狀態專題');
+  await editor.setViewportSize({ width: 1700, height: 1000 });
+
+  const geometry = await editor.evaluate(() => {
+    document.querySelector('#topicLeaseNotice').textContent = '編輯權有效至 2026/08/17 02:00 · fencing 3';
+    const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
+    const reportRow = document.querySelector('#topicDiscardExit').closest('.topic-toolbar-row');
+    const meta = document.querySelector('.topic-editor-meta');
+    const metaRect = meta.getBoundingClientRect();
+    const title = rect('#topicReportTitle');
+    const date = rect('#topicReportDate');
+    const stateNode = document.querySelector('.topic-editor-state');
+    const state = stateNode.getBoundingClientRect();
+    const lease = rect('#topicLeaseNotice');
+    const discard = rect('#topicDiscardExit');
+    const complete = rect('#topicComplete');
+    return {
+      reportRowText: reportRow.textContent.replace(/\s+/g, ' ').trim(),
+      discardCenterY: discard.top + discard.height / 2,
+      completeCenterY: complete.top + complete.height / 2,
+      metaContainsState: meta.contains(stateNode),
+      titleTop: title.top,
+      titleBottom: title.bottom,
+      dateTop: date.top,
+      dateBottom: date.bottom,
+      stateTop: state.top,
+      stateBottom: state.bottom,
+      stateClientWidth: stateNode.clientWidth,
+      stateScrollWidth: stateNode.scrollWidth,
+      leaseRight: lease.right,
+      metaRight: metaRect.right
+    };
+  });
+
+  expect(geometry.reportRowText).not.toContain('版型：單欄／雙欄');
+  expect(Math.abs(geometry.discardCenterY - geometry.completeCenterY)).toBeLessThanOrEqual(3);
+  expect(geometry.metaContainsState).toBe(true);
+  expect(Math.abs(geometry.titleTop - geometry.dateTop)).toBeLessThanOrEqual(2);
+  expect(geometry.stateTop).toBeLessThan(geometry.titleBottom);
+  expect(geometry.stateBottom).toBeGreaterThan(geometry.titleTop);
+  expect(geometry.stateScrollWidth).toBeLessThanOrEqual(geometry.stateClientWidth + 1);
+  expect(geometry.leaseRight).toBeLessThanOrEqual(geometry.metaRight + 1);
+  await testInfo.attach('topic-toolbar-meta-single-row.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
+
+  await editor.setViewportSize({ width: 390, height: 900 });
+  const mobile = await editor.evaluate(() => {
+    const state = document.querySelector('.topic-editor-state').getBoundingClientRect();
+    const lease = document.querySelector('#topicLeaseNotice');
+    return {
+      viewportWidth: document.documentElement.clientWidth,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      stateRight: state.right,
+      leaseClientWidth: lease.clientWidth,
+      leaseScrollWidth: lease.scrollWidth
+    };
+  });
+  expect(mobile.documentScrollWidth).toBeLessThanOrEqual(mobile.viewportWidth + 1);
+  expect(mobile.stateRight).toBeLessThanOrEqual(mobile.viewportWidth + 1);
+  expect(mobile.leaseScrollWidth).toBeLessThanOrEqual(mobile.leaseClientWidth + 1);
+});
+
 test('數值框貼合相鄰文字大小並保留可選取的前後雙空格', async ({ page, request }, testInfo) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);
@@ -884,6 +950,80 @@ test('專題PDF縮放與直橫方向會套用到列印區且不修改報告Revis
   expect(state.topicSnapshots).toHaveLength(1);
 });
 
+test('專題PDF保留編輯頁雙欄內物件比例與同行分組', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, 'PDF所見即所得排布專題');
+  await editor.setViewportSize({ width: 1700, height: 1100 });
+  await editor.locator('[data-module-layout]').first().selectOption('1:1');
+  const left = editor.locator('.topic-editable').first();
+  await left.fill('督導 ');
+  await left.click();
+  await left.press('End');
+  for (const type of ['indicator-orange', 'indicator-orange', 'indicator-blue', 'progress', 'zone', 'trend']) {
+    await editor.locator(`[data-insert="${type}"]`).click();
+  }
+  await expect(left.locator('.topic-indicator-card')).toHaveCount(3);
+
+  const measure = (scopeSelector) => editor.evaluate((selector) => {
+    const scope = document.querySelector(selector);
+    const column = scope.closest('.topic-editable,.topic-print-column');
+    const columnRect = column.getBoundingClientRect();
+    const nodes = Array.from(scope.querySelectorAll(
+      '.topic-indicator-card,.topic-progress-card,.topic-zone-card,.topic-trend-card'
+    ));
+    const rows = [];
+    const items = nodes.map((node) => {
+      const rect = node.getBoundingClientRect();
+      let row = rows.findIndex((top) => Math.abs(top - rect.top) <= 4);
+      if (row < 0) { rows.push(rect.top); row = rows.length - 1; }
+      return {
+        type: node.dataset.topicBlock,
+        inlineWidth: node.style.width,
+        ratio: rect.width / columnRect.width,
+        row
+      };
+    });
+    return { columnWidth: columnRect.width, items };
+  }, scopeSelector);
+
+  const screen = await measure('.topic-editable');
+  expect(screen.items.map((item) => item.inlineWidth)).toEqual(['30%', '30%', '30%', '30%', '30%', '45%']);
+  expect(screen.items.slice(0, 3).map((item) => item.row)).toEqual([0, 0, 0]);
+  await testInfo.attach('topic-wysiwyg-screen.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
+
+  await editor.evaluate(() => {
+    window.__topicWysiwygPrintObserved = false;
+    window.print = () => { window.__topicWysiwygPrintObserved = true; };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicWysiwygPrintObserved)).toBe(true);
+  const structure = await editor.evaluate(() => ({
+    layout: document.querySelector('#topicPrintArea .topic-print-columns').dataset.layout,
+    columnCount: document.querySelectorAll('#topicPrintArea .topic-print-column').length
+  }));
+  expect(structure).toEqual({ layout: '1', columnCount: 1 });
+  await editor.setViewportSize({ width: 718, height: 1100 });
+  await editor.emulateMedia({ media: 'print' });
+  await editor.evaluate(() => document.body.classList.add('topic-printing-report'));
+  const printed = await measure('.topic-print-column');
+
+  expect(printed.items.map((item) => item.inlineWidth)).toEqual(screen.items.map((item) => item.inlineWidth));
+  expect(printed.items.map((item) => item.row)).toEqual(screen.items.map((item) => item.row));
+  printed.items.forEach((item, index) => {
+    expect(Math.abs(item.ratio - screen.items[index].ratio)).toBeLessThanOrEqual(0.06);
+  });
+  await testInfo.attach('topic-wysiwyg-print.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
+  const pdf = await editor.pdf({ printBackground: false, preferCSSPageSize: true });
+  expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
+  expect(pdf.length).toBeGreaterThan(5000);
+  await testInfo.attach('topic-wysiwyg-portrait.pdf', { body: pdf, contentType: 'application/pdf' });
+});
+
 test('專題PDF等待snapshot期間內容變更會fail closed且不混用新圖表與舊資料表', async ({ page, request }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);
@@ -1049,7 +1189,7 @@ test('專題PDF等待snapshot clone內所有圖片decode完成且拒絕重入列
   await expect.poll(() => editor.evaluate(() => window.__topicDecodePrintCount)).toBe(1);
 });
 
-test('雙欄專題PDF維持整頁物件百分比、原色並產生可讀A4橫向檔', async ({ page }, testInfo) => {
+test('雙欄專題PDF維持欄內物件百分比、原色並產生可讀A4橫向檔', async ({ page }, testInfo) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);
   const editor = await createTopic(list, 'PDF資訊卡版面專題');
@@ -1087,7 +1227,7 @@ test('雙欄專題PDF維持整頁物件百分比、原色並產生可讀A4橫向
   await editor.locator('#topicPrint').click();
   await expect.poll(() => editor.evaluate(() => window.__topicLayoutPrintObserved)).toBe(true);
 
-  await editor.setViewportSize({ width: 718, height: 1000 });
+  await editor.setViewportSize({ width: 1047, height: 1000 });
   await editor.emulateMedia({ media: 'print' });
   const geometry = await editor.evaluate(() => {
     document.body.classList.add('topic-printing-report');
@@ -1164,9 +1304,9 @@ test('雙欄專題PDF維持整頁物件百分比、原色並產生可讀A4橫向
   expect(geometry.layout).toBe('1:1');
   expect(geometry.columnWidths).toHaveLength(2);
   expect(geometry.cards).toHaveLength(4);
-  expect(geometry.cards.every((card) => card.inlineWidth === '60%')).toBe(true);
-  expect(geometry.cards.every((card) => card.width >= 200 && card.scrollWidth <= card.clientWidth + 1)).toBe(true);
-  expect(geometry.cards.every((card) => card.width / card.columnWidth >= 0.56 && card.width / card.columnWidth <= 0.64)).toBe(true);
+  expect(geometry.cards.every((card) => card.inlineWidth === '30%')).toBe(true);
+  expect(geometry.cards.every((card) => card.width >= 130 && card.scrollWidth <= card.clientWidth + 1)).toBe(true);
+  expect(geometry.cards.every((card) => card.width / card.columnWidth >= 0.28 && card.width / card.columnWidth <= 0.36)).toBe(true);
   expect(geometry.highlight).toEqual(expect.objectContaining({
     text: '  重要數值 100  ', inlineWidth: '', whiteSpace: 'pre-wrap'
   }));

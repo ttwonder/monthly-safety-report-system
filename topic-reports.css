@@ -144,13 +144,13 @@ button,a { -webkit-tap-highlight-color:transparent; }
 .topic-color-swatch:hover:not(:disabled),.topic-color-swatch:focus-visible { transform:scale(1.12); box-shadow:0 0 0 3px rgba(99,102,241,.28); outline:0; }
 .topic-color-swatch:disabled { opacity:.35; cursor:not-allowed; }
 .topic-editor-shell > .topic-card { padding:12px; }
-.topic-editor-meta { display:grid; grid-template-columns:minmax(260px,1fr) 190px; gap:10px; align-items:end; }
+.topic-editor-meta { display:grid; grid-template-columns:minmax(300px,1fr) 190px minmax(460px,auto); gap:10px; align-items:end; }
 .topic-editor-meta .topic-field { margin:4px 0; }
-.topic-editor-state { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+.topic-editor-state { display:flex; gap:8px; flex-wrap:nowrap; align-items:center; min-width:0; min-height:42px; }
 .topic-mode-badge { padding:6px 10px; border-radius:999px; font-weight:900; font-size:.78rem; }
 .topic-mode-badge[data-mode="edit"] { color:#065f46; background:#d1fae5; }
 .topic-mode-badge[data-mode="readonly"] { color:#92400e; background:#fef3c7; }
-.topic-lease-notice { flex:1 1 360px; min-height:24px; color:#475569; font-size:.82rem; font-weight:700; }
+.topic-lease-notice { flex:1 1 auto; min-width:0; min-height:24px; color:#475569; font-size:.82rem; font-weight:700; white-space:nowrap; }
 .topic-modules { display:grid; gap:10px; margin-top:9px; }
 .topic-module {
   display:block; border:1px solid #c7d2fe; border-radius:14px;
@@ -273,6 +273,8 @@ body.topic-table-resizing,body.topic-table-resizing * { cursor:col-resize !impor
 .topic-print-meta { display:flex; gap:18px; flex-wrap:wrap; margin-top:5px; color:#475569; font-size:12px; }
 
 @media (max-width:1050px) {
+  .topic-editor-meta { grid-template-columns:minmax(260px,1fr) 190px; }
+  .topic-editor-state { grid-column:1 / -1; }
   .topic-module-topbar { grid-template-columns:1fr; }
   .topic-module-actions { justify-content:flex-start; border-left:0; border-top:1px solid #dbeafe; }
 }
@@ -324,7 +326,7 @@ body.topic-table-resizing,body.topic-table-resizing * { cursor:col-resize !impor
   }
   .topic-print-column .topic-kpi-card,
   .topic-print-column .topic-progress-card,
-  .topic-print-column .topic-zone-card { min-width:170px; padding:9px; }
+  .topic-print-column .topic-zone-card { min-width:0; padding:9px; }
   .topic-print-column .topic-card-head { gap:5px; margin-bottom:5px; font-size:10px; }
   .topic-print-column .topic-card-head > strong { min-width:56px; }
   .topic-print-column .topic-card-values { gap:4px; flex-wrap:nowrap; font-size:9px; }

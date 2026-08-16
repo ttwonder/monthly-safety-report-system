@@ -11,7 +11,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi) {
   'use strict';
 
-  const BUILD_ID = '1.5.0';
+  const BUILD_ID = '1.6.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -183,15 +183,7 @@
     if (!match) return '';
     const numeric = Number(match[1]);
     if (!(numeric > 0 && numeric <= 100)) return '';
-    const fractions = {
-      '1': [1],
-      '1:1': [0.5, 0.5],
-      '1:2': [1 / 3, 2 / 3],
-      '2:1': [2 / 3, 1 / 3]
-    }[normalizeLayout(layout)] || [1];
-    const fraction = fractions[Math.max(0, Math.min(fractions.length - 1, Number(columnIndex) || 0))] || 1;
-    const converted = Math.min(100, numeric / fraction);
-    return `${Math.round(converted * 1000) / 1000}%`;
+    return `${Math.round(numeric * 1000) / 1000}%`;
   }
 
   function isAllowedImage(file) {
@@ -1853,13 +1845,20 @@
       section.className = 'topic-print-module';
       const heading = root.document.createElement('h2'); heading.textContent = module.title;
       const columns = root.document.createElement('div');
-      columns.className = 'topic-print-columns'; columns.dataset.layout = module.colLayout;
-      module.columns.forEach((html, columnIndex) => {
+      columns.className = 'topic-print-columns';
+      const renderedColumns = module.columns.map((html, columnIndex) => {
         const column = root.document.createElement('div'); column.className = 'topic-print-column';
         setSanitizedHtml(column, html);
         applyPrintObjectWidths(column, module.colLayout, columnIndex);
-        columns.appendChild(column);
+        return column;
       });
+      const meaningfulColumns = renderedColumns.filter((column) => {
+        const text = String(column.textContent || '').replace(/\u00a0/g, ' ').trim();
+        return !!text || !!column.querySelector('img,table,[data-topic-block],ul,ol,hr,svg,canvas,video,audio');
+      });
+      const printableColumns = meaningfulColumns.length ? meaningfulColumns : renderedColumns.slice(0, 1);
+      columns.dataset.layout = printableColumns.length === 1 ? '1' : module.colLayout;
+      printableColumns.forEach((column) => columns.appendChild(column));
       section.append(heading, columns);
       if (module.attachments && module.attachments.length) {
         const attachments = root.document.createElement('small');

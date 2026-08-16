@@ -95,15 +95,15 @@ test('Excel export不把附件base64資料嵌入儲存格', () => {
   assert.doesNotMatch(text, /base64|QUJDREVGRw/);
 });
 
-test('雙欄PDF依欄比例換算物件寬度以維持整頁實體百分比', () => {
+test('PDF保留物件相對所屬欄位的百分比以維持編輯頁排布', () => {
   assert.equal(editor.normalizePrintObjectWidth('30%', '1', 0), '30%');
-  assert.equal(editor.normalizePrintObjectWidth('30%', '1:1', 0), '60%');
-  assert.equal(editor.normalizePrintObjectWidth('30%', '1:1', 1), '60%');
-  assert.equal(editor.normalizePrintObjectWidth('30%', '1:2', 0), '90%');
-  assert.equal(editor.normalizePrintObjectWidth('30%', '1:2', 1), '45%');
-  assert.equal(editor.normalizePrintObjectWidth('30%', '2:1', 0), '45%');
-  assert.equal(editor.normalizePrintObjectWidth('30%', '2:1', 1), '90%');
-  assert.equal(editor.normalizePrintObjectWidth('70%', '1:1', 0), '100%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '1:1', 0), '30%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '1:1', 1), '30%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '1:2', 0), '30%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '1:2', 1), '30%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '2:1', 0), '30%');
+  assert.equal(editor.normalizePrintObjectWidth('30%', '2:1', 1), '30%');
+  assert.equal(editor.normalizePrintObjectWidth('70%', '1:1', 0), '70%');
   assert.equal(editor.normalizePrintObjectWidth('', '1:1', 0), '');
 });
 

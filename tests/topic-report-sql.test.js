@@ -60,6 +60,13 @@ function result(query) {
   return query.rows[0].result;
 }
 
+async function taipeiSystemNumber(db, sequence) {
+  const row = (await db.query(`
+    select to_char(clock_timestamp() at time zone 'Asia/Taipei', 'YYYYMMDD') business_date
+  `)).rows[0];
+  return `SR-${row.business_date}-${String(sequence).padStart(3, '0')}`;
+}
+
 async function openAndLogin(db, uid, username, password, clientSessionId) {
   await setAuthUid(db, uid);
   const site = result(await db.query(
@@ -162,12 +169,14 @@ test('新增報告原子產生唯一系統編號且lost ACK重送不建立副本
     const createA = await createTopic(db, a, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', opA, '甲專題', contentA);
     const replayA = await createTopic(db, a, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', opA, '甲專題', contentA);
     const createB = await createTopic(db, b, 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2', randomUUID(), '乙專題');
+    const expectedA = await taipeiSystemNumber(db, 1);
+    const expectedB = await taipeiSystemNumber(db, 2);
 
     assert.equal(createA.ok, true);
-    assert.equal(createA.report.systemNumber, 'SR-20260816-001');
+    assert.equal(createA.report.systemNumber, expectedA);
     assert.equal(replayA.report.id, createA.report.id);
     assert.equal(replayA.report.systemNumber, createA.report.systemNumber);
-    assert.equal(createB.report.systemNumber, 'SR-20260816-002');
+    assert.equal(createB.report.systemNumber, expectedB);
 
     await setAuthUid(db, a.uid);
     const listed = result(await db.query(
@@ -175,7 +184,7 @@ test('新增報告原子產生唯一系統編號且lost ACK重送不建立副本
       ['workspace-test', a.login.user_session_id, a.clientSessionId]
     ));
     assert.equal(listed.ok, true);
-    assert.deepEqual(listed.reports.map((row) => row.systemNumber), ['SR-20260816-002', 'SR-20260816-001']);
+    assert.deepEqual(listed.reports.map((row) => row.systemNumber), [expectedB, expectedA]);
     assert.equal(listed.reports.every((row) => Number(row.logicalBytes) > 0), true);
     assert.equal(listed.reports.every((row) => Number(row.snapshotBytes) === 0), true);
     assert.equal((await db.query(`select count(*)::int count from public.monthly_v7_topic_reports`)).rows[0].count, 2);
@@ -268,7 +277,7 @@ test('專題建立保存與快照不改月報revision、payload、snapshot或cha
       ['workspace-test', a.login.user_session_id, a.clientSessionId, randomUUID(), created.report.id, 2]
     ));
     assert.equal(snapshot.ok, true);
-    assert.equal(snapshot.snapshot.report.systemNumber, 'SR-20260816-001');
+    assert.equal(snapshot.snapshot.report.systemNumber, await taipeiSystemNumber(db, 1));
 
     const after = (await db.query(`
       select

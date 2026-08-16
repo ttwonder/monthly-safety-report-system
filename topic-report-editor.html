@@ -6,7 +6,7 @@
   <title>專題報告編輯器</title>
   <meta name="color-scheme" content="light">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer">
-  <link rel="stylesheet" href="./topic-reports.css?v=1.5.0">
+  <link rel="stylesheet" href="./topic-reports.css?v=1.6.0">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
@@ -94,7 +94,6 @@
         </div>
         <div class="topic-toolbar-row">
           <span class="topic-toolbar-label">報告操作</span>
-          <span class="topic-toolbar-label" title="每個項次右側可獨立選擇">版型：單欄／雙欄</span>
           <button id="topicAddModule" type="button" class="topic-tool-btn"><i class="fas fa-plus"></i>新增項次</button>
           <button id="topicExcelImport" type="button" class="topic-tool-btn"><i class="fas fa-file-import"></i>Excel匯入</button>
           <button id="topicExcelExport" type="button" class="topic-tool-btn"><i class="fas fa-file-excel"></i>Excel匯出</button>
@@ -128,11 +127,11 @@
           <label for="topicReportDate">報告日期</label>
           <input id="topicReportDate" class="topic-input" type="date">
         </div>
-      </div>
-      <div class="topic-editor-state">
-        <span id="topicModeBadge" class="topic-mode-badge" data-mode="readonly">確認中</span>
-        <span id="topicLeaseNotice" class="topic-lease-notice" role="status" aria-live="polite"></span>
-        <button id="topicAcquireEdit" type="button" class="topic-btn no-print" hidden><i class="fas fa-lock-open"></i>重新取得編輯權</button>
+        <div class="topic-editor-state">
+          <span id="topicModeBadge" class="topic-mode-badge" data-mode="readonly">確認中</span>
+          <span id="topicLeaseNotice" class="topic-lease-notice" role="status" aria-live="polite"></span>
+          <button id="topicAcquireEdit" type="button" class="topic-btn no-print" hidden><i class="fas fa-lock-open"></i>重新取得編輯權</button>
+        </div>
       </div>
       <div id="topicModules" class="topic-modules" aria-label="專題報告項次"></div>
     </section>
@@ -185,8 +184,8 @@
 
   <script src="./supabase-config.js?v=7.2.0"></script>
   <script src="./vendor/supabase-2.112.2.js?v=7.2.0"></script>
-  <script src="./topic-reports-core.js?v=1.5.0"></script>
-  <script src="./topic-reports-client.js?v=1.5.0"></script>
-  <script src="./topic-report-editor.js?v=1.5.0"></script>
+  <script src="./topic-reports-core.js?v=1.6.0"></script>
+  <script src="./topic-reports-client.js?v=1.6.0"></script>
+  <script src="./topic-report-editor.js?v=1.6.0"></script>
 </body>
 </html>

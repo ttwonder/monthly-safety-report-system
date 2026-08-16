@@ -9,7 +9,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core) {
   'use strict';
 
-  const BUILD_ID = '1.5.0';
+  const BUILD_ID = '1.6.0';
   const IDENTITY_STORAGE_KEY = 'topic:v1:identity-handoff';
   const CREATE_SENTINEL_ID = '00000000-0000-4000-8000-000000000001';
   const SESSION_ERRORS = new Set([

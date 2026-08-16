@@ -1255,41 +1255,45 @@ for (const fixture of [
     const origin = storageState.origins.find((entry) => entry.origin === new URL(page.url()).origin);
     expect(origin).toBeTruthy();
     const resumedContext = await browser.newContext({ storageState: { cookies: [], origins: [origin] } });
-    await resumedContext.addInitScript((kind) => {
-      if (kind === 'timeout') window.MONTHLY_V7_RPC_TIMEOUT_MS = 75;
+    await resumedContext.addInitScript(() => {
       localStorage.setItem('monthly_v7_draft:module:user-resume-failure', JSON.stringify({
         payload: { title: 'user resume 失敗仍保留' }, baseRevision: 1
       }));
-    }, fixture.kind);
-    if (fixture.kind === 'timeout') {
-      await request.post('/__fake_hang_rpc?name=monthly_v7_exchange_user_resume&count=1');
-    } else {
-      await resumedContext.route('**/__fake_rpc', async (route) => {
-        const payload = route.request().postDataJSON();
-        if (payload?.name !== 'monthly_v7_exchange_user_resume') return route.continue();
-        if (fixture.kind === 'invalid') {
-          return route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ ok: false, error: 'USER_RESUME_INVALID' })
-          });
-        }
+    });
+    await resumedContext.route('**/__fake_rpc', async (route) => {
+      const payload = route.request().postDataJSON();
+      if (payload?.name !== 'monthly_v7_exchange_user_resume') return route.continue();
+      if (fixture.kind === 'invalid') {
         return route.fulfill({
-          status: 400,
+          status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({
-            code: 'PGRST202',
-            message: 'Could not find the function public.monthly_v7_exchange_user_resume'
-          })
+          body: JSON.stringify({ ok: false, error: 'USER_RESUME_INVALID' })
         });
+      }
+      if (fixture.kind === 'timeout') {
+        return route.fulfill({
+          status: 504,
+          contentType: 'application/json',
+          body: JSON.stringify({ code: 'RPC_TIMEOUT', message: 'RPC_TIMEOUT', details: '', hint: '' })
+        });
+      }
+      return route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'PGRST202',
+          message: 'Could not find the function public.monthly_v7_exchange_user_resume'
+        })
       });
-    }
+    });
     const resumed = await resumedContext.newPage();
     await resumed.goto('/', { waitUntil: 'domcontentloaded' });
 
-    await expect(resumed.locator('#siteAccessGate')).toBeHidden({ timeout: 30000 });
+    await Promise.all([
+      expect(resumed.locator('#siteAccessGate')).toBeHidden({ timeout: 30000 }),
+      expect(resumed.locator('#v5TopStatus')).toContainText(fixture.expectedText, { timeout: 30000 })
+    ]);
     await expect(resumed.locator('#v5-login-username')).toBeVisible();
-    await expect(resumed.locator('#v5TopStatus')).toContainText(fixture.expectedText);
     expect(await resumed.evaluate(() => window.MonthlyV7App.currentUser())).toBeNull();
     const local = await resumed.evaluate(() => ({
       marker: localStorage.getItem('monthly_v7_user_resume_marker'),
