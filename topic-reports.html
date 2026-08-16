@@ -6,7 +6,7 @@
   <title>專題報告清單</title>
   <meta name="color-scheme" content="light">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer">
-  <link rel="stylesheet" href="./topic-reports.css?v=1.0.0">
+  <link rel="stylesheet" href="./topic-reports.css?v=1.1.0">
 </head>
 <body>
   <div id="topicIdentityGate" class="topic-gate" aria-live="polite">
@@ -30,7 +30,7 @@
       </div>
       <div id="topicCurrentUser" class="topic-identity" aria-label="目前身份"></div>
       <div class="topic-actions no-print">
-        <a class="topic-btn" href="./index.html"><i class="fas fa-arrow-left"></i>月報系統</a>
+        <a id="topicBackMonthly" class="topic-btn" href="./index.html"><i class="fas fa-arrow-left"></i>月報系統</a>
       </div>
     </header>
 
@@ -43,10 +43,17 @@
       <div id="topicListStatus" class="topic-status" role="status" aria-live="polite">尚未載入</div>
       <div class="topic-table-wrap">
         <table id="topicReportsTable" class="topic-table" aria-label="專題報告歷史清單">
+          <colgroup>
+            <col class="topic-col-title"><col class="topic-col-date"><col class="topic-col-status">
+            <col class="topic-col-updated"><col class="topic-col-actions">
+          </colgroup>
           <thead>
             <tr>
-              <th>系統編號</th><th>專題名稱</th><th>報告日期</th><th>狀態</th>
-              <th>模塊</th><th>Revision</th><th>最後更新</th><th class="no-print">操作</th>
+              <th scope="col" data-topic-sort-header="title"><button type="button" class="topic-sort-button" data-topic-sort="title">專題名稱<span class="topic-sort-indicator" aria-hidden="true">↕</span></button></th>
+              <th scope="col" data-topic-sort-header="reportDate"><button type="button" class="topic-sort-button" data-topic-sort="reportDate">報告日期<span class="topic-sort-indicator" aria-hidden="true">↕</span></button></th>
+              <th scope="col" data-topic-sort-header="status"><button type="button" class="topic-sort-button" data-topic-sort="status">狀態<span class="topic-sort-indicator" aria-hidden="true">↕</span></button></th>
+              <th scope="col" data-topic-sort-header="updatedAt" aria-sort="descending"><button type="button" class="topic-sort-button" data-topic-sort="updatedAt">最後更新<span class="topic-sort-indicator" aria-hidden="true">↓</span></button></th>
+              <th scope="col" class="no-print">操作</th>
             </tr>
           </thead>
           <tbody id="topicReportsBody"></tbody>
@@ -92,8 +99,8 @@
 
   <script src="./supabase-config.js?v=7.1.0"></script>
   <script src="./vendor/supabase-2.112.2.js?v=7.1.0"></script>
-  <script src="./topic-reports-core.js?v=1.0.0"></script>
-  <script src="./topic-reports-client.js?v=1.0.0"></script>
-  <script src="./topic-reports-page.js?v=1.0.0"></script>
+  <script src="./topic-reports-core.js?v=1.1.0"></script>
+  <script src="./topic-reports-client.js?v=1.1.0"></script>
+  <script src="./topic-reports-page.js?v=1.1.0"></script>
 </body>
 </html>

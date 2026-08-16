@@ -47,6 +47,7 @@ async function createDatabase() {
   await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7.sql'), 'utf8'));
   await db.exec(`update public.monthly_v7_workspaces set authority_state='NORMALIZED_ACTIVE',minimum_client_version=7`);
   await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-topic-reports.sql'), 'utf8'));
+  await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-topic-reports-v2.sql'), 'utf8'));
   return db;
 }
 
@@ -134,6 +135,7 @@ test('專題migration只新增topic authority並封鎖直接表存取', async ()
         to_regclass('public.monthly_v7_topic_report_snapshots') is not null as snapshots,
         to_regprocedure('public.monthly_v7_topic_create_report(text,uuid,text,uuid,uuid,text,date,jsonb)') is not null as create_rpc,
         to_regprocedure('public.monthly_v7_topic_save_report(text,uuid,text,uuid,uuid,uuid,uuid,bigint,bigint,text,date,text,jsonb)') is not null as save_rpc,
+        to_regprocedure('public.monthly_v7_topic_delete_report(text,uuid,text,uuid,uuid,bigint)') is not null as delete_rpc,
         not has_table_privilege('authenticated','public.monthly_v7_topic_reports','SELECT') as direct_select_blocked,
         not has_table_privilege('authenticated','public.monthly_v7_topic_reports','INSERT') as direct_insert_blocked,
         not has_function_privilege('anon','public.monthly_v7_topic_list_reports(text,uuid,text)','EXECUTE') as anon_rpc_blocked,
@@ -141,7 +143,7 @@ test('專題migration只新增topic authority並封鎖直接表存取', async ()
     `)).rows[0];
     assert.deepEqual(contracts, {
       reports: true, leases: true, operations: true, snapshots: true,
-      create_rpc: true, save_rpc: true, direct_select_blocked: true,
+      create_rpc: true, save_rpc: true, delete_rpc: true, direct_select_blocked: true,
       direct_insert_blocked: true, anon_rpc_blocked: true, authenticated_rpc_allowed: true
     });
   } finally {
@@ -274,6 +276,65 @@ test('專題建立保存與快照不改月報revision、payload、snapshot或cha
     `)).rows[0];
     assert.deepEqual(after, before);
     assert.equal((await db.query(`select count(*)::int count from public.monthly_v7_topic_report_snapshots`)).rows[0].count, 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test('只有Owner可軟刪除未被編輯的專題，重送冪等且清單與讀取立即隱藏', async () => {
+  const db = await createDatabase();
+  try {
+    const owner = await openAndLogin(db, '11111111-1111-4111-8111-111111111111', 'owner', 'owner-pass', 'tab-owner-delete');
+    const operator = await openAndLogin(db, '22222222-2222-4222-8222-222222222222', 'operator', 'operator-pass', 'tab-operator-delete');
+    const ownerWindow = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1';
+    const created = await createTopic(db, owner, ownerWindow, randomUUID(), '待刪專題');
+    await release(db, owner, created.report.id, ownerWindow, created.lease);
+
+    const operatorOp = randomUUID();
+    await setAuthUid(db, operator.uid);
+    const denied = result(await db.query(
+      `select public.monthly_v7_topic_delete_report($1,$2,$3,$4,$5,$6) result`,
+      ['workspace-test', operator.login.user_session_id, operator.clientSessionId,
+        operatorOp, created.report.id, 1]
+    ));
+    assert.equal(denied.ok, false);
+    assert.equal(denied.error, 'OWNER_REQUIRED');
+
+    const operationId = randomUUID();
+    await setAuthUid(db, owner.uid);
+    const first = result(await db.query(
+      `select public.monthly_v7_topic_delete_report($1,$2,$3,$4,$5,$6) result`,
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId,
+        operationId, created.report.id, 1]
+    ));
+    const replay = result(await db.query(
+      `select public.monthly_v7_topic_delete_report($1,$2,$3,$4,$5,$6) result`,
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId,
+        operationId, created.report.id, 1]
+    ));
+    assert.equal(first.ok, true);
+    assert.equal(first.deleted, true);
+    assert.deepEqual(replay, first);
+
+    const persisted = (await db.query(
+      `select deleted_at is not null deleted, revision, updated_by_user_id from public.monthly_v7_topic_reports where id=$1`,
+      [created.report.id]
+    )).rows[0];
+    assert.equal(persisted.deleted, true);
+    assert.equal(Number(persisted.revision), 2);
+    assert.equal(persisted.updated_by_user_id, owner.login.user.id);
+
+    const listed = result(await db.query(
+      `select public.monthly_v7_topic_list_reports($1,$2,$3) result`,
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId]
+    ));
+    assert.equal(listed.reports.some((entry) => entry.id === created.report.id), false);
+    const loaded = result(await db.query(
+      `select public.monthly_v7_topic_get_report($1,$2,$3,$4) result`,
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, created.report.id]
+    ));
+    assert.equal(loaded.ok, false);
+    assert.equal(loaded.error, 'ENTITY_NOT_FOUND');
   } finally {
     await db.close();
   }

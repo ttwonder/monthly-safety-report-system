@@ -6,7 +6,7 @@
   <title>專題報告編輯器</title>
   <meta name="color-scheme" content="light">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer">
-  <link rel="stylesheet" href="./topic-reports.css?v=1.0.0">
+  <link rel="stylesheet" href="./topic-reports.css?v=1.1.0">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
@@ -51,8 +51,24 @@
           <button type="button" class="topic-tool-btn" data-command="italic" title="斜體"><i class="fas fa-italic"></i>斜體</button>
           <button type="button" class="topic-tool-btn" data-command="underline" title="底線"><i class="fas fa-underline"></i>底線</button>
           <button type="button" class="topic-tool-btn" data-command="insertUnorderedList" title="項目符號"><i class="fas fa-list-ul"></i>項目符號</button>
-          <label class="topic-tool-btn" for="topicTextColor"><i class="fas fa-palette"></i>文字顏色</label>
-          <input id="topicTextColor" class="topic-color-input" type="color" value="#111827" aria-label="文字顏色">
+          <button type="button" class="topic-tool-btn" data-command="insertOrderedList" title="1、2、3自動編號"><i class="fas fa-list-ol"></i>自動編號</button>
+          <label class="topic-toolbar-label" for="topicFontSize">文字大小</label>
+          <select id="topicFontSize" class="topic-tool-select" aria-label="文字大小">
+            <option value="12">12px</option><option value="14">14px</option><option value="16" selected>16px</option>
+            <option value="18">18px</option><option value="20">20px</option><option value="24">24px</option>
+            <option value="28">28px</option><option value="32">32px</option><option value="40">40px</option>
+          </select>
+          <div id="topicTextColorPalette" class="topic-color-palette" role="group" aria-label="文字顏色">
+            <span class="topic-toolbar-label"><i class="fas fa-palette"></i>文字顏色</span>
+            <button type="button" class="topic-color-swatch" data-text-color="#111827" style="--swatch:#111827" aria-label="黑色"></button>
+            <button type="button" class="topic-color-swatch" data-text-color="#2563eb" style="--swatch:#2563eb" aria-label="藍色"></button>
+            <button type="button" class="topic-color-swatch" data-text-color="#047857" style="--swatch:#047857" aria-label="綠色"></button>
+            <button type="button" class="topic-color-swatch" data-text-color="#dc2626" style="--swatch:#dc2626" aria-label="紅色"></button>
+            <button type="button" class="topic-color-swatch" data-text-color="#ea580c" style="--swatch:#ea580c" aria-label="橘色"></button>
+            <button type="button" class="topic-color-swatch" data-text-color="#7c3aed" style="--swatch:#7c3aed" aria-label="紫色"></button>
+            <button type="button" class="topic-color-swatch" data-text-color="#db2777" style="--swatch:#db2777" aria-label="粉紅色"></button>
+            <button type="button" class="topic-color-swatch" data-text-color="#64748b" style="--swatch:#64748b" aria-label="灰色"></button>
+          </div>
           <select id="topicFontEn" class="topic-tool-select" aria-label="英數字體">
             <option value="Arial,Helvetica,sans-serif">英：Arial</option>
             <option value="Georgia,'Times New Roman',serif">英：Times</option>
@@ -87,6 +103,7 @@
           <button id="topicPrint" type="button" class="topic-btn"><i class="fas fa-file-pdf"></i>單份專題 PDF</button>
           <button id="topicReset" type="button" class="topic-btn topic-btn-warning"><i class="fas fa-rotate-left"></i>重置本機草稿</button>
           <button id="topicComplete" type="button" class="topic-btn topic-btn-success"><i class="fas fa-check-double"></i>完成編輯</button>
+          <button id="topicDiscardExit" type="button" class="topic-btn topic-btn-danger"><i class="fas fa-door-open"></i>不保存並退出</button>
         </div>
       </div>
     </section>
@@ -117,8 +134,35 @@
     <footer class="topic-editor-footer no-print">
       <button type="button" class="topic-btn topic-btn-primary" data-footer-action="save"><i class="fas fa-cloud-arrow-up"></i>保存</button>
       <button type="button" class="topic-btn topic-btn-success" data-footer-action="complete"><i class="fas fa-check-double"></i>完成編輯並釋放</button>
+      <button type="button" class="topic-btn topic-btn-danger" data-footer-action="discard"><i class="fas fa-door-open"></i>不保存並退出</button>
     </footer>
   </main>
+
+  <div id="topicObjectToolbar" class="topic-object-toolbar no-print" role="toolbar" aria-label="插入內容大小與刪除" hidden>
+    <strong>大小</strong>
+    <button type="button" data-topic-object-width="20">20%</button>
+    <button type="button" data-topic-object-width="25">25%</button>
+    <button type="button" data-topic-object-width="30">30%</button>
+    <button type="button" data-topic-object-width="45">45%</button>
+    <button type="button" data-topic-object-width="70">70%</button>
+    <button type="button" data-topic-object-width="100">100%</button>
+    <span id="topicTrendControls" class="topic-trend-controls" hidden>
+      <span class="topic-object-separator" aria-hidden="true"></span>
+      <strong>指標</strong>
+      <button type="button" data-topic-trend-action="series-remove" aria-label="減少指標">−</button>
+      <button type="button" data-topic-trend-action="series-add" aria-label="增加指標">＋</button>
+      <strong>週期</strong>
+      <button type="button" data-topic-trend-action="period-remove" aria-label="減少週期">−</button>
+      <button type="button" data-topic-trend-action="period-add" aria-label="增加週期">＋</button>
+      <label for="topicTrendHeight"><strong>圖高</strong></label>
+      <select id="topicTrendHeight" class="topic-object-select" data-topic-trend-height aria-label="趨勢圖高度">
+        <option value="160">160px</option><option value="220" selected>220px</option><option value="280">280px</option>
+        <option value="340">340px</option><option value="420">420px</option><option value="500">500px</option>
+      </select>
+    </span>
+    <span class="topic-object-separator" aria-hidden="true"></span>
+    <button type="button" class="topic-object-delete" data-topic-object-delete><i class="fas fa-trash-alt"></i>刪除</button>
+  </div>
 
   <section id="topicPrintArea" class="topic-print-area" aria-hidden="true">
     <div class="topic-print-header">
@@ -135,8 +179,8 @@
 
   <script src="./supabase-config.js?v=7.1.0"></script>
   <script src="./vendor/supabase-2.112.2.js?v=7.1.0"></script>
-  <script src="./topic-reports-core.js?v=1.0.0"></script>
-  <script src="./topic-reports-client.js?v=1.0.0"></script>
-  <script src="./topic-report-editor.js?v=1.0.0"></script>
+  <script src="./topic-reports-core.js?v=1.1.0"></script>
+  <script src="./topic-reports-client.js?v=1.1.0"></script>
+  <script src="./topic-report-editor.js?v=1.1.0"></script>
 </body>
 </html>

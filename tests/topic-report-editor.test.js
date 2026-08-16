@@ -31,6 +31,29 @@ test('所有進階模塊模板不含全域id且包含可辨識class', () => {
   }
 });
 
+test('趨勢與動態卡片具備月報同級資料結構及固定圖表容器', () => {
+  const trend = editor.buildBlockHtml('trend');
+  assert.match(trend, /topic-chart-canvas-area/);
+  assert.match(trend, /data-topic-chart-height=["']220["']/);
+  assert.ok((trend.match(/<th\b/g) || []).length >= 3, '至少週期加兩個指標');
+  assert.ok((trend.match(/<tr\b/g) || []).length >= 4, '至少表頭加三個週期');
+
+  const kpi = editor.buildBlockHtml('kpi');
+  ['topic-kpi-current-marker', 'topic-kpi-target-marker', 'topic-kpi-avg-marker', 'topic-metric-avg'].forEach((name) => assert.match(kpi, new RegExp(name)));
+  assert.match(editor.buildBlockHtml('progress'), /topic-progress-marker/);
+  const zone = editor.buildBlockHtml('zone');
+  ['topic-zone-limit1', 'topic-zone-limit-mid', 'topic-zone-limit2', 'topic-zone-marker'].forEach((name) => assert.match(zone, new RegExp(name)));
+  const indicator = editor.buildBlockHtml('indicator-blue');
+  assert.ok((indicator.match(/<tr\b/g) || []).length >= 4, '指標卡應有標題與三行資料');
+});
+
+test('趨勢高度限制在固定安全範圍', () => {
+  assert.equal(editor.normalizeChartHeight(100), 160);
+  assert.equal(editor.normalizeChartHeight(220), 220);
+  assert.equal(editor.normalizeChartHeight(999), 500);
+  assert.equal(editor.normalizeChartHeight('bad'), 220);
+});
+
 test('Excel rows轉回topic內容時保留項次順序、版型與PDF設定', () => {
   const base = core.createBlankTopicContent({ title: 'Excel專題', reportDate: '2026-08-16' });
   const content = editor.workbookRowsToContent([
@@ -80,4 +103,13 @@ test('指標百分比處理除零、負數及超界值', () => {
   assert.equal(editor.clampedPercent(120, 0, 100), 100);
   assert.equal(editor.clampedPercent(5, 5, 5), 0);
   assert.equal(editor.clampedPercent('bad', 0, 100), 0);
+});
+
+test('插入內容百分比只接受月報同級預設值', () => {
+  for (const value of [20, 25, 30, 45, 70, 100]) {
+    assert.equal(editor.normalizeObjectWidth(`${value}%`), `${value}%`);
+    assert.equal(editor.normalizeObjectWidth(value), `${value}%`);
+  }
+  assert.equal(editor.normalizeObjectWidth('999%'), '100%');
+  assert.equal(editor.normalizeObjectWidth('javascript:1'), '100%');
 });

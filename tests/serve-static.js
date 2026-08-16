@@ -188,6 +188,7 @@ function rpc(name, p) {
     if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
     const reports = state.topicReports
       .slice()
+      .filter((report) => !report.deletedAt)
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)) || b.systemNumber.localeCompare(a.systemNumber))
       .map((report) => {
         const lease = state.topicLeases.get(report.id);
@@ -214,7 +215,7 @@ function rpc(name, p) {
   if (name === 'monthly_v7_topic_get_report') {
     const actor = topicActor(p);
     if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
-    const report = state.topicReports.find((entry) => entry.id === p.p_report_id);
+    const report = state.topicReports.find((entry) => entry.id === p.p_report_id && !entry.deletedAt);
     if (!report) return { ok: false, error: 'ENTITY_NOT_FOUND' };
     const lease = state.topicLeases.get(report.id);
     const active = Boolean(lease && !lease.released && lease.expiresAt > now());
@@ -256,6 +257,7 @@ function rpc(name, p) {
       status: 'draft',
       createdAt: timestamp,
       updatedAt: timestamp,
+      deletedAt: null,
       createdByUserId: actor.id,
       updatedByUserId: actor.id
     };
@@ -284,7 +286,7 @@ function rpc(name, p) {
   if (name === 'monthly_v7_topic_acquire_report_lease') {
     const actor = topicActor(p);
     if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
-    const report = state.topicReports.find((entry) => entry.id === p.p_report_id);
+    const report = state.topicReports.find((entry) => entry.id === p.p_report_id && !entry.deletedAt);
     if (!report) return { ok: false, error: 'ENTITY_NOT_FOUND' };
     const old = state.topicLeases.get(report.id);
     const active = Boolean(old && !old.released && old.expiresAt > now());
@@ -343,6 +345,50 @@ function rpc(name, p) {
       leaseId: lease.leaseId, fencingToken: lease.fencingToken
     };
   }
+  if (name === 'monthly_v7_topic_delete_report') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const requestHash = canonical({
+      command: 'delete_report', reportId: p.p_report_id,
+      expectedRevision: Number(p.p_expected_revision)
+    });
+    const replay = replayTopicOperation(p.p_operation_id, actor.id, requestHash);
+    if (replay) return replay;
+    if (actor.role !== 'owner') {
+      return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'OWNER_REQUIRED' });
+    }
+    const report = state.topicReports.find((entry) => entry.id === p.p_report_id && !entry.deletedAt);
+    if (!report) {
+      return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'ENTITY_NOT_FOUND' });
+    }
+    if (report.revision !== Number(p.p_expected_revision)) {
+      return storeTopicOperation(p.p_operation_id, actor.id, requestHash, {
+        ok: false, error: 'REVISION_CONFLICT', currentRevision: report.revision
+      });
+    }
+    const lease = state.topicLeases.get(report.id);
+    const active = Boolean(lease && !lease.released && lease.expiresAt > now());
+    if (active) {
+      const holder = state.users.find((user) => user.id === lease.holderUserId);
+      return storeTopicOperation(p.p_operation_id, actor.id, requestHash, {
+        ok: false, error: 'LEASE_HELD', holderDisplayName: holder && holder.displayName,
+        expiresAt: new Date(lease.expiresAt).toISOString()
+      });
+    }
+    report.deletedAt = new Date().toISOString();
+    report.revision += 1;
+    report.updatedAt = report.deletedAt;
+    report.updatedByUserId = actor.id;
+    if (lease) {
+      lease.released = true;
+      lease.expiresAt = now() - 1;
+    }
+    return storeTopicOperation(p.p_operation_id, actor.id, requestHash, {
+      ok: true, deleted: true, reportId: report.id, systemNumber: report.systemNumber,
+      title: report.title, revision: report.revision, deletedAt: report.deletedAt,
+      operationId: p.p_operation_id
+    });
+  }
   if (name === 'monthly_v7_topic_save_report') {
     const actor = topicActor(p);
     if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
@@ -354,7 +400,7 @@ function rpc(name, p) {
     });
     const replay = replayTopicOperation(p.p_operation_id, actor.id, requestHash);
     if (replay) return replay;
-    const report = state.topicReports.find((entry) => entry.id === p.p_report_id);
+    const report = state.topicReports.find((entry) => entry.id === p.p_report_id && !entry.deletedAt);
     const lease = state.topicLeases.get(p.p_report_id);
     if (!report) return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'ENTITY_NOT_FOUND' });
     if (!topicLeaseMatches(lease, actor, p)) {
@@ -389,7 +435,7 @@ function rpc(name, p) {
     });
     const replay = replayTopicOperation(p.p_operation_id, actor.id, requestHash);
     if (replay) return replay;
-    const report = state.topicReports.find((entry) => entry.id === p.p_report_id);
+    const report = state.topicReports.find((entry) => entry.id === p.p_report_id && !entry.deletedAt);
     if (!report) return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'ENTITY_NOT_FOUND' });
     if (report.revision !== Number(p.p_expected_revision)) {
       return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'REVISION_CONFLICT', currentRevision: report.revision });

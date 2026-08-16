@@ -11,7 +11,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi) {
   'use strict';
 
-  const BUILD_ID = '1.0.0';
+  const BUILD_ID = '1.1.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -69,6 +69,7 @@
       if (!raw || /url\s*\(|expression\s*\(|javascript:|vbscript:|@import|behavior\s*:|-moz-binding/i.test(raw)) return;
       if (property === '--card-color' && /^#[0-9a-f]{3,8}$/i.test(raw)) allowed.push(`${property}:${raw}`);
       if (property === 'width' && /^(?:100|[0-9]{1,2}(?:\.[0-9]+)?)%$/.test(raw)) allowed.push(`${property}:${raw}`);
+      if (property === 'font-size' && /^(?:[89]|[1-6][0-9]|7[0-2])px$/.test(raw)) allowed.push(`${property}:${raw}`);
       if (property === 'color' && /^(?:#[0-9a-f]{3,8}|rgb\([0-9 ,.%]+\)|[a-z]+)$/i.test(raw)) allowed.push(`${property}:${raw}`);
       if (property === 'text-align' && /^(left|right|center|justify)$/.test(raw)) allowed.push(`${property}:${raw}`);
     });
@@ -138,7 +139,7 @@
   }
 
   function sanitizeStoredHtml(value) {
-    const source = String(value == null ? '' : value);
+    const source = String(value == null ? '' : value).replace(/\u200b/g, '');
     if (!root.document || typeof root.document.createElement !== 'function') return escapeHtml(source);
     return sanitizeTemplate(source).innerHTML;
   }
@@ -157,6 +158,16 @@
     const max = Number(maximum);
     if (![value, min, max].every(Number.isFinite) || max <= min) return 0;
     return Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+  }
+
+  const OBJECT_WIDTHS = Object.freeze([20, 25, 30, 45, 70, 100]);
+  function normalizeObjectWidth(value) {
+    const numeric = Number(String(value == null ? '' : value).replace('%', '').trim());
+    return OBJECT_WIDTHS.includes(numeric) ? `${numeric}%` : '100%';
+  }
+  function normalizeChartHeight(value) {
+    const numeric = Number.parseInt(value, 10);
+    return Number.isFinite(numeric) ? Math.max(160, Math.min(500, numeric)) : 220;
   }
 
   function isAllowedImage(file) {
@@ -186,13 +197,13 @@
 
   function buildBlockHtml(type) {
     const templates = {
-      highlight: '<span class="topic-inline-block topic-highlight" data-topic-block="highlight" data-topic-editable="true" contenteditable="true">重要數值 100</span>',
-      'indicator-blue': '<div class="topic-inline-block topic-indicator-card" data-topic-block="indicator" style="--card-color:#2563eb" contenteditable="false"><strong data-topic-editable="true" contenteditable="true">指標名稱</strong><div><span data-topic-editable="true" contenteditable="true">目前值 88</span>／<span data-topic-editable="true" contenteditable="true">目標值 100</span></div></div>',
-      'indicator-orange': '<div class="topic-inline-block topic-indicator-card" data-topic-block="indicator" style="--card-color:#f97316" contenteditable="false"><strong data-topic-editable="true" contenteditable="true">指標名稱</strong><div><span data-topic-editable="true" contenteditable="true">目前值 88</span>／<span data-topic-editable="true" contenteditable="true">目標值 100</span></div></div>',
-      kpi: '<div class="topic-inline-block topic-kpi-card" data-topic-block="kpi" contenteditable="false"><strong data-topic-editable="true" contenteditable="true">KPI 指標</strong><div class="topic-kpi-track"><div class="topic-kpi-fill" style="width:60%"></div></div><div class="topic-metric-row"><span>最小 <b class="topic-metric-min" data-topic-editable="true" contenteditable="true">0</b></span><span>目前 <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">60</b></span><span>目標 <b class="topic-metric-max" data-topic-editable="true" contenteditable="true">100</b></span></div></div>',
-      progress: '<div class="topic-inline-block topic-progress-card" data-topic-block="progress" contenteditable="false"><strong data-topic-editable="true" contenteditable="true">工作進度</strong><div class="topic-progress-track"><div class="topic-progress-fill" style="width:50%"></div></div><div class="topic-metric-row"><span>完成率</span><b class="topic-metric-current" data-topic-editable="true" contenteditable="true">50</b><span>%</span></div></div>',
-      zone: '<div class="topic-inline-block topic-zone-card" data-topic-block="zone" contenteditable="false"><strong data-topic-editable="true" contenteditable="true">狀態區間</strong><div class="topic-zone-track"></div><div class="topic-metric-row"><span>最小 <b class="topic-metric-min" data-topic-editable="true" contenteditable="true">0</b></span><span>目前 <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">2.4</b></span><span>最大 <b class="topic-metric-max" data-topic-editable="true" contenteditable="true">5</b></span></div></div>',
-      trend: '<div class="topic-trend-card" data-topic-block="trend"><strong data-topic-editable="true" contenteditable="true">趨勢圖</strong><table class="topic-data-table topic-chart-data"><thead><tr><th data-topic-editable="true" contenteditable="true">期間</th><th data-topic-editable="true" contenteditable="true">數值</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">1月</td><td data-topic-editable="true" contenteditable="true">12</td></tr><tr><td data-topic-editable="true" contenteditable="true">2月</td><td data-topic-editable="true" contenteditable="true">18</td></tr><tr><td data-topic-editable="true" contenteditable="true">3月</td><td data-topic-editable="true" contenteditable="true">15</td></tr></tbody></table><canvas class="topic-chart-canvas" contenteditable="false" aria-label="趨勢圖"></canvas></div>'
+      highlight: '<span class="topic-inline-block topic-highlight" data-topic-block="highlight" style="width:25%" data-topic-editable="true" contenteditable="true">重要數值 100</span>',
+      'indicator-blue': '<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#2563eb" contenteditable="false"><thead><tr><th class="topic-indicator-title" colspan="2" data-topic-editable="true" contenteditable="true">指標名稱</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">檢查次數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">檢查缺失數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">平均缺失數</td><td data-topic-editable="true" contenteditable="true">0.0</td></tr></tbody></table>',
+      'indicator-orange': '<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#f97316" contenteditable="false"><thead><tr><th class="topic-indicator-title" colspan="2" data-topic-editable="true" contenteditable="true">指標名稱</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">檢查次數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">檢查缺失數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">平均缺失數</td><td data-topic-editable="true" contenteditable="true">0.0</td></tr></tbody></table>',
+      kpi: '<div class="topic-inline-block topic-kpi-card" data-topic-block="kpi" data-topic-show-avg="true" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">KPI 指標</strong><div class="topic-card-values"><span class="topic-kpi-avg-group"><span data-topic-editable="true" contenteditable="true">Avg</span> <b class="topic-metric-avg" data-topic-editable="true" contenteditable="true">65</b></span><span><span data-topic-editable="true" contenteditable="true">現值</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">50</b></span><span><span data-topic-editable="true" contenteditable="true">KPI</span> <b class="topic-metric-target" data-topic-editable="true" contenteditable="true">80</b></span><span class="topic-kpi-avg-toggle" data-topic-kpi-toggle="true" role="button" aria-label="顯示或隱藏Avg標線" contenteditable="false">Avg◉</span></div></div><div class="topic-kpi-track"><span class="topic-kpi-marker topic-kpi-target-marker"></span><span class="topic-kpi-marker topic-kpi-current-marker"></span><span class="topic-kpi-marker topic-kpi-avg-marker topic-kpi-avg-group"></span></div><div class="topic-card-boundaries"><span class="topic-metric-min" data-topic-editable="true" contenteditable="true">0</span><span class="topic-metric-max" data-topic-editable="true" contenteditable="true">100</span></div></div>',
+      progress: '<div class="topic-inline-block topic-progress-card" data-topic-block="progress" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">項目名稱</strong><span><span data-topic-editable="true" contenteditable="true">完成度</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">50</b>%</span></div><div class="topic-progress-track"><div class="topic-progress-fill" style="width:50%"></div><span class="topic-progress-marker"></span></div></div>',
+      zone: '<div class="topic-inline-block topic-zone-card" data-topic-block="zone" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">評估指標</strong><span><span data-topic-editable="true" contenteditable="true">現值</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">1.55</b></span></div><div class="topic-zone-upper"><span class="topic-zone-limit-mid" data-topic-editable="true" contenteditable="true">2.45</span></div><div class="topic-zone-track"><span class="topic-zone-marker"></span></div><div class="topic-zone-boundaries"><span class="topic-metric-min" data-topic-editable="true" contenteditable="true">0</span><span class="topic-zone-limit1" data-topic-editable="true" contenteditable="true">1.45</span><span class="topic-zone-limit2" data-topic-editable="true" contenteditable="true">3.45</span><span class="topic-metric-max" data-topic-editable="true" contenteditable="true">5</span></div></div>',
+      trend: '<div class="topic-trend-card" data-topic-block="trend" style="width:45%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">多維度趨勢比較圖</strong></div><div class="topic-chart-layout"><div class="topic-chart-table-area"><table class="topic-data-table topic-chart-data" contenteditable="false"><thead><tr><th data-topic-editable="true" contenteditable="true">週期</th><th data-topic-editable="true" contenteditable="true">指標 1</th><th data-topic-editable="true" contenteditable="true">指標 2</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">Q1</td><td data-topic-editable="true" contenteditable="true">10</td><td data-topic-editable="true" contenteditable="true">15</td></tr><tr><td data-topic-editable="true" contenteditable="true">Q2</td><td data-topic-editable="true" contenteditable="true">20</td><td data-topic-editable="true" contenteditable="true">18</td></tr><tr><td data-topic-editable="true" contenteditable="true">Q3</td><td data-topic-editable="true" contenteditable="true">15</td><td data-topic-editable="true" contenteditable="true">22</td></tr></tbody></table></div><div class="topic-chart-canvas-area" data-topic-chart-height="220"><canvas class="topic-chart-canvas" contenteditable="false" aria-label="趨勢圖"></canvas></div></div></div>'
     };
     return templates[type] || '';
   }
@@ -273,6 +284,7 @@
     charts: new Map(),
     lastRange: null,
     activeEditor: null,
+    activeObject: null,
     pendingFileModuleId: '',
     broadcastChannel: null,
     released: false
@@ -331,6 +343,8 @@
       SITE_SESSION_INVALID: '進站狀態已失效，請回月報系統重新進站。',
       AUTHORITY_NOT_ACTIVE: '雲端權威模式尚未啟用，已停止專題讀寫。',
       RPC_TIMEOUT: '保存結果尚未確認；內容已保留，請再次按保存確認同一operation。',
+      TOPIC_PENDING_SAVE_UNCERTAIN: '上一筆保存結果尚未確認，不能丟棄草稿或釋放編輯權；請先按保存確認。',
+      TOPIC_RELEASE_NOT_CONFIRMED: '編輯權釋放尚未獲得確認；草稿仍保留，請稍後重試。',
       TOPIC_PENDING_OPERATION_MISMATCH: '上一筆保存結果尚未確認；請先還原到原內容並重試保存。',
       TOPIC_EDITOR_REPORT_ID_INVALID: '專題報告網址缺少有效report ID。',
       TOPIC_SAVE_SCOPE_INVALID: '保存範圍不完整，已停止寫入。'
@@ -479,6 +493,7 @@
   }
 
   function renderModules(content) {
+    hideObjectToolbar();
     state.charts.forEach((chart) => { try { chart.destroy(); } catch (_error) { /* noop */ } });
     state.charts.clear();
     const rootNode = $('topicModules');
@@ -554,7 +569,10 @@
         createButton('附件', 'fas fa-paperclip', 'attachment', module.id),
         createButton('刪除', 'fas fa-trash', 'delete', module.id)
       );
-      article.append(heading, contentCell, actions);
+      const topbar = root.document.createElement('div');
+      topbar.className = 'topic-module-topbar';
+      topbar.append(heading, actions);
+      article.append(topbar, contentCell);
       rootNode.appendChild(article);
     });
     updateDynamic(rootNode);
@@ -581,21 +599,31 @@
   }
   function updateControls() {
     const editable = state.mode === 'edit' && !state.saving && !state.uncertain && !state.releaseUncertain;
+    const releaseRecord = state.releaseUncertain ? readReleaseCheck() : null;
+    const releaseAction = releaseRecord && releaseRecord.action || 'complete';
     const mutations = root.document.querySelectorAll(
-      '[data-command],[data-insert],#topicAddModule,#topicExcelImport,#topicReset,#topicComplete,' +
+      '[data-command],[data-insert],[data-text-color],#topicFontSize,[data-topic-object-width],[data-topic-object-delete],[data-topic-trend-action],[data-topic-trend-height],#topicAddModule,#topicExcelImport,#topicReset,#topicComplete,#topicDiscardExit,' +
       '#topicFontEn,#topicFontZh,#topicTextColor,[data-module-action],[data-module-layout],[data-module-pdf],[data-module-pdf-order]'
     );
     mutations.forEach((control) => { control.disabled = !editable; });
     $('topicSave').disabled = state.saving || state.releaseUncertain || (!state.uncertain && state.mode !== 'edit');
-    $('topicComplete').disabled = state.saving || state.uncertain || (!state.releaseUncertain && state.mode !== 'edit');
+    $('topicComplete').disabled = state.saving || state.uncertain
+      || (state.releaseUncertain ? releaseAction !== 'complete' : state.mode !== 'edit');
+    $('topicDiscardExit').disabled = state.saving || state.uncertain
+      || (state.releaseUncertain ? releaseAction !== 'discard' : state.mode !== 'edit');
     $('topicSync').disabled = state.saving || state.releaseUncertain;
     $('topicPrint').disabled = state.saving;
     $('topicExcelExport').disabled = state.saving;
     root.document.querySelectorAll('[data-footer-action]').forEach((control) => {
       const action = control.dataset.footerAction;
-      control.disabled = state.saving || state.uncertain
-        || (action === 'save' ? (state.releaseUncertain || state.mode !== 'edit')
-          : (!state.releaseUncertain && state.mode !== 'edit'));
+      if (action === 'save') control.disabled = state.saving || state.uncertain || state.releaseUncertain || state.mode !== 'edit';
+      else if (action === 'discard') {
+        control.disabled = state.saving || state.uncertain
+          || (state.releaseUncertain ? releaseAction !== 'discard' : state.mode !== 'edit');
+      } else {
+        control.disabled = state.saving || state.uncertain
+          || (state.releaseUncertain ? releaseAction !== 'complete' : state.mode !== 'edit');
+      }
     });
     $('topicReportTitle').readOnly = !editable;
     $('topicReportDate').readOnly = !editable;
@@ -607,6 +635,7 @@
   function setMode(mode, message, tone = '') {
     state.mode = mode === 'edit' ? 'edit' : 'readonly';
     if (state.mode !== 'edit') {
+      hideObjectToolbar();
       root.clearInterval(state.heartbeatTimer);
       state.heartbeatTimer = null;
     }
@@ -657,13 +686,14 @@
   function releaseCheckKey() {
     return `topic:v1:release-check:${state.reportId}:${state.identity.user.id}:${state.editorWindowId}`;
   }
-  function writeReleaseCheck(report, lease) {
+  function writeReleaseCheck(report, lease, action = 'complete') {
     root.sessionStorage.setItem(releaseCheckKey(), JSON.stringify({
       version: 1,
       domain: 'topic',
       reportId: state.reportId,
       actorUserId: state.identity.user.id,
       editorWindowId: state.editorWindowId,
+      action: action === 'discard' ? 'discard' : 'complete',
       report: clone(report),
       lease: clone(lease)
     }));
@@ -675,6 +705,7 @@
     const valid = saved && saved.version === 1 && saved.domain === 'topic'
       && saved.reportId === state.reportId && saved.actorUserId === state.identity.user.id
       && saved.editorWindowId === state.editorWindowId
+      && (!saved.action || ['complete', 'discard'].includes(saved.action))
       && saved.report && saved.report.id === state.reportId
       && saved.lease && core.UUID_PATTERN.test(String(saved.lease.leaseId || ''))
       && Number.isInteger(Number(saved.lease.fencingToken));
@@ -760,16 +791,169 @@
     }
     markDirty();
     updateDynamic(editor);
+    if (last && last.nodeType === 1) {
+      const insertedObject = objectFromTarget(last);
+      if (insertedObject) selectObject(insertedObject);
+    }
   }
   function runCommand(command, value) {
-    if (state.mode !== 'edit' || !ensureSelection()) return;
+    if (state.mode !== 'edit') return;
+    const editor = ensureSelection();
+    if (!editor) return;
+    if (command === 'foreColor') root.document.execCommand('styleWithCSS', false, true);
     root.document.execCommand(command, false, value == null ? null : value);
+    editor.querySelectorAll('font').forEach((font) => {
+      const span = root.document.createElement('span');
+      const color = String(font.getAttribute('color') || font.style.color || '');
+      if (/^(?:#[0-9a-f]{3,8}|rgb\([0-9 ,.%]+\)|[a-z]+)$/i.test(color)) span.style.color = color;
+      span.append(...Array.from(font.childNodes));
+      font.replaceWith(span);
+    });
     rememberSelection(); markDirty();
+  }
+
+  function applyFontSize(value) {
+    const size = Number(value);
+    if (![12, 14, 16, 18, 20, 24, 28, 32, 40].includes(size) || state.mode !== 'edit') return;
+    const editor = ensureSelection();
+    const selection = root.getSelection();
+    if (!editor || !selection || !selection.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    const span = root.document.createElement('span');
+    span.style.fontSize = `${size}px`;
+    if (range.collapsed) {
+      const placeholder = root.document.createTextNode('\u200b');
+      span.appendChild(placeholder);
+      range.insertNode(span);
+      range.setStart(placeholder, 1);
+      range.collapse(true);
+    } else {
+      span.appendChild(range.extractContents());
+      range.insertNode(span);
+      range.selectNodeContents(span);
+    }
+    selection.removeAllRanges();
+    selection.addRange(range);
+    state.lastRange = range.cloneRange();
+    state.activeEditor = editor;
+    markDirty();
+  }
+
+  function objectFromTarget(target) {
+    if (!target || !target.closest) return null;
+    return target.closest('[data-topic-block]')
+      || target.closest('.topic-inline-image,.topic-data-table');
+  }
+  function hideObjectToolbar() {
+    if (state.activeObject && state.activeObject.classList) state.activeObject.classList.remove('topic-object-selected');
+    state.activeObject = null;
+    const toolbar = $('topicObjectToolbar');
+    if (toolbar) toolbar.hidden = true;
+    if ($('topicTrendControls')) $('topicTrendControls').hidden = true;
+  }
+  function positionObjectToolbar() {
+    const object = state.activeObject;
+    const toolbar = $('topicObjectToolbar');
+    if (!object || !toolbar || !root.document.contains(object)) { hideObjectToolbar(); return; }
+    toolbar.hidden = false;
+    const rect = object.getBoundingClientRect();
+    const gap = 8;
+    let top = rect.top - toolbar.offsetHeight - gap;
+    if (top < gap) top = Math.min(root.innerHeight - toolbar.offsetHeight - gap, rect.bottom + gap);
+    const left = Math.max(gap, Math.min(root.innerWidth - toolbar.offsetWidth - gap, rect.left));
+    toolbar.style.top = `${Math.max(gap, top)}px`;
+    toolbar.style.left = `${left}px`;
+    const current = normalizeObjectWidth(object.style.width || '100%');
+    toolbar.querySelectorAll('[data-topic-object-width]').forEach((button) => {
+      button.setAttribute('aria-pressed', String(`${button.dataset.topicObjectWidth}%` === current));
+    });
+  }
+  function selectObject(object) {
+    if (state.mode !== 'edit' || !object || !object.closest('.topic-editable')) return;
+    if (state.activeObject && state.activeObject !== object) state.activeObject.classList.remove('topic-object-selected');
+    state.activeObject = object;
+    object.classList.add('topic-object-selected');
+    const isTrend = object.classList.contains('topic-trend-card');
+    $('topicTrendControls').hidden = !isTrend;
+    if (isTrend) {
+      const area = object.querySelector('.topic-chart-canvas-area');
+      $('topicTrendHeight').value = String(normalizeChartHeight(area && area.dataset.topicChartHeight));
+    }
+    $('topicObjectToolbar').hidden = false;
+    root.requestAnimationFrame(positionObjectToolbar);
+  }
+  function setObjectWidth(value) {
+    if (state.mode !== 'edit' || !state.activeObject || !root.document.contains(state.activeObject)) return;
+    state.activeObject.style.width = normalizeObjectWidth(value);
+    markDirty();
+    updateDynamic(state.activeObject.closest('.topic-module') || $('topicModules'));
+    positionObjectToolbar();
+  }
+  function deleteActiveObject() {
+    const object = state.activeObject;
+    if (state.mode !== 'edit' || !object || !root.document.contains(object)) return;
+    if (!root.confirm('確定刪除這個插入內容？')) return;
+    const module = object.closest('.topic-module');
+    object.querySelectorAll?.('canvas.topic-chart-canvas').forEach((canvas) => {
+      const chart = state.charts.get(canvas);
+      if (chart) { try { chart.destroy(); } catch (_error) { /* noop */ } state.charts.delete(canvas); }
+    });
+    object.remove();
+    hideObjectToolbar();
+    markDirty();
+    updateDynamic(module || $('topicModules'));
+  }
+  function setTrendHeight(value) {
+    const card = state.activeObject;
+    if (!card || !card.classList.contains('topic-trend-card')) return;
+    const area = card.querySelector('.topic-chart-canvas-area');
+    if (!area) return;
+    const height = normalizeChartHeight(value);
+    area.dataset.topicChartHeight = String(height);
+    area.style.height = `${height}px`;
+    $('topicTrendHeight').value = String(height);
+    markDirty();
+    updateDynamic(card);
+    positionObjectToolbar();
+  }
+  function createTrendCell(tag, text) {
+    const cell = root.document.createElement(tag);
+    cell.dataset.topicEditable = 'true';
+    cell.contentEditable = state.mode === 'edit' ? 'true' : 'false';
+    cell.textContent = text;
+    return cell;
+  }
+  function trendAction(action) {
+    const card = state.activeObject;
+    const table = card && card.classList.contains('topic-trend-card') && card.querySelector('.topic-chart-data');
+    if (!table || state.mode !== 'edit') return;
+    const header = table.tHead && table.tHead.rows[0];
+    const body = table.tBodies[0] || table.createTBody();
+    if (!header) return;
+    if (action === 'series-add') {
+      if (header.cells.length >= 6) { toast('最多支援5個指標。', 'warning'); return; }
+      header.appendChild(createTrendCell('th', `指標 ${header.cells.length}`));
+      Array.from(body.rows).forEach((row) => row.appendChild(createTrendCell('td', '0')));
+    } else if (action === 'series-remove') {
+      if (header.cells.length <= 2) { toast('至少保留1個指標。', 'warning'); return; }
+      Array.from(table.rows).forEach((row) => row.deleteCell(-1));
+    } else if (action === 'period-add') {
+      if (body.rows.length >= 24) { toast('最多支援24個週期。', 'warning'); return; }
+      const row = body.insertRow();
+      row.appendChild(createTrendCell('td', `新週期 ${body.rows.length}`));
+      for (let index = 1; index < header.cells.length; index += 1) row.appendChild(createTrendCell('td', '0'));
+    } else if (action === 'period-remove') {
+      if (body.rows.length <= 1) { toast('至少保留1個週期。', 'warning'); return; }
+      body.deleteRow(-1);
+    } else return;
+    markDirty();
+    updateDynamic(card);
+    selectObject(card);
   }
   function makeTable() {
     const rows = Math.max(1, Math.min(20, Number(root.prompt('表格列數', '3')) || 3));
     const columns = Math.max(1, Math.min(10, Number(root.prompt('表格欄數', '3')) || 3));
-    let html = '<table class="topic-data-table"><tbody>';
+    let html = '<table class="topic-data-table" style="width:100%"><tbody>';
     for (let row = 0; row < rows; row += 1) {
       html += '<tr>';
       for (let column = 0; column < columns; column += 1) {
@@ -781,48 +965,131 @@
     return `${html}</tbody></table>`;
   }
 
+  function numericText(container, selector, fallback) {
+    const value = Number(String(container.querySelector(selector)?.textContent || '').replace(/[^0-9.-]/g, ''));
+    return Number.isFinite(value) ? value : fallback;
+  }
   function updateDynamic(container) {
     const scope = container || $('topicModules');
     if (!scope) return;
     scope.querySelectorAll('.topic-kpi-card').forEach((card) => {
-      const min = Number(card.querySelector('.topic-metric-min')?.textContent || 0);
-      const current = Number(card.querySelector('.topic-metric-current')?.textContent || 0);
-      const max = Number(card.querySelector('.topic-metric-max')?.textContent || 100);
-      const fill = card.querySelector('.topic-kpi-fill');
-      if (fill) fill.style.width = `${clampedPercent(current, min, max)}%`;
+      const min = numericText(card, '.topic-metric-min', 0);
+      const max = numericText(card, '.topic-metric-max', 100);
+      const current = numericText(card, '.topic-metric-current', min);
+      const target = numericText(card, '.topic-metric-target', max);
+      const average = numericText(card, '.topic-metric-avg', min);
+      const positions = [
+        ['.topic-kpi-current-marker', current],
+        ['.topic-kpi-target-marker', target],
+        ['.topic-kpi-avg-marker', average]
+      ];
+      positions.forEach(([selector, value]) => {
+        const marker = card.querySelector(selector);
+        if (marker) marker.style.left = `${clampedPercent(value, min, max)}%`;
+      });
     });
     scope.querySelectorAll('.topic-progress-card').forEach((card) => {
-      const current = Number(card.querySelector('.topic-metric-current')?.textContent || 0);
+      const current = Math.max(0, Math.min(100, numericText(card, '.topic-metric-current', 0)));
       const fill = card.querySelector('.topic-progress-fill');
-      if (fill) fill.style.width = `${Math.max(0, Math.min(100, Number.isFinite(current) ? current : 0))}%`;
+      const marker = card.querySelector('.topic-progress-marker');
+      if (fill) fill.style.width = `${current}%`;
+      if (marker) marker.style.left = `${current}%`;
+    });
+    scope.querySelectorAll('.topic-zone-card').forEach((card) => {
+      const min = numericText(card, '.topic-metric-min', 0);
+      const max = numericText(card, '.topic-metric-max', 5);
+      const limit1 = numericText(card, '.topic-zone-limit1', 1.45);
+      const limitMid = numericText(card, '.topic-zone-limit-mid', 2.45);
+      const limit2 = numericText(card, '.topic-zone-limit2', 3.45);
+      const current = numericText(card, '.topic-metric-current', min);
+      const p1 = clampedPercent(limit1, min, max);
+      const pMid = clampedPercent(limitMid, min, max);
+      const p2 = Math.max(p1, clampedPercent(limit2, min, max));
+      const currentPercent = clampedPercent(current, min, max);
+      const track = card.querySelector('.topic-zone-track');
+      if (track) track.style.background = `linear-gradient(90deg,#22c55e 0 ${p1}%,#eab308 ${p1}% ${p2}%,#ef4444 ${p2}% 100%)`;
+      const positions = [
+        ['.topic-zone-limit1', p1], ['.topic-zone-limit-mid', pMid],
+        ['.topic-zone-limit2', p2], ['.topic-zone-marker', currentPercent]
+      ];
+      positions.forEach(([selector, value]) => {
+        const target = card.querySelector(selector);
+        if (target) target.style.left = `${value}%`;
+      });
+    });
+    scope.querySelectorAll('.topic-chart-canvas-area').forEach((area) => {
+      const height = normalizeChartHeight(area.dataset.topicChartHeight);
+      area.dataset.topicChartHeight = String(height);
+      area.style.height = `${height}px`;
     });
     root.clearTimeout(state.chartTimer);
     state.chartTimer = root.setTimeout(renderCharts, 120);
   }
   function chartValues(card) {
+    const headers = Array.from(card.querySelectorAll('.topic-chart-data thead th'));
     const labels = [];
-    const values = [];
+    const series = headers.slice(1).map((header, index) => ({
+      label: String(header.textContent || '').trim() || `指標 ${index + 1}`,
+      values: []
+    }));
     card.querySelectorAll('.topic-chart-data tbody tr').forEach((row) => {
-      const cells = row.querySelectorAll('th,td');
+      const cells = Array.from(row.querySelectorAll('th,td'));
       if (cells.length < 2) return;
-      const value = Number(String(cells[1].textContent || '').replace(/[^0-9.-]/g, ''));
       labels.push(String(cells[0].textContent || '').trim());
-      values.push(Number.isFinite(value) ? value : 0);
+      series.forEach((item, index) => {
+        const value = Number(String(cells[index + 1]?.textContent || '').replace(/[^0-9.-]/g, ''));
+        item.values.push(Number.isFinite(value) ? value : 0);
+      });
     });
-    return { labels, values };
+    return { labels, series };
   }
   function renderCharts() {
     if (!root.Chart || !$('topicModules')) return;
+    state.charts.forEach((chart, canvas) => {
+      if (!root.document.contains(canvas)) {
+        try { chart.destroy(); } catch (_error) { /* noop */ }
+        state.charts.delete(canvas);
+      }
+    });
+    const palette = ['#4f46e5', '#0f766e', '#dc2626', '#ca8a04', '#7c3aed'];
     $('topicModules').querySelectorAll('.topic-trend-card').forEach((card) => {
       const canvas = card.querySelector('canvas.topic-chart-canvas');
-      if (!canvas) return;
-      const data = chartValues(card);
+      const area = card.querySelector('.topic-chart-canvas-area');
+      if (!canvas || !area) return;
+      const height = normalizeChartHeight(area.dataset.topicChartHeight);
+      area.dataset.topicChartHeight = String(height);
+      area.style.height = `${height}px`;
+      canvas.removeAttribute('width');
+      canvas.removeAttribute('height');
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
       const existing = state.charts.get(canvas);
-      if (existing) existing.destroy();
+      if (existing) { try { existing.destroy(); } catch (_error) { /* noop */ } }
+      const attached = typeof root.Chart.getChart === 'function' ? root.Chart.getChart(canvas) : null;
+      if (attached && attached !== existing) { try { attached.destroy(); } catch (_error) { /* noop */ } }
+      const data = chartValues(card);
+      const datasets = data.series.map((item, index) => ({
+        label: item.label,
+        data: item.values,
+        borderColor: palette[index % palette.length],
+        backgroundColor: `${palette[index % palette.length]}22`,
+        borderWidth: 2,
+        pointRadius: 3,
+        fill: false,
+        tension: .28
+      }));
       const chart = new root.Chart(canvas, {
         type: 'line',
-        data: { labels: data.labels, datasets: [{ label: stripHtml(card.querySelector('strong')?.textContent || '趨勢'), data: data.values, borderColor: '#4f46e5', backgroundColor: 'rgba(79,70,229,.12)', fill: true, tension: .28 }] },
-        options: { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: true } } }
+        data: { labels: data.labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          resizeDelay: 80,
+          layout: { padding: { top: 8, right: 8 } },
+          plugins: { legend: { display: true, position: 'top' } },
+          scales: { y: { beginAtZero: true }, x: { grid: { display: false } } }
+        }
       });
       state.charts.set(canvas, chart);
     });
@@ -890,7 +1157,7 @@
     if (!isAllowedImage(file)) throw new Error('圖片僅支援PNG/JPEG/WebP/GIF，且不得超過5MB。');
     const dataUrl = await fileDataUrl(file);
     if (!isSafeImageDataUrl(dataUrl)) throw new Error('圖片資料格式不安全。');
-    insertHtml(`<img class="topic-inline-image" src="${dataUrl}" alt="${escapeHtml(file.name || '專題報告圖片')}">`);
+    insertHtml(`<img class="topic-inline-image" style="width:45%" src="${dataUrl}" alt="${escapeHtml(file.name || '專題報告圖片')}">`);
   }
   function totalAttachmentBytes(content) {
     return content.modules.reduce((total, module) => total + (module.attachments || []).reduce((sum, item) => sum + Number(item.size || 0), 0), 0);
@@ -1016,13 +1283,80 @@
       const code = String(error && (error.code || error.message) || '');
       if (code !== 'LEASE_LOST') throw error;
     }
+    const discarded = record.action === 'discard';
     state.report = record.report;
     state.currentContent = core.normalizeTopicContent(record.report.content);
+    if (discarded) {
+      state.client.clearDraft(draftScope());
+      cancelDraftTimer();
+      renderContent(record.report.content);
+    }
     clearReleaseCheck();
     state.lease = null; state.released = true; state.dirty = false; state.dirtySince = 0;
-    setMode('readonly', `已完成編輯，編輯權已釋放；保存 R${state.report.revision}。`, 'success');
-    toast('完成編輯並已釋放', 'success');
-    return { saved: clone(state.report), released: true };
+    setMode(
+      'readonly',
+      discarded
+        ? `已放棄未保存修改並釋放編輯權；雲端仍為 R${state.report.revision}。`
+        : `已完成編輯，編輯權已釋放；保存 R${state.report.revision}。`,
+      'success'
+    );
+    toast(discarded ? '未保存修改已放棄，編輯權已釋放' : '完成編輯並已釋放', 'success');
+    return discarded
+      ? { discarded: true, released: true, report: clone(state.report) }
+      : { saved: clone(state.report), released: true };
+  }
+
+  function exitToTopicList() {
+    const opener = sameOriginOpener();
+    if (opener && opener.TopicReportsPage) {
+      try { opener.TopicReportsPage.refresh(); } catch (_error) { /* list will also auto-refresh */ }
+      opener.focus();
+      root.close();
+      return;
+    }
+    root.location.replace('./topic-reports.html');
+  }
+
+  async function discardAndExit() {
+    if (state.saving) return null;
+    const pendingSave = state.client && state.client.readPending(draftScope());
+    if (state.uncertain || pendingSave) {
+      const error = new Error('TOPIC_PENDING_SAVE_UNCERTAIN');
+      error.code = 'TOPIC_PENDING_SAVE_UNCERTAIN';
+      throw error;
+    }
+    if (state.releaseUncertain) {
+      const record = readReleaseCheck();
+      if (!record || record.action !== 'discard') throw new Error('TOPIC_RELEASE_CHECK_ACTION_MISMATCH');
+      state.saving = true; updateControls();
+      setLeaseNotice('正在確認上一筆放棄編輯的釋放結果；草稿確認前仍保留…', 'warning');
+      try {
+        const result = await retryReleaseCheck();
+        exitToTopicList();
+        return result;
+      } catch (error) {
+        setLeaseNotice('釋放結果仍未確認；草稿未清除，請稍後再按「不保存並退出」。', 'warning');
+        throw error;
+      } finally { state.saving = false; updateControls(); }
+    }
+    if (state.mode !== 'edit' || !state.lease) throw new Error('LEASE_LOST');
+    if (!root.confirm('確定放棄本窗口所有未保存修改並退出？\n\n此操作不會保存，也不會新增雲端 Revision。')) return null;
+
+    persistDraft();
+    cancelDraftTimer();
+    writeReleaseCheck(state.report, state.lease, 'discard');
+    state.releaseUncertain = true;
+    state.saving = true;
+    setMode('readonly', '正在釋放編輯權；收到ACK前草稿仍保留且不會保存…', 'warning');
+    try {
+      const result = await retryReleaseCheck();
+      exitToTopicList();
+      return result;
+    } catch (error) {
+      state.releaseUncertain = true;
+      setMode('readonly', '釋放結果未確認；草稿仍保留，請稍後再按「不保存並退出」確認。', 'warning');
+      throw error;
+    } finally { state.saving = false; updateControls(); }
   }
 
   async function completeEditing() {
@@ -1305,11 +1639,13 @@
       root.localStorage.setItem('topic:v1:toolbar-collapsed', String(collapsed));
     });
     $('topicToolbarContent').addEventListener('mousedown', (event) => {
-      if (event.target.closest('[data-command],[data-insert],label[for="topicTextColor"]')) event.preventDefault();
+      if (event.target.closest('[data-command],[data-insert],[data-text-color]')) event.preventDefault();
     });
     $('topicToolbarContent').addEventListener('click', (event) => {
       const command = event.target.closest('[data-command]');
       if (command) { runCommand(command.dataset.command); return; }
+      const color = event.target.closest('[data-text-color]');
+      if (color) { runCommand('foreColor', color.dataset.textColor); return; }
       const insert = event.target.closest('[data-insert]');
       if (!insert) return;
       const type = insert.dataset.insert;
@@ -1318,12 +1654,13 @@
       if (type === 'table') { insertHtml(makeTable()); return; }
       insertHtml(buildBlockHtml(type));
     });
-    $('topicTextColor').addEventListener('input', (event) => runCommand('foreColor', event.target.value));
+    $('topicFontSize').addEventListener('change', (event) => applyFontSize(event.target.value));
     $('topicFontEn').addEventListener('change', markDirty);
     $('topicFontZh').addEventListener('change', markDirty);
     $('topicAddModule').addEventListener('click', addModule);
     $('topicSave').addEventListener('click', () => runAction(saveNow));
     $('topicComplete').addEventListener('click', () => runAction(completeEditing));
+    $('topicDiscardExit').addEventListener('click', () => runAction(discardAndExit));
     $('topicSync').addEventListener('click', () => runAction(syncLatest));
     $('topicPrint').addEventListener('click', () => runAction(printReport));
     $('topicReset').addEventListener('click', resetDraft);
@@ -1332,12 +1669,35 @@
     $('topicExcelImport').addEventListener('click', () => $('topicExcelFile').click());
     root.document.querySelectorAll('[data-footer-action="save"]').forEach((button) => button.addEventListener('click', () => runAction(saveNow)));
     root.document.querySelectorAll('[data-footer-action="complete"]').forEach((button) => button.addEventListener('click', () => runAction(completeEditing)));
+    root.document.querySelectorAll('[data-footer-action="discard"]').forEach((button) => button.addEventListener('click', () => runAction(discardAndExit)));
     $('topicModules').addEventListener('click', (event) => {
       const action = event.target.closest('[data-module-action]');
       if (action) { moduleAction(action.dataset.moduleAction, action.dataset.moduleId); return; }
       const attachment = event.target.closest('[data-attachment-action]');
-      if (attachment) attachmentAction(attachment.dataset.attachmentAction, attachment.dataset.moduleId, attachment.dataset.attachmentId);
+      if (attachment) { attachmentAction(attachment.dataset.attachmentAction, attachment.dataset.moduleId, attachment.dataset.attachmentId); return; }
+      const avgToggle = event.target.closest('[data-topic-kpi-toggle]');
+      if (avgToggle) {
+        const card = avgToggle.closest('.topic-kpi-card');
+        card.dataset.topicShowAvg = card.dataset.topicShowAvg === 'false' ? 'true' : 'false';
+        markDirty(); updateDynamic(card); selectObject(card); return;
+      }
+      const object = objectFromTarget(event.target);
+      if (object) selectObject(object);
     });
+    $('topicObjectToolbar').addEventListener('click', (event) => {
+      const width = event.target.closest('[data-topic-object-width]');
+      if (width) { setObjectWidth(width.dataset.topicObjectWidth); return; }
+      const trend = event.target.closest('[data-topic-trend-action]');
+      if (trend) { trendAction(trend.dataset.topicTrendAction); return; }
+      if (event.target.closest('[data-topic-object-delete]')) deleteActiveObject();
+    });
+    $('topicTrendHeight').addEventListener('change', (event) => setTrendHeight(event.target.value));
+    root.document.addEventListener('pointerdown', (event) => {
+      if (!state.activeObject || event.target.closest('#topicObjectToolbar') || objectFromTarget(event.target) === state.activeObject) return;
+      hideObjectToolbar();
+    });
+    root.addEventListener('scroll', positionObjectToolbar, true);
+    root.addEventListener('resize', positionObjectToolbar);
     $('topicModules').addEventListener('change', (event) => {
       if (event.target.matches('[data-module-layout]')) changeLayout(event.target.dataset.moduleLayout, event.target.value);
       else markDirty();
@@ -1409,7 +1769,10 @@
           if (code === 'LEASE_LOST') releaseCheckResolved = true;
           else releaseCheckPending = true;
         }
-        if (releaseCheckResolved) clearReleaseCheck();
+        if (releaseCheckResolved) {
+          if (releaseCheck.action === 'discard') client.clearDraft(client.operationScope('save', reportId, state.editorWindowId));
+          clearReleaseCheck();
+        }
       }
       let opened = null;
       if (releaseCheck) {
@@ -1432,9 +1795,21 @@
       renderIdentity(); renderContent(opened.report.content); updateMeta(); showPage();
       if (releaseCheck) {
         if (releaseCheckPending) {
-          setMode('readonly', `內容已保存至 R${state.report.revision}；釋放結果未確認，請稍後再按完成編輯。`, 'warning');
+          setMode(
+            'readonly',
+            releaseCheck.action === 'discard'
+              ? '放棄編輯的釋放結果未確認；草稿仍保留，請再按「不保存並退出」確認。'
+              : `內容已保存至 R${state.report.revision}；釋放結果未確認，請稍後再按完成編輯。`,
+            'warning'
+          );
         } else {
-          setMode('readonly', `已完成編輯，編輯權已釋放；保存 R${state.report.revision}。`, 'success');
+          setMode(
+            'readonly',
+            releaseCheck.action === 'discard'
+              ? `已確認放棄未保存修改並釋放編輯權；雲端仍為 R${state.report.revision}。`
+              : `已完成編輯，編輯權已釋放；保存 R${state.report.revision}。`,
+            'success'
+          );
         }
       } else if (state.mode === 'edit') {
         setMode('edit', `已取得整份報告編輯權（fencing ${state.lease.fencingToken}）。`, 'success');
@@ -1476,6 +1851,8 @@
     isAllowedAttachment,
     isSafeAttachmentDataUrl,
     clampedPercent,
+    normalizeObjectWidth,
+    normalizeChartHeight,
     mount,
     getIdentity: () => state.identity ? clone(state.identity) : null,
     getState: () => ({

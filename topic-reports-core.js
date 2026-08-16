@@ -8,7 +8,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
-  const BUILD_ID = '1.0.0';
+  const BUILD_ID = '1.1.0';
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
   const SYSTEM_NUMBER_PATTERN = /^SR-\d{8}-\d{3}$/;

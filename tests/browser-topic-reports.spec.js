@@ -81,6 +81,16 @@ async function completeEditing(editor) {
   await expect(editor.locator('#topicLeaseNotice')).toContainText('已釋放');
 }
 
+async function selectEditorContents(locator) {
+  await locator.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+}
+
 test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
 });
@@ -285,7 +295,7 @@ test('完整內容模塊、圖片附件、雙欄、Excel與正式snapshot PDF都
   await editor.locator('[data-insert="table"]').click();
   await expect.poll(() => promptCount).toBe(2);
   editor.off('dialog', promptHandler);
-  await expect(editor.locator('.topic-data-table')).toHaveCount(2);
+  await expect(editor.locator('.topic-data-table:not(.topic-indicator-card):not(.topic-chart-data)')).toHaveCount(1);
 
   await editor.locator('[data-module-layout]').first().selectOption('1:1');
   await expect(editor.locator('.topic-module').first().locator('.topic-editable')).toHaveCount(2);
@@ -484,4 +494,242 @@ test('Owner編輯T1時Operator可編輯T2，但Operator開T1只能讀取', async
     await ownerContext.close();
     await operatorContext.close();
   }
+});
+
+test('清單隱藏內部欄位、名稱最寬、表頭雙向排序、Owner刪除且直接返回月報', async ({ browser, request }) => {
+  const ownerContext = await browser.newContext();
+  const operatorContext = await browser.newContext();
+  const ownerMonthly = await ownerContext.newPage();
+  const operatorMonthly = await operatorContext.newPage();
+  try {
+    await enterAndLogin(ownerMonthly, 'owner', 'owner-pass');
+    const list = await openTopicList(ownerMonthly);
+    const zulu = await createTopic(list, 'Zulu 船舶安全專題');
+    await completeEditing(zulu);
+    const alpha = await createTopic(list, 'Alpha 繫泊專題');
+    await completeEditing(alpha);
+    await list.locator('#topicRefreshReports').click();
+    await expect(list.locator('#topicReportsBody tr')).toHaveCount(2);
+
+    const headers = await list.locator('#topicReportsTable thead th').allTextContents();
+    expect(headers.map((text) => text.replace(/[↕▲▼↑↓]/g, '').trim())).toEqual(['專題名稱', '報告日期', '狀態', '最後更新', '操作']);
+    expect(headers.join('')).not.toMatch(/系統編號|模塊|Revision/i);
+    const widths = await list.locator('#topicReportsTable thead th').evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().width));
+    expect(widths[0]).toBeGreaterThan(Math.max(...widths.slice(1)));
+
+    await list.locator('[data-topic-sort="title"]').click();
+    await expect(list.locator('[data-topic-sort-header="title"]')).toHaveAttribute('aria-sort', 'ascending');
+    await expect(list.locator('#topicReportsBody .topic-title-cell').first()).toHaveText('Alpha 繫泊專題');
+    await list.locator('[data-topic-sort="title"]').click();
+    await expect(list.locator('[data-topic-sort-header="title"]')).toHaveAttribute('aria-sort', 'descending');
+    await expect(list.locator('#topicReportsBody .topic-title-cell').first()).toHaveText('Zulu 船舶安全專題');
+    await expect(list.locator('[data-delete-report]')).toHaveCount(2);
+
+    await enterAndLogin(operatorMonthly, 'operator', 'operator-pass');
+    const operatorList = await openTopicList(operatorMonthly);
+    await expect(operatorList.locator('#topicReportsBody tr')).toHaveCount(2);
+    await expect(operatorList.locator('[data-delete-report]')).toHaveCount(0);
+
+    list.once('dialog', (dialog) => dialog.accept());
+    await list.locator('[data-delete-report]').first().click();
+    await expect(list.locator('#topicReportsBody tr')).toHaveCount(1, { timeout: 20000 });
+    const state = await (await request.get('/__fake_state')).json();
+    expect(state.topicReports.filter((report) => report.deletedAt)).toHaveLength(1);
+    expect(state.rpcCounts.monthly_v7_topic_delete_report).toBe(1);
+
+    const closePromise = list.waitForEvent('close');
+    await list.locator('#topicBackMonthly').click();
+    await closePromise;
+    await expect(ownerMonthly.locator('#siteAccessGate')).toBeHidden();
+    await expect.poll(() => ownerMonthly.evaluate(() => window.MonthlyV7App?.client?.currentUser?.()?.username || '')).toBe('owner');
+  } finally {
+    await ownerContext.close();
+    await operatorContext.close();
+  }
+});
+
+test('不保存並退出在release結果不明前先同步保留最新本機草稿', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '立即放棄草稿專題');
+  await editor.locator('.topic-editable').first().fill('未滿800ms也必須保留的最新內容');
+  await request.post('/__fake_hang_rpc?name=monthly_v7_topic_release_report_lease&count=1');
+
+  editor.once('dialog', (dialog) => dialog.accept());
+  await editor.locator('#topicDiscardExit').click();
+  await expect(editor.locator('#topicModeBadge')).toHaveText('唯讀');
+
+  const local = await editor.evaluate(() => {
+    const keys = Object.keys(localStorage).filter((key) => key.startsWith('topic:v1:draft:'));
+    const releaseKeys = Object.keys(sessionStorage).filter((key) => key.startsWith('topic:v1:release-check:'));
+    return { keys, releaseKeys, values: keys.map((key) => localStorage.getItem(key) || '') };
+  });
+  expect(local.releaseKeys).toHaveLength(1);
+  expect(local.keys).toHaveLength(1);
+  expect(local.values[0]).toContain('未滿800ms也必須保留的最新內容');
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.rpcCounts.monthly_v7_topic_save_report || 0).toBe(0);
+  expect(state.topicLeases[0].released).toBe(false);
+});
+
+test('不保存並退出不呼叫save、ACK後清草稿並立即釋放鎖', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '不保存退出專題');
+  await editor.locator('#topicReportTitle').fill('不應上雲的新標題');
+  await editor.locator('.topic-editable').first().fill('不應上雲的本機修改');
+  await editor.waitForTimeout(1000);
+  expect(await editor.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith('topic:v1:draft:')).length)).toBe(1);
+
+  editor.once('dialog', (dialog) => dialog.accept());
+  const closePromise = editor.waitForEvent('close');
+  await editor.locator('#topicDiscardExit').click();
+  await closePromise;
+
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.topicReports[0].title).toBe('不保存退出專題');
+  expect(state.topicReports[0].revision).toBe(1);
+  expect(state.topicReports[0].content.modules[0].columns[0]).not.toContain('不應上雲');
+  expect(state.rpcCounts.monthly_v7_topic_save_report || 0).toBe(0);
+  expect(state.topicLeases[0].released).toBe(true);
+  expect(await list.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith('topic:v1:draft:')).length)).toBe(0);
+  await list.evaluate(() => window.TopicReportsPage.refresh());
+  await expect(list.locator('#topicReportsBody .topic-pill')).toHaveText('草稿');
+  await expect(list.locator('#topicReportsBody [data-delete-report]')).toBeEnabled();
+});
+
+test('編輯區塊在標題操作下方，色塊、字級、自動編號及物件百分比與刪除可保存', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '基礎工具與物件控制專題');
+  const geometry = await editor.locator('.topic-module').first().evaluate((module) => {
+    const topbar = module.querySelector('.topic-module-topbar').getBoundingClientRect();
+    const content = module.querySelector('.topic-module-content').getBoundingClientRect();
+    const actions = module.querySelector('.topic-module-actions').getBoundingClientRect();
+    return { topbarBottom: topbar.bottom, contentTop: content.top, actionsBottom: actions.bottom };
+  });
+  expect(geometry.contentTop).toBeGreaterThanOrEqual(geometry.topbarBottom - 1);
+  expect(geometry.contentTop).toBeGreaterThanOrEqual(geometry.actionsBottom - 1);
+
+  const editable = editor.locator('.topic-editable').first();
+  await editable.fill('第一個自動編號項目');
+  await selectEditorContents(editable);
+  await editor.locator('[data-text-color="#dc2626"]').click();
+  await selectEditorContents(editable);
+  await editor.locator('#topicFontSize').selectOption('24');
+  await selectEditorContents(editable);
+  await editor.locator('[data-command="insertOrderedList"]').click();
+  await expect(editable.locator('ol')).toHaveCount(1);
+  expect(await editable.innerHTML()).toMatch(/color:\s*(?:rgb\(220,\s*38,\s*38\)|#dc2626)/i);
+  expect(await editable.innerHTML()).toMatch(/font-size:\s*24px/i);
+
+  await editable.click();
+  await editable.press('End');
+  await editor.locator('[data-insert="highlight"]').click();
+  await expect(editor.locator('#topicObjectToolbar')).toBeVisible();
+  await editor.locator('[data-topic-object-width="45"]').click();
+  expect(await editor.locator('.topic-highlight').evaluate((node) => node.style.width)).toBe('45%');
+  editor.once('dialog', (dialog) => dialog.accept());
+  await editor.locator('[data-topic-object-delete]').click();
+  await expect(editor.locator('.topic-highlight')).toHaveCount(0);
+
+  await editable.click(); await editable.press('End');
+  await editor.locator('[data-insert="kpi"]').click();
+  await editor.locator('[data-topic-object-width="70"]').click();
+  const kpi = editor.locator('.topic-kpi-card');
+  expect(await kpi.evaluate((node) => node.style.width)).toBe('70%');
+  await kpi.locator('[data-topic-kpi-toggle]').click();
+  await expect(kpi).toHaveAttribute('data-topic-show-avg', 'false');
+  await kpi.evaluate((node) => {
+    node.querySelector('.topic-metric-current').textContent = '25';
+    node.querySelector('.topic-metric-target').textContent = '75';
+    node.querySelector('.topic-metric-avg').textContent = '50';
+    node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+  });
+  await expect.poll(() => kpi.locator('.topic-kpi-current-marker').evaluate((node) => node.style.left)).toBe('25%');
+  await expect.poll(() => kpi.locator('.topic-kpi-target-marker').evaluate((node) => node.style.left)).toBe('75%');
+
+  await editor.locator('#topicSave').click();
+  await expect(editor.locator('#topicRevision')).toHaveText('2', { timeout: 20000 });
+  const saved = await (await request.get('/__fake_state')).json();
+  const html = saved.topicReports[0].content.modules[0].columns[0];
+  expect(html).toMatch(/<ol>/);
+  expect(html).toMatch(/font-size:24px/);
+  expect(html).toMatch(/color:/);
+  expect(html).toMatch(/topic-kpi-card/);
+  expect(html).toMatch(/width:70%/);
+  expect(html).toMatch(/data-topic-show-avg="false"/);
+
+  await editor.reload();
+  await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+  await expect(editor.locator('.topic-kpi-card')).toHaveCount(1);
+  expect(await editor.locator('.topic-kpi-card').evaluate((node) => node.style.width)).toBe('70%');
+  await expect(editor.locator('.topic-editable').first().locator('ol')).toHaveCount(1);
+});
+
+test('趨勢圖固定高度不延伸，可增減指標與週期並保存重開', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '趨勢圖穩定性專題');
+  const editable = editor.locator('.topic-editable').first();
+  await editable.click();
+  await editor.locator('[data-insert="trend"]').click();
+  const trend = editor.locator('.topic-trend-card');
+  await expect(trend).toHaveCount(1);
+  await expect(editor.locator('#topicTrendControls')).toBeVisible();
+  await editor.waitForTimeout(500);
+
+  const firstHeights = await trend.evaluate(async (card) => {
+    const samples = [];
+    for (let index = 0; index < 7; index += 1) {
+      window.dispatchEvent(new Event('resize'));
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      await new Promise((resolve) => setTimeout(resolve, 110));
+      const area = card.querySelector('.topic-chart-canvas-area');
+      const canvas = card.querySelector('.topic-chart-canvas');
+      samples.push({ area: area.getBoundingClientRect().height, canvas: canvas.getBoundingClientRect().height, card: card.getBoundingClientRect().height });
+    }
+    return samples;
+  });
+  expect(Math.max(...firstHeights.map((sample) => sample.area)) - Math.min(...firstHeights.map((sample) => sample.area))).toBeLessThanOrEqual(1);
+  expect(firstHeights.every((sample) => sample.area >= 219 && sample.area <= 221 && sample.canvas <= 221 && sample.card < 600)).toBe(true);
+
+  await editor.locator('[data-topic-trend-action="series-add"]').click();
+  await editor.locator('[data-topic-trend-action="period-add"]').click();
+  await expect(trend.locator('thead th')).toHaveCount(4);
+  await expect(trend.locator('tbody tr')).toHaveCount(4);
+  await trend.locator('thead th').last().fill('事故率');
+  await trend.locator('tbody tr').last().locator('td').first().fill('Q4');
+  await editor.locator('#topicTrendHeight').selectOption('280');
+  await editor.locator('[data-topic-object-width="70"]').click();
+  await expect(trend.locator('.topic-chart-canvas-area')).toHaveCSS('height', '280px');
+  expect(await trend.evaluate((node) => node.style.width)).toBe('70%');
+
+  await editor.locator('#topicSave').click();
+  await expect(editor.locator('#topicRevision')).toHaveText('2', { timeout: 20000 });
+  const state = await (await request.get('/__fake_state')).json();
+  const html = state.topicReports[0].content.modules[0].columns[0];
+  expect(html).toContain('事故率');
+  expect(html).toContain('data-topic-chart-height="280"');
+  expect(html).toContain('width:70%');
+
+  await editor.reload();
+  await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+  const reopened = editor.locator('.topic-trend-card');
+  await expect(reopened.locator('thead th')).toHaveCount(4);
+  await expect(reopened.locator('tbody tr')).toHaveCount(4);
+  await expect(reopened).toContainText('事故率');
+  await expect(reopened.locator('.topic-chart-canvas-area')).toHaveCSS('height', '280px');
+  const reopenedHeights = await reopened.evaluate(async (card) => {
+    const values = [];
+    for (let index = 0; index < 5; index += 1) {
+      window.dispatchEvent(new Event('resize'));
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      await new Promise((resolve) => setTimeout(resolve, 110));
+      values.push(card.querySelector('.topic-chart-canvas-area').getBoundingClientRect().height);
+    }
+    return values;
+  });
+  expect(Math.max(...reopenedHeights) - Math.min(...reopenedHeights)).toBeLessThanOrEqual(1);
+  expect(reopenedHeights.every((height) => height >= 279 && height <= 281)).toBe(true);
 });

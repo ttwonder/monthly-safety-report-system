@@ -295,3 +295,81 @@ test('USER_SESSION_INVALID清除專題identity但保留尚未保存的專題draf
   assert.equal(draftStorage.getItem('topic:v1:draft:survivor'), 'unsaved');
   assert.equal(client.currentUser(), null);
 });
+
+test('Owner刪除專題使用獨立topic RPC且lost ACK重送沿用同一operation ID', async () => {
+  const sessionStorage = new MemoryStorage();
+  const calls = [];
+  let first = true;
+  const transport = {
+    async ensureAnonymous() {},
+    async rpc(name, params) {
+      calls.push({ name, params: JSON.parse(JSON.stringify(params)) });
+      assert.equal(name, 'monthly_v7_topic_delete_report');
+      if (first) {
+        first = false;
+        const error = new Error('RPC_TIMEOUT');
+        error.code = 'RPC_TIMEOUT';
+        throw error;
+      }
+      return { ok: true, deleted: true, reportId: report().id, operationId: params.p_operation_id };
+    }
+  };
+  const client = new TopicReportClient({
+    transport, config: { workspaceKey: 'workspace-test' }, identity: identity(),
+    sessionStorage, draftStorage: new MemoryStorage(),
+    idFactory: () => '99999999-9999-4999-8999-999999999999'
+  });
+  await client.initialize();
+  await assert.rejects(
+    () => client.deleteReport({ reportId: report().id, expectedRevision: 1 }),
+    /RPC_TIMEOUT/
+  );
+  assert.equal(sessionStorage.length, 1);
+  const deleted = await client.deleteReport({ reportId: report().id, expectedRevision: 1 });
+  assert.equal(deleted.deleted, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].params.p_operation_id, calls[1].params.p_operation_id);
+  assert.equal(calls[0].params.p_report_id, report().id);
+  assert.equal(calls[0].params.p_expected_revision, 1);
+  assert.equal(sessionStorage.length, 0);
+});
+
+test('不保存退出只在無pending save時釋放，且release ACK後才清草稿', async () => {
+  const sessionStorage = new MemoryStorage();
+  const draftStorage = new MemoryStorage();
+  const calls = [];
+  const transport = {
+    async ensureAnonymous() {},
+    async rpc(name) {
+      calls.push(name);
+      assert.equal(name, 'monthly_v7_topic_release_report_lease');
+      return { ok: true, released: true };
+    }
+  };
+  const client = new TopicReportClient({
+    transport, config: { workspaceKey: 'workspace-test' }, identity: identity(),
+    sessionStorage, draftStorage
+  });
+  await client.initialize();
+  const scope = client.operationScope('save', report().id, lease().editorWindowId);
+  client.writeDraft(scope, { version: 1, domain: 'topic', content: report().content });
+  client.writePending(scope, {
+    version: 1, domain: 'topic', operationType: 'save', operationId: '77777777-7777-4777-8777-777777777777',
+    actorUserId: identity().user.id, reportId: report().id, editorWindowId: lease().editorWindowId,
+    rpcName: 'monthly_v7_topic_save_report', request: {}, requestHash: 'pending'
+  });
+  await assert.rejects(
+    () => client.discardEditing({ reportId: report().id, editorWindowId: lease().editorWindowId, lease: lease() }),
+    /TOPIC_PENDING_SAVE_UNCERTAIN/
+  );
+  assert.equal(calls.length, 0);
+  assert.notEqual(client.readDraft(scope), null);
+
+  client.clearPending(scope);
+  const discarded = await client.discardEditing({
+    reportId: report().id, editorWindowId: lease().editorWindowId, lease: lease()
+  });
+  assert.equal(discarded.released, true);
+  assert.deepEqual(calls, ['monthly_v7_topic_release_report_lease']);
+  assert.equal(client.readDraft(scope), null);
+});

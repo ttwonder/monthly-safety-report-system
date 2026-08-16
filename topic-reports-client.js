@@ -9,7 +9,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core) {
   'use strict';
 
-  const BUILD_ID = '1.0.0';
+  const BUILD_ID = '1.1.0';
   const IDENTITY_STORAGE_KEY = 'topic:v1:identity-handoff';
   const CREATE_SENTINEL_ID = '00000000-0000-4000-8000-000000000001';
   const SESSION_ERRORS = new Set([
@@ -435,7 +435,7 @@
       const value = clone(pending);
       const valid = value && value.version === 1 && value.domain === 'topic'
         && value.actorUserId === this.identity.user.id
-        && ['create', 'save', 'snapshot'].includes(value.operationType)
+        && ['create', 'save', 'snapshot', 'delete'].includes(value.operationType)
         && isUuid(value.reportId) && isUuid(value.editorWindowId)
         && /^monthly_v7_topic_/.test(String(value.rpcName || ''))
         && value.request && typeof value.request === 'object' && !Array.isArray(value.request);
@@ -469,6 +469,25 @@
         }
       });
       return result;
+    }
+
+    async deleteReport({ reportId, expectedRevision }) {
+      if (!isUuid(reportId) || !Number.isInteger(Number(expectedRevision)) || Number(expectedRevision) < 1) {
+        throw new Error('TOPIC_DELETE_SCOPE_INVALID');
+      }
+      return this.executeOperation({
+        operationType: 'delete',
+        reportId,
+        // A list-originated delete has no editor window. The report UUID is a stable,
+        // actor-scoped envelope key so an unknown outcome can replay exactly once.
+        editorWindowId: reportId,
+        rpcName: 'monthly_v7_topic_delete_report',
+        params: {
+          ...this.commonParams(),
+          p_report_id: reportId,
+          p_expected_revision: Number(expectedRevision)
+        }
+      });
     }
 
     async saveReport({ report, lease, editorWindowId, content, status }) {
@@ -528,6 +547,23 @@
       }, context);
       if (!result || result.ok !== true) throw this.resultError(result);
       return clone(result);
+    }
+
+    async discardEditing({ reportId, editorWindowId, lease }) {
+      if (!isUuid(reportId) || !isUuid(editorWindowId) || !lease || !isUuid(lease.leaseId)) {
+        throw new Error('TOPIC_DISCARD_SCOPE_INVALID');
+      }
+      const saveScope = this.operationScope('save', reportId, editorWindowId);
+      if (this.readPending(saveScope)) {
+        const error = new Error('TOPIC_PENDING_SAVE_UNCERTAIN');
+        error.code = 'TOPIC_PENDING_SAVE_UNCERTAIN';
+        throw error;
+      }
+      const released = await this.releaseLease({ reportId, editorWindowId, lease });
+      if (!released || released.released !== true) throw new Error('TOPIC_RELEASE_NOT_CONFIRMED');
+      // Discard is destructive only after the server confirms this exact fence was released.
+      this.clearDraft(saveScope);
+      return { ok: true, released: true, reportId };
     }
 
     async completeEditing(options) {
