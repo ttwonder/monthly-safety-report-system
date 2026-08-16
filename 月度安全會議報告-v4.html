@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.26';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.27';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -1384,7 +1384,8 @@
             body.pdf-print-mode #pdfPrintArea[data-pdf-compact-pagination="true"] .v1-selected-editor-print-clone [data-cloned-id="tableBody"] .module-card-row:last-child {
                 margin-bottom: 0 !important;
             }
-            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-compact-split {
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-compact-split,
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-splittable-module {
                 page-break-inside: auto !important;
                 break-inside: auto !important;
             }
@@ -4874,6 +4875,17 @@
             return row;
         }
 
+        function normalizeV1PdfModuleRowContainers(root) {
+            const rows = Array.from(root?.querySelectorAll?.('tr.module-card-row') || []);
+            rows.forEach((row) => {
+                const section = row.ownerDocument.createElement('section');
+                Array.from(row.attributes).forEach((attribute) => section.setAttribute(attribute.name, attribute.value));
+                while (row.firstChild) section.appendChild(row.firstChild);
+                row.replaceWith(section);
+            });
+            return rows.length;
+        }
+
         function buildV1SelectedEditorPrintHtml(options = {}) {
             // 不在一般預覽建構時讀取舊 PDF DOM checkbox，避免模塊庫勾選被上一版預覽狀態覆蓋。
             // 只有 PDF 頁面的「刷新預覽」和「輸出勾選 PDF」會先明確呼叫 syncV1PdfSelectionFromDom()。
@@ -5137,13 +5149,16 @@
 
         window.addEventListener('beforeprint', () => {
             if (!document.body.classList.contains('pdf-print-mode')) return;
-            classifyV1PdfModulePageBreaks(document.getElementById('pdfPrintArea'));
+            const printArea = document.getElementById('pdfPrintArea');
+            normalizeV1PdfModuleRowContainers(printArea);
+            classifyV1PdfModulePageBreaks(printArea);
         });
 
         async function prepareV1PdfPrintArea(options = {}) {
             const printArea = document.getElementById('pdfPrintArea');
             if (!printArea) return false;
             printArea.innerHTML = buildV1PdfHtml({ syncFromDom: false, selectAll: options.selectAll === true });
+            normalizeV1PdfModuleRowContainers(printArea);
             v1ApplyPdfPrintSettings(printArea);
             document.body.classList.add('pdf-render-prep');
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));

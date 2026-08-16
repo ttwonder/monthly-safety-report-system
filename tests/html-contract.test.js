@@ -54,9 +54,9 @@ test('正式 HTML 對所有 startup-coupled 本機 script 使用同一 build cac
 });
 
 test('page、config、core、client 與 V7 宣告同一 build ID 並提供 mixed-build 安全重載', async () => {
-  const buildId = '7.0.26';
+  const buildId = '7.0.27';
   const html = await readFile(join(root, 'index.html'), 'utf8');
-  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.0\.26'/);
+  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.0\.27'/);
   for (const [file, asset] of [
     ['supabase-config.js', 'config'],
     ['monthly-collaboration-core.js', 'core'],

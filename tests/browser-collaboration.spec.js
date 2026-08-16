@@ -279,7 +279,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.26';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.27';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +319,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.26'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.27'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +522,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.0.26', config: '7.0.26', core: '7.0.26', client: '7.0.26', v7: '7.0.26'
+      page: '7.0.27', config: '7.0.27', core: '7.0.27', client: '7.0.27', v7: '7.0.27'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -5194,13 +5194,22 @@ test('PDF並排內嵌截圖由正常flow row承載並整列避開頁尾', async 
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.evaluate(() => {
     const originals = reportData.map((item) => JSON.parse(JSON.stringify(item)));
-    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900"><rect width="1600" height="900" fill="#0f172a"/><rect x="60" y="80" width="1480" height="180" fill="#f8fafc"/><rect x="60" y="300" width="700" height="520" fill="#bae6fd"/><rect x="800" y="300" width="740" height="520" fill="#ddd6fe"/></svg>';
-    const imageSrc = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    const canvas = document.createElement('canvas');
+    canvas.width = 3000;
+    canvas.height = 1600;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#0f172a';
+    context.fillRect(0, 0, 3000, 1600);
+    for (let y = 80; y < 1520; y += 120) {
+      context.fillStyle = y % 240 === 80 ? '#e0f2fe' : '#ede9fe';
+      context.fillRect(80, y, 2840, 82);
+    }
+    const imageSrc = canvas.toDataURL('image/png');
     const first = originals[0];
     first.id = 7201;
     first._v7Id = 'pdf-inline-image-flow-fixture';
     first.title = '含並排寬幅截圖的頁尾模塊';
-    first.columns = [`<div class="content-block purple-block layout-inline layout-half" data-layout="inline" style="width:45%;height:245px;margin:0 6px 6px 0;display:inline-block;vertical-align:top;box-sizing:border-box"><div class="block-title">重點內容</div><div class="block-body">此卡片與右側截圖必須由同一個正常列印flow row承載。</div></div>&nbsp;<img src="${imageSrc}" class="content-inline-img layout-inline layout-half" data-layout="inline" style="width:45%;margin:0 6px 6px 0;display:inline-block;vertical-align:top;box-sizing:border-box">`];
+    first.columns = [`<div class="content-block blue-block" style="height:180px"><div class="block-title">前段內容</div><div class="block-body">此段先佔用模塊高度，模擬真實月報在截圖前還有說明與表格。</div></div><div class="block-spacer"><br></div><div class="content-block purple-block layout-inline layout-half" data-layout="inline" style="width:45%;height:245px;margin:0 6px 6px 0;display:inline-block;vertical-align:top;box-sizing:border-box"><div class="block-title">重點內容</div><div class="block-body">此卡片與右側截圖必須由同一個正常列印flow row承載。</div></div>&nbsp;<img src="${imageSrc}" class="content-inline-img layout-inline layout-half" data-layout="inline" style="width:45%;margin:0 6px 6px 0;display:inline-block;vertical-align:top;box-sizing:border-box">`];
     first.colLayout = '1';
     first.selectedForPdf = true;
     first.pdfOrder = 1;
@@ -5218,12 +5227,19 @@ test('PDF並排內嵌截圖由正常flow row承載並整列避開頁尾', async 
     v1EnsureModuleFields();
   });
 
-  const prepared = await page.evaluate(async () => {
-    const ok = await prepareV1PdfPrintArea({ selectAll: true });
-    if (ok) document.body.classList.add('pdf-print-mode');
-    return ok;
+  await page.evaluate(() => {
+    window.__inlineImagePdfPrepareState = { status: 'pending', error: '' };
+    window.__inlineImagePdfPreparePromise = prepareV1PdfPrintArea({ selectAll: true }).then((ok) => {
+      if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+      document.body.classList.add('pdf-print-mode');
+      window.__inlineImagePdfPrepareState = { status: 'done', error: '' };
+    }).catch((error) => {
+      window.__inlineImagePdfPrepareState = { status: 'error', error: String(error?.message || error) };
+    });
   });
-  expect(prepared).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__inlineImagePdfPrepareState?.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__inlineImagePdfPrepareState)).toEqual({ status: 'done', error: '' });
   await page.emulateMedia({ media: 'print' });
   await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
 
@@ -5250,10 +5266,14 @@ test('PDF並排內嵌截圖由正常flow row承載並整列避開頁尾', async 
       image: box(image),
       first: box(first),
       next: box(next),
-      keepTogether: first.classList.contains('pdf-keep-together'),
-      compactSplit: first.classList.contains('pdf-compact-split')
+      rowTag: first?.tagName || '',
+      nativeTableRows: area.querySelectorAll('tr.module-card-row').length
     };
   });
+
+  const pdfPath = testInfo.outputPath('inline-image-flow-no-overlap.pdf');
+  const pdf = await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
+  await testInfo.attach('inline-image-flow-no-overlap.pdf', { body: pdf, contentType: 'application/pdf' });
 
   expect(layout.hasFlowRow).toBe(true);
   expect(layout.flowChildren).toBe(2);
@@ -5262,13 +5282,65 @@ test('PDF並排內嵌截圖由正常flow row承載並整列避開頁尾', async 
   expect(layout.imagePosition).toBe('static');
   expect(layout.imageFloat).toBe('none');
   expect(layout.flow.height).toBeGreaterThanOrEqual(layout.image.height - 1);
-  expect(layout.keepTogether).toBe(true);
-  expect(layout.compactSplit).toBe(false);
+  expect(layout.rowTag).toBe('SECTION');
+  expect(layout.nativeTableRows).toBe(0);
   expect(layout.first.bottom).toBeLessThanOrEqual(layout.next.top + 1);
+});
 
-  const pdfPath = testInfo.outputPath('inline-image-flow-no-overlap.pdf');
-  const pdf = await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
-  await testInfo.attach('inline-image-flow-no-overlap.pdf', { body: pdf, contentType: 'application/pdf' });
+test('PDF雙欄block圖片模塊改用中立容器避免tr grid分頁重疊', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const items = reportData.map((item) => JSON.parse(JSON.stringify(item)));
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1687" height="560"><rect width="1687" height="560" fill="#0f172a"/><rect x="60" y="80" width="1560" height="120" fill="#bae6fd"/></svg>';
+    const src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    const first = items[0];
+    first.title = '雙欄block圖片頁尾模塊';
+    first.columns = [
+      `<div class="content-block red-block" style="height:130px">前段說明</div><div class="block-spacer"><br></div><img src="${src}" class="content-inline-img layout-block" data-layout="block" style="width:100%;margin:0 0 6px;display:block;vertical-align:top;box-sizing:border-box">`,
+      '<div class="content-block purple-block" style="height:180px">右欄內容</div>'
+    ];
+    first.colLayout = '1:1';
+    first.selectedForPdf = true;
+    first.pdfOrder = 1;
+    const second = items[1];
+    second.title = 'BLOCK IMAGE後方模塊';
+    second.columns = ['<div style="height:80px">NEXT MODULE</div>'];
+    second.colLayout = '1';
+    second.selectedForPdf = true;
+    second.pdfOrder = 2;
+    reportData = [first, second];
+    document.querySelector('.report-header-section').style.height = '500px';
+    renderTable();
+    v1EnsureModuleFields();
+  });
+  await page.evaluate(() => {
+    window.__blockImagePdfState = { status: 'pending', error: '' };
+    prepareV1PdfPrintArea({ selectAll: true }).then((ok) => {
+      if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+      document.body.classList.add('pdf-print-mode');
+      window.__blockImagePdfState = { status: 'done', error: '' };
+    }).catch((error) => { window.__blockImagePdfState = { status: 'error', error: String(error?.message || error) }; });
+  });
+  await expect.poll(() => page.evaluate(() => window.__blockImagePdfState?.status), { timeout: 30000 }).toBe('done');
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  const state = await page.evaluate(() => {
+    const area = document.getElementById('pdfPrintArea');
+    const row = area.querySelector('.module-card-row');
+    return {
+      pageHeight: Number(area.dataset.pdfPageContentHeight || 0),
+      remaining: Number(area.dataset.pdfFirstPageRemaining || 0),
+      height: Number(row.dataset.pdfModuleHeight || 0),
+      rowTag: row?.tagName || '',
+      nativeTableRows: area.querySelectorAll('tr.module-card-row').length,
+      blockImage: Boolean(row.querySelector('img.content-inline-img.layout-block:not(.pdf-inline-layout-row img)'))
+    };
+  });
+  expect(state.height).toBeGreaterThan(state.remaining);
+  expect(state.height).toBeLessThanOrEqual(state.pageHeight);
+  expect(state.blockImage).toBe(true);
+  expect(state.rowTag).toBe('SECTION');
+  expect(state.nativeTableRows).toBe(0);
 });
 
 test('接近頁尾的趨勢圖模塊整體移頁，canvas留在卡片內且不壓到下一模塊', async ({ page }, testInfo) => {
