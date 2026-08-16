@@ -54,9 +54,9 @@ test('正式 HTML 對所有 startup-coupled 本機 script 使用同一 build cac
 });
 
 test('page、config、core、client 與 V7 宣告同一 build ID 並提供 mixed-build 安全重載', async () => {
-  const buildId = '7.1.0';
+  const buildId = '7.2.0';
   const html = await readFile(join(root, 'index.html'), 'utf8');
-  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.1\.0'/);
+  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.2\.0'/);
   for (const [file, asset] of [
     ['supabase-config.js', 'config'],
     ['monthly-collaboration-core.js', 'core'],
@@ -86,6 +86,23 @@ test('登入便利功能只保存用戶名，不把密碼或權限資料寫入 a
   assert.ok(rememberStart > 0 && rememberEnd > rememberStart);
   const rememberBlock = html.slice(rememberStart, rememberEnd);
   assert.doesNotMatch(rememberBlock, /password|hash|role|session|displayName/i);
+});
+
+test('數據管理頁呈現密碼權限矩陣與分層空間統計，不把本機月報冒充 Supabase 用量', async () => {
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  assert.match(html, /id="v7-storage-stats"/);
+  assert.match(html, /function v7LoadStorageStats\(/);
+  assert.match(html, /Supabase 資料庫總用量/);
+  assert.match(html, /本系統資料表用量/);
+  assert.match(html, /GitHub Pages/);
+  assert.match(html, /HTML／JS／CSS 不佔 Supabase Storage/);
+  assert.match(html, /平台備份、WAL 及保留空間不在此 RPC 可讀範圍/);
+  assert.match(html, /內容與快照邏輯量/);
+  assert.match(html, /本機 JSON/);
+  assert.match(html, /只有 Owner 可以修改進站密碼/);
+  assert.match(html, /v5IsOwner\(\)[\s\S]{0,400}siteAccessUpdatePasswordFromForm|siteAccessUpdatePasswordFromForm[\s\S]{0,800}v5IsOwner\(\)/);
+  assert.match(html, /data-v5-reset-password/);
+  assert.match(html, /修改自己的登入密碼/);
 });
 
 test('進站與登入後共用使用者指定的本機 FPMC Logo，工具列控制具無障礙狀態', async () => {

@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.1.0';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.2.0';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -2059,7 +2059,7 @@
                 <div id="site-safe-reload-status" class="mt-2 text-xs font-bold leading-5 text-amber-900"></div>
                 <pre id="site-build-diagnostic" class="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-slate-600"></pre>
             </div>
-            <div class="text-xs text-slate-400 mt-4 leading-5">密碼可由 owner / 管理員在「數據管理」頁修改。</div>
+            <div class="text-xs text-slate-400 mt-4 leading-5">進站密碼只有 Owner 可以在「數據管理」頁修改。</div>
         </div>
     </div>
 
@@ -4461,7 +4461,7 @@
                 <button class="v1-tab-btn" data-v1-tab="history" onclick="switchV1Tab('history')"><i class="fas fa-clock-rotate-left mr-1"></i>歷史 / 備份</button>
                 <button class="v1-tab-btn" data-v1-tab="records" onclick="switchV1Tab('records')"><i class="fas fa-database mr-1"></i>資料記錄</button>
                 <button class="v1-tab-btn" data-v1-tab="cloud" onclick="switchV1Tab('cloud')"><i class="fas fa-shield-halved mr-1"></i>數據管理</button>
-                <a id="topicReportsEntry" class="v1-tab-btn v1-topic-entry" href="./topic-reports.html?v=1.1.0" target="topic-reports" aria-label="在獨立窗口開啟專題報告"><i class="fas fa-file-circle-plus mr-1"></i>專題報告</a>
+                <a id="topicReportsEntry" class="v1-tab-btn v1-topic-entry" href="./topic-reports.html?v=1.2.0" target="topic-reports" aria-label="在獨立窗口開啟專題報告"><i class="fas fa-file-circle-plus mr-1"></i>專題報告</a>
                 <span class="v1-mode-indicator ml-auto text-indigo-700 font-bold px-2">${window.MonthlyV7App?.isActive?.() ? 'V7：逐項 lease / CAS / Realtime' : 'V6：切換前相容模式'}</span>
             `;
 
@@ -5795,11 +5795,18 @@
                     const data = Array.isArray(row.reportData) ? row.reportData : (Array.isArray(row.data) ? row.data : []);
                     const selected = data.filter(x => x.selectedForPdf !== false).length;
                     const active = row.id === window.currentFileId;
+                    const localBytes = v7JsonByteLength(row);
+                    const cloudReport = v7FindCloudMonthlyReport(row.id);
+                    const sizeText = [
+                        `本機 JSON：${v7FormatBytes(localBytes)}`,
+                        cloudReport ? `Supabase 內容與快照邏輯量：${v7FormatBytes(cloudReport.logicalBytes)}` : ''
+                    ].filter(Boolean).join('　｜　');
                     return `
                         <div class="v1-module-row" style="grid-template-columns:1fr auto; border:1px solid #e2e8f0; border-radius:10px; padding:9px; margin-bottom:7px; background:${active ? '#eef2ff' : '#fff'};">
                             <div>
                                 <div class="v1-module-title">${active ? '✅ ' : ''}${row.title || '未命名月報'}</div>
                                 <div class="v1-module-meta">ID：${row.id}　｜　日期：${row.date || '未填'}　｜　模塊：${data.length}　｜　PDF 已選：${selected}　｜　更新：${v1FormatTime(row.timestamp)}</div>
+                                <div class="v1-module-meta">${sizeText}</div>
                             </div>
                             <div class="flex flex-col sm:flex-row gap-1 justify-end">
                                 <button class="v1-small-btn ${active ? '' : 'v1-primary-btn'}" onclick="v1LoadReportById(${JSON.stringify(row.id)})">${active ? '目前使用' : '切換'}</button>
@@ -7789,6 +7796,23 @@
             if (!t) return '尚無';
             try { return new Date(t).toLocaleString('zh-Hant'); } catch { return t; }
         }
+        function v7FormatBytes(value) {
+            const bytes = Number(value);
+            if (!Number.isFinite(bytes) || bytes < 0) return '—';
+            if (bytes < 1024) return `${Math.round(bytes)} B`;
+            const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+            let amount = bytes / 1024;
+            let index = 0;
+            while (amount >= 1024 && index < units.length - 1) {
+                amount /= 1024;
+                index += 1;
+            }
+            return `${amount >= 100 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+        }
+        function v7JsonByteLength(value) {
+            try { return new TextEncoder().encode(JSON.stringify(value)).byteLength; }
+            catch (_error) { return null; }
+        }
 
         function renderV4CloudPane(testStatus = '') {
             const root = document.getElementById('v1-pane-cloud');
@@ -7947,7 +7971,7 @@
             return true;
         }
         async function siteAccessUpdatePasswordFromForm() {
-            if (!v5CanManageData()) return alert('您無權修改網站進入密碼。');
+            if (!v5IsOwner()) return alert('只有 Owner 可以修改進站密碼。');
             if (v4RejectUnsafeCloudFallback({ alert: true })) return;
             const p1 = document.getElementById('site-access-new-password')?.value || '';
             const p2 = document.getElementById('site-access-confirm-password')?.value || '';
@@ -7980,6 +8004,11 @@
         }
         function siteAccessAdminHtml() {
             if (!v5CanManageData()) return '';
+            if (!v5IsOwner()) return `
+                <section class="v1-category-card">
+                    <div class="v1-category-title mb-2"><i class="fas fa-door-closed mr-1"></i>網站進入密碼</div>
+                    <div class="text-sm text-slate-600">只有 Owner 可以修改進站密碼；管理員不能查看或操作此密碼。</div>
+                </section>`;
             return `
                 <section class="v1-category-card">
                     <div class="v1-category-title mb-2"><i class="fas fa-door-closed mr-1"></i>網站進入密碼</div>
@@ -8221,8 +8250,12 @@
             const password = document.getElementById('v5-user-password')?.value || '';
             let role = document.getElementById('v5-user-role')?.value || 'operator';
             if (!username || !password) return alert('請填寫用戶名和密碼。');
+            const existingUser = users.find(u => u.username === username);
+            if (existingUser && !v5IsOwner() && existingUser.username !== v5CurrentUser()?.username) {
+                return alert('管理員只能修改自己的登入密碼；其他帳號只能由 Owner 重設。');
+            }
             if (window.MonthlyV7App?.isActive?.()) {
-                const existing = users.find(u => u.username === username);
+                const existing = existingUser;
                 try {
                     if (existing) await window.MonthlyV7App.updateUser(existing.id, { username, displayName, role, password });
                     else await window.MonthlyV7App.createUser({ username, displayName, role, password });
@@ -8291,25 +8324,40 @@
             v4QueueAutoSave('用戶資料與權限');
             renderV4CloudPane();
         }
-        async function v5OwnerResetUserPasswordFromButton(btn) {
-            if (!v5IsOwner()) return alert('只有 owner 可以查看與修改所有用戶密碼。');
+        async function v5ResetUserPasswordFromButton(btn) {
             const row = btn?.closest?.('tr');
             const username = row?.dataset?.username || '';
+            const current = v5CurrentUser();
+            const canReset = v5IsOwner() || (current?.role === 'admin' && current?.username === username);
+            if (!canReset) return alert('管理員只能修改自己的登入密碼；只有 Owner 可以重設其他帳號。');
             const input = row?.querySelector?.('[data-v5-reset-password="1"]');
             const password = input?.value || '';
             if (!username) return alert('找不到要修改的用戶。');
-            if (!password) return alert('請輸入新的用戶密碼。');
+            if (!password || password.length < 8) return alert('請輸入至少 8 個字元的新登入密碼。');
             const users = v5GetUsers();
+            const changingSelf = current?.username === username;
             if (window.MonthlyV7App?.isActive?.()) {
                 const target = users.find(u => u.username === username);
                 if (!target?.id) return alert('找不到此雲端用戶。');
                 try {
                     await window.MonthlyV7App.updateUser(target.id, { username: target.username, displayName: target.displayName, role: target.role, password });
                     if (input) input.value = '';
-                    await window.MonthlyV7App.loadSnapshot();
-                    showToast(`已重設 ${username} 的密碼`);
-                    renderV4CloudPane();
-                } catch (error) { alert('重設密碼失敗：' + error.message); }
+                    if (changingSelf) {
+                        alert('登入密碼已更新。舊登入已撤銷，請使用新密碼重新登入；進站狀態仍保留。');
+                        renderV5SessionBar();
+                        renderV4CloudPane();
+                    } else {
+                        await window.MonthlyV7App.loadSnapshot();
+                        showToast(`已重設 ${username} 的登入密碼`);
+                        renderV4CloudPane();
+                    }
+                } catch (error) {
+                    alert('重設登入密碼失敗：' + error.message);
+                    if (!v5CurrentUser()) {
+                        renderV5SessionBar();
+                        renderV4CloudPane();
+                    }
+                }
                 return;
             }
             const idx = users.findIndex(u => u.username === username);
@@ -8317,9 +8365,9 @@
             const passwordHash = await v5HashPassword(password);
             users[idx] = v5SafeUser(Object.assign({}, users[idx], { passwordHash }));
             v5SetUsers(users);
-            if (v5CurrentUser()?.username === username) v5SetSession(users[idx]);
             if (input) input.value = '';
-            showToast(`已重設 ${username} 的密碼，請手動按「保存修改」上傳雲端`);
+            if (changingSelf) v5SetSession(null);
+            showToast(changingSelf ? '登入密碼已更新，請重新登入' : `已重設 ${username} 的登入密碼，請手動按「保存修改」上傳雲端`);
             v4QueueAutoSave('用戶密碼');
             renderV4CloudPane();
         }
@@ -8833,20 +8881,140 @@
                     ${v4CloudStatusHtml()}
                 </div>`;
         }
+        const V7_STORAGE_STATS_STATE = {
+            actorId: '', loading: false, data: null, error: '', requestId: 0
+        };
+        function v7StorageActorId() {
+            const user = v5CurrentUser();
+            return String(user?.id || user?.username || '');
+        }
+        function v7FindCloudMonthlyReport(legacyFileId) {
+            const reports = V7_STORAGE_STATS_STATE.data?.monthlyReports;
+            if (!Array.isArray(reports)) return null;
+            const id = String(legacyFileId || '');
+            return reports.find(report => String(report?.legacyFileId || report?.legacy_file_id || '') === id) || null;
+        }
+        function v7StorageStatsContentHtml() {
+            const state = V7_STORAGE_STATS_STATE;
+            if (state.loading && !state.data) return '<div class="v1-empty-state">正在讀取 Supabase 空間統計…</div>';
+            if (state.error && !state.data) {
+                return `<div class="v1-empty-state text-rose-600">空間統計讀取失敗：${v2RecordText(state.error)}</div>`;
+            }
+            const data = state.data;
+            if (!data) return '<div class="v1-empty-state">尚未讀取空間統計。</div>';
+            const monthly = Array.isArray(data.monthlyReports) ? data.monthlyReports : [];
+            const monthlyRows = monthly.map(report => `
+                <tr>
+                    <td>${v2RecordText(report.title || '月度安全會議報告')}</td>
+                    <td>${v2RecordText(report.reportDate || '未填')}</td>
+                    <td>${v7FormatBytes(report.contentBytes)}</td>
+                    <td>${v7FormatBytes(report.snapshotBytes)}</td>
+                    <td class="font-bold">${v7FormatBytes(report.logicalBytes)}</td>
+                </tr>`).join('') || '<tr><td colspan="5" class="text-center text-slate-500">目前沒有可計量的雲端月報。</td></tr>';
+            return `
+                <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
+                    <div class="rounded-lg border border-indigo-100 bg-indigo-50 p-3">
+                        <div class="text-xs font-bold text-indigo-700">Supabase 資料庫總用量</div>
+                        <div class="text-xl font-black text-indigo-950">${v7FormatBytes(data.databaseTotalBytes)}</div>
+                        <div class="text-[11px] text-slate-500">整個 Project database，含系統與其他資料表</div>
+                    </div>
+                    <div class="rounded-lg border border-sky-100 bg-sky-50 p-3">
+                        <div class="text-xs font-bold text-sky-700">本系統資料表用量</div>
+                        <div class="text-xl font-black text-sky-950">${v7FormatBytes(data.appDatabasePhysicalBytes)}</div>
+                        <div class="text-[11px] text-slate-500">monthly_v7_*／legacy，含資料、TOAST與索引</div>
+                    </div>
+                    <div class="rounded-lg border border-emerald-100 bg-emerald-50 p-3">
+                        <div class="text-xs font-bold text-emerald-700">Supabase Storage 檔案</div>
+                        <div class="text-xl font-black text-emerald-950">${v7FormatBytes(data.storageObjectBytes)}</div>
+                        <div class="text-[11px] text-slate-500">${Number(data.storageObjectCount || 0)} 個物件；整個 Project bucket 合計</div>
+                    </div>
+                    <div class="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <div class="text-xs font-bold text-slate-700">網站程式檔</div>
+                        <div class="text-lg font-black text-slate-900">GitHub Pages</div>
+                        <div class="text-[11px] text-slate-500">HTML／JS／CSS 不佔 Supabase Storage</div>
+                    </div>
+                </div>
+                <div class="mt-3 text-xs font-bold text-slate-700">月報內容與快照邏輯量</div>
+                <div class="overflow-auto border border-slate-200 rounded-lg mt-1">
+                    <table style="table-layout:auto; min-width:720px;"><thead><tr><th>月報</th><th>日期</th><th>目前內容</th><th>歷史快照</th><th>單項合計</th></tr></thead><tbody>${monthlyRows}</tbody></table>
+                </div>
+                <div class="text-[11px] text-slate-500 mt-2">單項是可歸屬的資料列邏輯量（內容＋快照），不是共享 PostgreSQL 磁碟頁面；共用記錄與操作日誌只計入本系統資料表總量，Supabase 平台備份、WAL 及保留空間不在此 RPC 可讀範圍。更新：${v4FmtTime(data.generatedAt)}</div>
+                ${state.error ? `<div class="text-xs text-amber-700 mt-1">最近刷新失敗，仍顯示上次結果：${v2RecordText(state.error)}</div>` : ''}`;
+        }
+        function v7StorageStatsPanelHtml() {
+            return `
+                <section class="v1-category-card">
+                    <div class="v1-category-head">
+                        <div>
+                            <div class="v1-category-title">Supabase 空間使用</div>
+                            <div class="text-xs text-slate-500">物理總量與單項邏輯量分開顯示，避免把瀏覽器估算冒充Supabase磁碟量。</div>
+                        </div>
+                        <button class="v1-small-btn" onclick="v7LoadStorageStats(true)" ${V7_STORAGE_STATS_STATE.loading ? 'disabled' : ''}><i class="fas fa-rotate mr-1"></i>刷新空間</button>
+                    </div>
+                    <div id="v7-storage-stats" class="mt-2">${v7StorageStatsContentHtml()}</div>
+                </section>`;
+        }
+        function v7RenderStorageStatsNode() {
+            const node = document.getElementById('v7-storage-stats');
+            if (node) node.innerHTML = v7StorageStatsContentHtml();
+        }
+        async function v7LoadStorageStats(force = false) {
+            const app = window.MonthlyV7App;
+            const actorId = v7StorageActorId();
+            if (!app?.isActive?.() || !actorId || !v5CanManageData()) return null;
+            if (V7_STORAGE_STATS_STATE.loading) return null;
+            if (!force && V7_STORAGE_STATS_STATE.data && V7_STORAGE_STATS_STATE.actorId === actorId) {
+                v7RenderStorageStatsNode();
+                return V7_STORAGE_STATS_STATE.data;
+            }
+            if (V7_STORAGE_STATS_STATE.actorId !== actorId) {
+                V7_STORAGE_STATS_STATE.data = null;
+                V7_STORAGE_STATS_STATE.error = '';
+            }
+            V7_STORAGE_STATS_STATE.actorId = actorId;
+            V7_STORAGE_STATS_STATE.loading = true;
+            const requestId = ++V7_STORAGE_STATS_STATE.requestId;
+            v7RenderStorageStatsNode();
+            try {
+                const data = await app.getStorageStats();
+                if (requestId !== V7_STORAGE_STATS_STATE.requestId || actorId !== v7StorageActorId()) return null;
+                V7_STORAGE_STATS_STATE.data = data;
+                V7_STORAGE_STATS_STATE.error = '';
+                if (document.getElementById('v1-history-list')) refreshV1HistoryList();
+                return data;
+            } catch (error) {
+                if (requestId === V7_STORAGE_STATS_STATE.requestId) {
+                    V7_STORAGE_STATS_STATE.error = String(error?.code || error?.message || error || 'GET_STORAGE_STATS_FAILED');
+                }
+                return null;
+            } finally {
+                if (requestId === V7_STORAGE_STATS_STATE.requestId) {
+                    V7_STORAGE_STATS_STATE.loading = false;
+                    v7RenderStorageStatsNode();
+                }
+            }
+        }
+
         function v5UserAdminHtml() {
             const users = v5GetUsers();
             const canManage = v5CanManageData();
             if (!canManage) return `<div class="v1-empty-state">您無權訪問數據管理。請使用 owner 或管理員帳號登入。</div>`;
             const isOwner = v5IsOwner();
+            const currentUser = v5CurrentUser();
             const usernameCell = (u) => isOwner ? `<input data-v5-edit-username="1" class="border border-indigo-100 rounded px-2 py-1 text-xs min-w-[120px]" value="${v1EscapeAttr(u.username)}">` : v2RecordText(u.username);
             const displayCell = (u) => isOwner ? `<input data-v5-edit-display="1" class="border border-indigo-100 rounded px-2 py-1 text-xs min-w-[120px]" value="${v1EscapeAttr(u.displayName || u.username)}">` : v2RecordText(u.displayName);
             const roleCell = (u) => isOwner ? `<select data-v5-edit-role="1" class="border border-indigo-100 rounded px-2 py-1 text-xs min-w-[92px]">${v5OwnerRoleOptions(u.role)}</select>` : v5RoleLabel(u.role);
-            const passwordCell = (u) => isOwner ? `
-                <div class="flex flex-col sm:flex-row gap-1 items-stretch sm:items-center min-w-[220px]">
-                    <span class="text-[11px] text-slate-500 whitespace-nowrap">已設定｜不可查看明文</span>
-                    <input data-v5-reset-password="1" type="password" class="border border-indigo-100 rounded px-2 py-1 text-xs flex-1" placeholder="輸入新密碼">
-                    <button class="v1-small-btn v1-primary-btn" onclick="v5OwnerResetUserPasswordFromButton(this)">重設</button>
-                </div>` : `<span class="text-slate-400">owner 可重設</span>`;
+            const passwordCell = (u) => {
+                const self = currentUser?.username === u.username;
+                const canReset = isOwner || (currentUser?.role === 'admin' && self);
+                if (!canReset) return '<span class="text-slate-400">只有 Owner 可重設</span>';
+                return `
+                    <div class="flex flex-col sm:flex-row gap-1 items-stretch sm:items-center min-w-[220px]">
+                        <span class="text-[11px] text-slate-500 whitespace-nowrap">已設定｜不可查看明文</span>
+                        <input data-v5-reset-password="1" type="password" autocomplete="new-password" class="border border-indigo-100 rounded px-2 py-1 text-xs flex-1" placeholder="至少 8 個字元">
+                        <button class="v1-small-btn v1-primary-btn" onclick="v5ResetUserPasswordFromButton(this)">${self ? '修改自己的登入密碼' : '重設'}</button>
+                    </div>`;
+            };
             const actionCell = (u) => isOwner ? `
                 <div class="flex flex-wrap gap-1 items-center justify-center">
                     <button class="v1-small-btn v1-primary-btn" onclick="v5OwnerUpdateUserProfileFromButton(this)">更新資料</button>
@@ -8876,7 +9044,7 @@
                     <div class="overflow-auto border border-slate-200 rounded-lg"><table style="table-layout:auto; min-width: 980px;"><thead><tr><th>用戶名</th><th>顯示名稱</th><th>用戶類型</th><th>密碼 / 重設</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
                     <div class="text-xs text-slate-500 mt-2">V7 權限變更立即由伺服器交易保存；Owner 轉移保持唯一 Owner，Admin 只可管理非 Owner。</div>
                     <div class="text-xs text-slate-500 mt-1">密碼安全：伺服器保存 bcrypt hash；legacy SHA-256 只在首次成功登入時驗證並立即升級，瀏覽器不下載 hash。</div>
-                    <div class="text-xs text-slate-500 mt-1">權限規則：owner 可管理 owner / 管理員 / 使用者；管理員只可新增或更新非 owner 用戶，不能新增、修改或升級 owner；所有已登入用戶可同步最新與保存修改。</div>
+                    <div class="text-xs text-slate-500 mt-1">權限規則：Owner 可修改所有人的登入密碼與用戶資料；管理員只能修改自己的登入密碼，仍可新增或管理非 Owner 帳號，但不能修改別人的密碼或碰觸 Owner。</div>
                 </section>`;
         }
 
@@ -8926,6 +9094,7 @@
                             <div class="v1-action-row mt-2"><button class="v1-small-btn" onclick="v4ExportLocalBundleJson()"><i class="fas fa-file-export mr-1"></i>匯出完整 JSON 備份</button><button class="v1-small-btn" onclick="document.getElementById('v4-bundle-import').click()"><i class="fas fa-file-import mr-1"></i>匯入完整 JSON 備份</button><input id="v4-bundle-import" type="file" accept=".json" class="hidden" onchange="v4ImportLocalBundleJson(event)"></div>
                         </section>
                     </div>
+                    ${window.MonthlyV7App?.isActive?.() ? `<div class="mt-3">${v7StorageStatsPanelHtml()}</div>` : ''}
                     <div class="mt-3">${siteAccessAdminHtml()}</div>
                     <div class="mt-3">${v5UserAdminHtml()}</div>
                     <div class="v1-note-box mt-3"><b>同步說明：</b>正式使用時 Supabase URL / anon public key / Workspace Key 應放在 <code>supabase-config.js</code>，大家打開同一網址會自動讀取同一份雲端資料。Workspace Key 仍需視為內部共享密鑰，請勿公開。</div>`}
@@ -8933,6 +9102,7 @@
             setTimeout(() => {
                 v5RestoreFormDrafts(root);
                 v5RestoreCloudPaneInputState(root, inputState);
+                if (window.MonthlyV7App?.isActive?.() && canManage) v7LoadStorageStats(false);
             }, 0);
         };
 

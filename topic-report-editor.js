@@ -11,7 +11,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi) {
   'use strict';
 
-  const BUILD_ID = '1.1.0';
+  const BUILD_ID = '1.2.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;

@@ -3,7 +3,7 @@
 
   const core = root.TopicReportsCore;
   const clientApi = root.TopicReportsClient;
-  const BUILD_ID = '1.1.0';
+  const BUILD_ID = '1.2.0';
   const CREATE_ATTEMPT_STORAGE_KEY = 'topic:v1:create-attempt';
   root.TOPIC_REPORT_ASSET_BUILDS = Object.assign({}, root.TOPIC_REPORT_ASSET_BUILDS, { page: BUILD_ID });
   const state = {
@@ -44,6 +44,20 @@
       timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', hour12: false
     }).format(date);
+  }
+
+  function formatBytes(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return '—';
+    if (bytes < 1024) return `${Math.round(bytes)} B`;
+    const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+    let amount = bytes / 1024;
+    let index = 0;
+    while (amount >= 1024 && index < units.length - 1) {
+      amount /= 1024;
+      index += 1;
+    }
+    return `${amount >= 100 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
   }
 
   function setStatus(message, tone = '') {
@@ -197,7 +211,7 @@
   }
 
   function changeSort(key) {
-    if (!['title', 'reportDate', 'status', 'updatedAt'].includes(key)) return;
+    if (!['title', 'reportDate', 'status', 'logicalBytes', 'updatedAt'].includes(key)) return;
     if (state.sortKey === key) state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
     else {
       state.sortKey = key;
@@ -225,6 +239,7 @@
         : statusText(report);
       statusCell.appendChild(status);
       row.appendChild(statusCell);
+      appendTextCell(row, formatBytes(report.logicalBytes), 'topic-size-cell');
       appendTextCell(row, `${formatDateTime(report.updatedAt)}${report.updatedBy ? ` · ${report.updatedBy}` : ''}`);
       const actionCell = root.document.createElement('td');
       actionCell.className = 'no-print topic-row-actions-cell';
@@ -270,6 +285,7 @@
       appendTextCell(row, report.reportDate);
       appendTextCell(row, report.editing ? `編輯中（${report.holderDisplayName || '其他使用者'}）` : statusText(report));
       appendTextCell(row, `R${Number(report.revision || 0)}`);
+      appendTextCell(row, formatBytes(report.logicalBytes));
       appendTextCell(row, formatDateTime(report.updatedAt));
       body.appendChild(row);
     });

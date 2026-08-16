@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.1.0';
+  const buildId = '7.2.0';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -1644,6 +1644,7 @@
     async updateUser(id, profile) { return this.client.updateUser(id, profile); }
     async deleteUser(id) { return this.client.deleteUser(id); }
     async updateSitePassword(password) { return this.client.updateSitePassword(password); }
+    async getStorageStats() { return this.client.getStorageStats(); }
     async createReportSnapshot(kind, options = {}) {
       return this.client.createReportSnapshot(kind, options);
     }

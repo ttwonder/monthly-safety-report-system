@@ -143,6 +143,12 @@ test('建立、完整編輯工具、保存與完成只改topic資料且ACK後才
   expect(completed.topicReports[0].status).toBe('final');
   expect(completed.topicReports[0].revision).toBe(3);
   expect(completed.topicLeases[0].released).toBe(true);
+
+  await list.locator('#topicRefreshReports').click();
+  const listRow = list.locator('#topicReportsBody tr').filter({ hasText: '繫泊作業安全專題（修訂）' });
+  await expect(listRow.locator('.topic-size-cell')).toHaveText(/^(?:\d+(?:\.\d+)?\s(?:B|KiB|MiB|GiB|TiB))$/);
+  await list.locator('[data-topic-sort="logicalBytes"]').click();
+  await expect(list.locator('[data-topic-sort-header="logicalBytes"]')).toHaveAttribute('aria-sort', 'ascending');
 });
 
 test('create lost ACK後同一對話框重試沿用operation與window ID且只建立一份', async ({ page, request }) => {
@@ -512,7 +518,7 @@ test('清單隱藏內部欄位、名稱最寬、表頭雙向排序、Owner刪除
     await expect(list.locator('#topicReportsBody tr')).toHaveCount(2);
 
     const headers = await list.locator('#topicReportsTable thead th').allTextContents();
-    expect(headers.map((text) => text.replace(/[↕▲▼↑↓]/g, '').trim())).toEqual(['專題名稱', '報告日期', '狀態', '最後更新', '操作']);
+    expect(headers.map((text) => text.replace(/[↕▲▼↑↓]/g, '').trim())).toEqual(['專題名稱', '報告日期', '狀態', '資料大小', '最後更新', '操作']);
     expect(headers.join('')).not.toMatch(/系統編號|模塊|Revision/i);
     const widths = await list.locator('#topicReportsTable thead th').evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().width));
     expect(widths[0]).toBeGreaterThan(Math.max(...widths.slice(1)));

@@ -65,7 +65,8 @@ async function enterAndLogin(page, username, password, expectedModuleCount = 2) 
   }, { loginUsername: username, loginPassword: password });
   await expect.poll(() => page.evaluate(() => window.__monthlyPwLoginState?.status), { timeout: 30000 }).toMatch(/^(done|error)$/);
   expect(await page.evaluate(() => window.__monthlyPwLoginState)).toEqual({ status: 'done', error: '' });
-  await expect(page.locator('#v5TopStatus')).toContainText(username === 'owner' ? 'Owner A' : 'Operator B');
+  const displayName = username === 'owner' ? 'Owner A' : (username === 'admin' ? 'Admin C' : 'Operator B');
+  await expect(page.locator('#v5TopStatus')).toContainText(displayName);
   await expect(page.locator('#tableBody tr')).toHaveCount(expectedModuleCount);
 }
 
@@ -247,6 +248,103 @@ test.beforeEach(async ({ request }) => {
   await request.post('/__fake_reset');
 });
 
+test('數據管理 Admin 無進站密碼權限且只能修改自己的登入密碼', async ({ page, request }) => {
+  await enterAndLogin(page, 'admin', 'admin-pass');
+  await page.locator('[data-v1-tab="cloud"]').click();
+  await expect(page.locator('#v1-pane-cloud')).toHaveClass(/active/);
+  await expect(page.locator('#v1-pane-cloud')).toContainText('只有 Owner 可以修改進站密碼');
+  await expect(page.locator('#site-access-new-password')).toHaveCount(0);
+  await expect(page.locator('#site-access-confirm-password')).toHaveCount(0);
+
+  await expect(page.locator('#v7-storage-stats')).toContainText('Supabase 資料庫總用量');
+  await expect(page.locator('#v7-storage-stats')).toContainText('本系統資料表用量');
+  const adminRow = page.locator('tr[data-username="admin"]');
+  await expect(adminRow.locator('[data-v5-reset-password="1"]')).toHaveCount(1);
+  await expect(adminRow.getByRole('button', { name: '修改自己的登入密碼' })).toHaveCount(1);
+  await expect(page.locator('tr[data-username="owner"] [data-v5-reset-password="1"]')).toHaveCount(0);
+  await expect(page.locator('tr[data-username="operator"] [data-v5-reset-password="1"]')).toHaveCount(0);
+
+  const denied = await page.evaluate(async () => {
+    try {
+      await window.MonthlyV7App.updateSitePassword('admin-denied-gate-pass');
+      return 'UNEXPECTED_SUCCESS';
+    } catch (error) {
+      return String(error?.code || error?.message || error);
+    }
+  });
+  expect(denied).toContain('FORBIDDEN');
+  expect(await page.evaluate(() => window.MonthlyV7App.currentUser()?.username || '')).toBe('admin');
+
+  await adminRow.locator('[data-v5-reset-password="1"]').fill('admin-new-pass');
+  const successDialog = page.waitForEvent('dialog');
+  await adminRow.getByRole('button', { name: '修改自己的登入密碼' }).click();
+  const dialog = await successDialog;
+  expect(dialog.message()).toContain('請使用新密碼重新登入');
+  await dialog.accept();
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App.currentUser())).toBeNull();
+  await expect(page.locator('#siteAccessGate')).toBeHidden();
+
+  const oldLogin = await page.evaluate(async () => {
+    try {
+      await window.MonthlyV7App.login('admin', 'admin-pass');
+      return 'UNEXPECTED_SUCCESS';
+    } catch (error) {
+      return String(error?.code || error?.message || error);
+    }
+  });
+  expect(oldLogin).toContain('INVALID_CREDENTIALS');
+  await page.evaluate(async () => {
+    await window.MonthlyV7App.login('admin', 'admin-new-pass');
+    renderV5SessionBar();
+  });
+  await expect(page.locator('#v5TopStatus')).toContainText('Admin C');
+  const fake = await (await request.get('/__fake_state')).json();
+  expect(fake.rpcCounts.monthly_v7_update_site_password).toBe(1);
+  expect(fake.rpcCounts.monthly_v7_update_user).toBe(1);
+});
+
+test('數據管理 Owner 可重設所有登入密碼並顯示總量、月報雲端量與本機量', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.locator('[data-v1-tab="cloud"]').click();
+  await expect(page.locator('#site-access-new-password')).toBeVisible();
+  await expect(page.locator('#site-access-confirm-password')).toBeVisible();
+  await expect(page.locator('#v7-storage-stats')).toContainText('Supabase 資料庫總用量');
+  await expect(page.locator('#v7-storage-stats')).toContainText('GitHub Pages');
+  await expect(page.locator('#v7-storage-stats')).toContainText('月報內容與快照邏輯量');
+  await expect(page.locator('#v7-storage-stats')).not.toContainText('—');
+  await expect(page.locator('#v1-pane-cloud [data-v5-reset-password="1"]')).toHaveCount(3);
+
+  await page.locator('[data-v1-tab="history"]').click();
+  await expect(page.locator('#v1-history-list')).toContainText('本機 JSON');
+  await expect(page.locator('#v1-history-list')).toContainText('Supabase 內容與快照邏輯量');
+
+  await page.locator('[data-v1-tab="cloud"]').click();
+  const operatorRow = page.locator('tr[data-username="operator"]');
+  await operatorRow.locator('[data-v5-reset-password="1"]').fill('operator-new-pass');
+  await operatorRow.getByRole('button', { name: '重設', exact: true }).click();
+  await expect(operatorRow.locator('[data-v5-reset-password="1"]')).toHaveValue('');
+  expect(await page.evaluate(() => window.MonthlyV7App.currentUser()?.username || '')).toBe('owner');
+
+  await page.evaluate(async () => {
+    await window.MonthlyV7App.logoutUser();
+    renderV5SessionBar();
+  });
+  const oldLogin = await page.evaluate(async () => {
+    try {
+      await window.MonthlyV7App.login('operator', 'operator-pass');
+      return 'UNEXPECTED_SUCCESS';
+    } catch (error) {
+      return String(error?.code || error?.message || error);
+    }
+  });
+  expect(oldLogin).toContain('INVALID_CREDENTIALS');
+  await page.evaluate(async () => {
+    await window.MonthlyV7App.login('operator', 'operator-new-pass');
+    renderV5SessionBar();
+  });
+  await expect(page.locator('#v5TopStatus')).toContainText('Operator B');
+});
+
 for (const mixedAsset of [
   { name: 'config', url: '**/supabase-config.js*', declaration: "config: 'stale-build'" },
   { name: 'core', url: '**/monthly-collaboration-core.js*', declaration: "core: 'stale-build'" },
@@ -279,7 +377,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.1.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.2.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +417,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.1.0'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.2.0'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +620,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.1.0', config: '7.1.0', core: '7.1.0', client: '7.1.0', v7: '7.1.0'
+      page: '7.2.0', config: '7.2.0', core: '7.2.0', client: '7.2.0', v7: '7.2.0'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',

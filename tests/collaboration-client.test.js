@@ -4070,6 +4070,80 @@ test('updateUser 密碼重設 timeout 的 pending evidence 不得持久化帳號
   assert.equal(raw.includes('p_new_password'), false);
 });
 
+test('updateUser 修改自己密碼後只清 user session；修改別人時保留目前 Owner session', async () => {
+  const sessions = memoryStorage();
+  const drafts = memoryStorage();
+  const resumes = memoryStorage();
+  resumes.setItem('monthly_v7_user_resume_marker', JSON.stringify({ token: 'must-be-cleared' }));
+  let operation = 920;
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-password-self' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-password-self', user: { id: 'u1', username: 'owner', displayName: 'Owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_update_user: (params) => ({
+      ok: true,
+      passwordChanged: Boolean(params.p_new_password),
+      requiresUserReauth: Boolean(params.p_new_password),
+      user: params.p_target_user_id === 'u1'
+        ? { id: 'u1', username: 'owner', displayName: 'Owner', role: 'owner', version: 2 }
+        : { id: 'u2', username: 'operator', displayName: 'Operator', role: 'operator', version: 2 }
+    })
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: sessions, draftStorage: drafts, resumeStorage: resumes,
+    idFactory: () => 'tab-password-self',
+    operationIdFactory: () => `00000000-0000-4000-8000-${String(operation++).padStart(12, '0')}`
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  await client.updateUser('u2', {
+    username: 'operator', displayName: 'Operator', role: 'operator', password: 'owner-reset-pass'
+  });
+  assert.equal(client.currentUser().id, 'u1');
+  assert.equal(client.isSiteUnlocked(), true);
+
+  await client.updateUser('u1', {
+    username: 'owner', displayName: 'Owner', role: 'owner', password: 'owner-self-pass'
+  });
+  assert.equal(client.currentUser(), null);
+  assert.equal(client.isSiteUnlocked(), true);
+  assert.equal(sessions.getItem('monthly_v7_user_session'), null);
+  assert.equal(resumes.getItem('monthly_v7_user_resume_marker'), null);
+  assert.equal(drafts.getItem('monthly_v7_pending:update_user:u1'), null);
+  assert.equal(drafts.getItem('monthly_v7_pending:update_user:u2'), null);
+});
+
+test('getStorageStats 以目前 user session 呼叫只讀統計 RPC', async () => {
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-storage' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-storage', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_get_storage_stats: {
+      ok: true, databaseTotalBytes: 8192, appDatabasePhysicalBytes: 4096,
+      storageObjectBytes: 0, storageObjectCount: 0, staticSiteHost: 'github-pages',
+      staticSiteInSupabase: false, monthlyReports: [{ id: 'r1', logicalBytes: 512 }]
+    }
+  });
+  const client = new MonthlyV7Client({ transport, sessionStorage: memoryStorage(), draftStorage: memoryStorage(), idFactory: () => 'tab-storage' });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  const stats = await client.getStorageStats();
+  assert.equal(stats.databaseTotalBytes, 8192);
+  assert.equal(stats.monthlyReports[0].logicalBytes, 512);
+  const call = transport.calls.find((entry) => entry.name === 'monthly_v7_get_storage_stats');
+  assert.deepEqual(call.params, {
+    p_workspace_key: 'workspace-test',
+    p_user_session_id: 'user-storage',
+    p_client_session_id: 'tab-storage'
+  });
+});
+
 test('site password rotation 未知結果在重新登入後沿用原 operation ID 對帳', async () => {
   const drafts = memoryStorage();
   const sessions = memoryStorage();

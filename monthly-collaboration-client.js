@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.1.0';
+  const buildId = '7.2.0';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
@@ -2659,6 +2659,7 @@
 
     async updateUser(targetUserId, profile) {
       this.requireUserSession();
+      const actorUserId = String(this.currentUser() && this.currentUser().id || '');
       const params = {
         p_workspace_key: this.config.workspaceKey,
         p_user_session_id: this.userSession.id,
@@ -2669,14 +2670,32 @@
         p_role: String(profile && profile.role || 'operator'),
         p_new_password: profile && profile.password ? String(profile.password) : null
       };
+      const ownPasswordChange = Boolean(params.p_new_password)
+        && String(targetUserId || '') === actorUserId;
       const execute = params.p_new_password
         ? this.executeSensitiveOperation.bind(this)
         : this.executeOperation.bind(this);
-      const result = this.commandResult(await execute(
-        'monthly_v7_update_user', params, `update_user:${targetUserId}`
-      ), 'UPDATE_USER_FAILED');
-      if (typeof this.host.onUsersChanged === 'function') this.host.onUsersChanged(result.user);
-      return result.user;
+      try {
+        const result = this.commandResult(await execute(
+          'monthly_v7_update_user', params, `update_user:${targetUserId}`
+        ), 'UPDATE_USER_FAILED');
+        if (!ownPasswordChange && typeof this.host.onUsersChanged === 'function') this.host.onUsersChanged(result.user);
+        if (ownPasswordChange) {
+          this.clearUserResumeMarker();
+          this.clearUserSession('user-password-rotated');
+        }
+        return result.user;
+      } catch (error) {
+        const code = String(error && (error.code || error.message) || '');
+        const message = String(error && error.message || error || '');
+        const resultUnknown = code === 'RPC_TIMEOUT'
+          || /failed to fetch|networkerror|network request failed/i.test(message);
+        if (ownPasswordChange && resultUnknown) {
+          this.clearUserResumeMarker();
+          this.clearUserSession('user-password-rotation-unconfirmed', code);
+        }
+        throw error;
+      }
     }
 
     async deleteUser(targetUserId) {
@@ -2729,6 +2748,16 @@
         }
         throw error;
       }
+    }
+
+    async getStorageStats() {
+      this.requireUserSession();
+      const result = await this.rpc('monthly_v7_get_storage_stats', {
+        p_workspace_key: this.config.workspaceKey,
+        p_user_session_id: this.userSession.id,
+        p_client_session_id: this.clientSessionId
+      });
+      return this.commandResult(result, 'GET_STORAGE_STATS_FAILED');
     }
 
     async getEntity(entityType, entityId) {

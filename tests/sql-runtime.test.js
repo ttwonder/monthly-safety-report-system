@@ -64,6 +64,15 @@ async function applyTrustedDeviceResume(db) {
   await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-trusted-device-resume.sql'), 'utf8'));
 }
 
+async function applyDataManagement(db) {
+  await applyV7(db);
+  await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-delete-module-repair.sql'), 'utf8'));
+  await applyTrustedDeviceResume(db);
+  await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-topic-reports.sql'), 'utf8'));
+  await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-topic-reports-v2.sql'), 'utf8'));
+  await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-data-management-storage.sql'), 'utf8'));
+}
+
 async function activateNormalizedAuthority(db) {
   await db.exec(`
     update public.monthly_v7_workspaces
@@ -691,10 +700,10 @@ test('V7 report metadata、structure 與 KPI batch 使用短 lease 且批次全�
   }
 });
 
-test('V7 使用者與進站密碼由伺服器權限管理，Admin 不可碰 Owner 且密碼更新撤銷舊 sessions', async () => {
+test('V7 密碼權限矩陣：只有 Owner 改進站密碼，Admin 只改自己登入密碼，Owner 可改所有登入密碼', async () => {
   const db = await createLegacyDatabase();
   try {
-    await applyV7(db);
+    await applyDataManagement(db);
     await db.exec(`update public.monthly_v7_workspaces set authority_state='NORMALIZED_ACTIVE', minimum_client_version=7`);
     const owner = await openAndLogin(db, '11111111-1111-4111-8111-111111111111', 'owner', 'owner-pass', 'tab-owner');
     const ownerId = owner.login.user.id;
@@ -705,21 +714,57 @@ test('V7 使用者與進站密碼由伺服器權限管理，Admin 不可碰 Owne
     assert.equal(adminCreated.ok, true);
 
     const admin = await openAndLogin(db, '22222222-2222-4222-8222-222222222222', 'admin1', 'admin-pass', 'tab-admin');
-    const forbidden = rpcResult(await db.query(
+    const forbiddenOwnerEdit = rpcResult(await db.query(
       'select public.monthly_v7_update_user($1,$2,$3,$4,$5,$6,$7,$8,$9) as result',
       ['workspace-test', admin.login.user_session_id, admin.clientSessionId, randomUUID(), ownerId, 'owner', 'Owner 被竄改', 'owner', null]
     ));
-    assert.equal(forbidden.ok, false);
-    assert.equal(forbidden.error, 'FORBIDDEN');
+    assert.equal(forbiddenOwnerEdit.ok, false);
+    assert.equal(forbiddenOwnerEdit.error, 'FORBIDDEN');
     const operatorCreated = rpcResult(await db.query(
       'select public.monthly_v7_create_user($1,$2,$3,$4,$5,$6,$7,$8) as result',
       ['workspace-test', admin.login.user_session_id, admin.clientSessionId, randomUUID(), 'operator2', '操作員二', 'operator', 'operator2-pass']
     ));
     assert.equal(operatorCreated.ok, true);
 
+    const forbiddenOtherPassword = rpcResult(await db.query(
+      'select public.monthly_v7_update_user($1,$2,$3,$4,$5,$6,$7,$8,$9) as result',
+      ['workspace-test', admin.login.user_session_id, admin.clientSessionId, randomUUID(), operatorCreated.user.id, 'operator2', '操作員二', 'operator', 'admin-must-not-reset']
+    ));
+    assert.equal(forbiddenOtherPassword.ok, false);
+    assert.equal(forbiddenOtherPassword.error, 'FORBIDDEN');
+
+    const forbiddenSitePassword = rpcResult(await db.query(
+      'select public.monthly_v7_update_site_password($1,$2,$3,$4,$5) as result',
+      ['workspace-test', admin.login.user_session_id, admin.clientSessionId, randomUUID(), 'admin-must-not-change-site']
+    ));
+    assert.equal(forbiddenSitePassword.ok, false);
+    assert.equal(forbiddenSitePassword.error, 'FORBIDDEN');
+
+    const adminSelfChanged = rpcResult(await db.query(
+      'select public.monthly_v7_update_user($1,$2,$3,$4,$5,$6,$7,$8,$9) as result',
+      ['workspace-test', admin.login.user_session_id, admin.clientSessionId, randomUUID(), adminCreated.user.id, 'admin1', '管理員一', 'admin', 'admin-self-pass']
+    ));
+    assert.equal(adminSelfChanged.ok, true);
+    await assert.rejects(
+      db.query(
+        'select public.monthly_v7_get_snapshot($1,$2,$3) as result',
+        ['workspace-test', admin.site.site_session_id, admin.login.user_session_id]
+      ),
+      /READ_SESSION_INVALID|USER_SESSION_INVALID/
+    );
+    const adminRelogin = await openAndLogin(db, '22222222-2222-4222-8222-222222222222', 'admin1', 'admin-self-pass', 'tab-admin-new');
+    assert.equal(adminRelogin.login.ok, true);
+
+    await setAuthUid(db, owner.uid);
+    const ownerResetOperator = rpcResult(await db.query(
+      'select public.monthly_v7_update_user($1,$2,$3,$4,$5,$6,$7,$8,$9) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(), operatorCreated.user.id, 'operator2', '操作員二', 'operator', 'owner-reset-pass']
+    ));
+    assert.equal(ownerResetOperator.ok, true);
+
     const siteChanged = rpcResult(await db.query(
       'select public.monthly_v7_update_site_password($1,$2,$3,$4,$5) as result',
-      ['workspace-test', admin.login.user_session_id, admin.clientSessionId, randomUUID(), 'new-site-pass']
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(), 'new-site-pass']
     ));
     assert.equal(siteChanged.ok, true);
     assert.equal(siteChanged.requiresReauth, true);
@@ -728,7 +773,7 @@ test('V7 使用者與進站密碼由伺服器權限管理，Admin 不可碰 Owne
         'select public.monthly_v7_get_snapshot($1,$2,$3) as result',
         ['workspace-test', owner.site.site_session_id, owner.login.user_session_id]
       ),
-      /SITE_SESSION_INVALID/
+      /SITE_SESSION_INVALID|READ_SESSION_INVALID/
     );
     await setAuthUid(db, '33333333-3333-4333-8333-333333333333');
     await assert.rejects(
@@ -743,6 +788,94 @@ test('V7 使用者與進站密碼由伺服器權限管理，Admin 不可碰 Owne
     const users = await db.query(`select username,display_name,role,active from public.monthly_v7_users order by username`);
     assert.equal(users.rows.find((user) => user.username === 'owner').display_name, 'Owner');
     assert.equal(users.rows.find((user) => user.username === 'operator2').role, 'operator');
+  } finally {
+    await db.close();
+  }
+});
+
+test('V7 空間統計區分資料庫物理量、月報／專題邏輯量並限制數據管理角色', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyDataManagement(db);
+    await activateNormalizedAuthority(db);
+    const owner = await openAndLogin(db, '11111111-1111-4111-8111-111111111111', 'owner', 'owner-pass', 'tab-storage-owner');
+    const readStats = async (session = owner) => rpcResult(await db.query(
+      'select public.monthly_v7_get_storage_stats($1,$2,$3) as result',
+      ['workspace-test', session.login.user_session_id, session.clientSessionId]
+    ));
+
+    const before = await readStats();
+    assert.equal(before.ok, true);
+    assert.equal(before.staticSiteHost, 'github-pages');
+    assert.equal(before.staticSiteInSupabase, false);
+    assert.ok(Number(before.databaseTotalBytes) > 0);
+    assert.ok(Number(before.appDatabasePhysicalBytes) > 0);
+    assert.ok(Number(before.databaseTotalBytes) >= Number(before.appDatabasePhysicalBytes));
+    assert.equal(Number(before.storageObjectBytes), 0);
+    assert.equal(Number(before.storageObjectCount), 0);
+    assert.equal(before.monthlyReports.length, 1);
+    assert.ok(Number(before.monthlyReports[0].contentBytes) > 0);
+    assert.equal(Number(before.monthlyReports[0].snapshotBytes), 0);
+
+    const monthlyReportId = before.monthlyReports[0].id;
+    const monthlySnapshot = rpcResult(await db.query(
+      'select public.monthly_v7_create_report_snapshot($1,$2,$3,$4,$5,$6) as result',
+      ['workspace-test', owner.site.site_session_id, owner.login.user_session_id, randomUUID(), monthlyReportId, 'history']
+    ));
+    assert.equal(monthlySnapshot.ok, true);
+    const afterMonthlySnapshot = await readStats();
+    assert.ok(Number(afterMonthlySnapshot.monthlyReports[0].snapshotBytes) > 0);
+    assert.ok(Number(afterMonthlySnapshot.monthlyReports[0].logicalBytes) > Number(before.monthlyReports[0].logicalBytes));
+
+    const topicContent = {
+      domain: 'topic',
+      modules: [{ id: 'topic-storage-1', title: '空間測試', layout: '1', columns: ['專題內容'], attachments: [] }]
+    };
+    const topicCreated = rpcResult(await db.query(
+      'select public.monthly_v7_topic_create_report($1,$2,$3,$4,$5,$6,$7,$8::jsonb) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(), randomUUID(), '空間統計專題', '2026-08-16', JSON.stringify(topicContent)]
+    ));
+    assert.equal(topicCreated.ok, true);
+    const topicBeforeSnapshot = rpcResult(await db.query(
+      'select public.monthly_v7_topic_list_reports($1,$2,$3) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId]
+    ));
+    assert.equal(topicBeforeSnapshot.ok, true);
+    assert.ok(Number(topicBeforeSnapshot.reports[0].logicalBytes) > 0);
+    assert.equal(Number(topicBeforeSnapshot.reports[0].snapshotBytes), 0);
+
+    const topicSnapshot = rpcResult(await db.query(
+      'select public.monthly_v7_topic_create_snapshot($1,$2,$3,$4,$5,$6) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(), topicCreated.report.id, topicCreated.report.revision]
+    ));
+    assert.equal(topicSnapshot.ok, true);
+    const topicAfterSnapshot = rpcResult(await db.query(
+      'select public.monthly_v7_topic_list_reports($1,$2,$3) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId]
+    ));
+    assert.ok(Number(topicAfterSnapshot.reports[0].snapshotBytes) > 0);
+    assert.ok(Number(topicAfterSnapshot.reports[0].logicalBytes) > Number(topicBeforeSnapshot.reports[0].logicalBytes));
+
+    const adminCreated = rpcResult(await db.query(
+      'select public.monthly_v7_create_user($1,$2,$3,$4,$5,$6,$7,$8) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(), 'storage-admin', '空間管理員', 'admin', 'storage-admin-pass']
+    ));
+    assert.equal(adminCreated.ok, true);
+    const admin = await openAndLogin(db, '22222222-2222-4222-8222-222222222222', 'storage-admin', 'storage-admin-pass', 'tab-storage-admin');
+    assert.equal((await readStats(admin)).ok, true);
+
+    const operator = await openAndLogin(db, '33333333-3333-4333-8333-333333333333', 'operator', 'operator-pass', 'tab-storage-operator');
+    const forbidden = await readStats(operator);
+    assert.equal(forbidden.ok, false);
+    assert.equal(forbidden.error, 'FORBIDDEN');
+
+    const acl = (await db.query(`
+      select
+        not has_function_privilege('anon', 'public.monthly_v7_get_storage_stats(text,uuid,text)', 'EXECUTE') as anon_blocked,
+        has_function_privilege('authenticated', 'public.monthly_v7_get_storage_stats(text,uuid,text)', 'EXECUTE') as authenticated_allowed
+    `)).rows[0];
+    assert.equal(acl.anon_blocked, true);
+    assert.equal(acl.authenticated_allowed, true);
   } finally {
     await db.close();
   }

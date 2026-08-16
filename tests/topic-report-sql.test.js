@@ -48,6 +48,7 @@ async function createDatabase() {
   await db.exec(`update public.monthly_v7_workspaces set authority_state='NORMALIZED_ACTIVE',minimum_client_version=7`);
   await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-topic-reports.sql'), 'utf8'));
   await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-topic-reports-v2.sql'), 'utf8'));
+  await db.exec(await readFile(join(ROOT, 'docs', 'supabase-schema-v7-data-management-storage.sql'), 'utf8'));
   return db;
 }
 
@@ -175,6 +176,8 @@ test('新增報告原子產生唯一系統編號且lost ACK重送不建立副本
     ));
     assert.equal(listed.ok, true);
     assert.deepEqual(listed.reports.map((row) => row.systemNumber), ['SR-20260816-002', 'SR-20260816-001']);
+    assert.equal(listed.reports.every((row) => Number(row.logicalBytes) > 0), true);
+    assert.equal(listed.reports.every((row) => Number(row.snapshotBytes) === 0), true);
     assert.equal((await db.query(`select count(*)::int count from public.monthly_v7_topic_reports`)).rows[0].count, 2);
   } finally {
     await db.close();

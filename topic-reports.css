@@ -68,11 +68,12 @@ button,a { -webkit-tap-highlight-color:transparent; }
 .topic-status[data-tone="danger"] { color:#991b1b; background:#fee2e2; }
 .topic-table-wrap { width:100%; overflow:auto; border:1px solid #dbeafe; border-radius:13px; }
 .topic-table { width:100%; border-collapse:collapse; min-width:780px; table-layout:fixed; background:#fff; }
-.topic-col-title { width:38%; }
-.topic-col-date { width:12%; }
-.topic-col-status { width:17%; }
-.topic-col-updated { width:21%; }
-.topic-col-actions { width:12%; }
+.topic-col-title { width:32%; }
+.topic-col-date { width:10%; }
+.topic-col-status { width:14%; }
+.topic-col-size { width:11%; }
+.topic-col-updated { width:20%; }
+.topic-col-actions { width:13%; }
 .topic-table th { position:sticky; top:0; z-index:1; background:#eef2ff; color:#3730a3; text-align:left; padding:0; font-size:.8rem; }
 .topic-table th:last-child { padding:11px; }
 .topic-sort-button {

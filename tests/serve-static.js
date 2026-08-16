@@ -23,9 +23,10 @@ function freshState() {
     records: [],
     users: [
       { id: '33333333-3333-4333-8333-333333333331', username: 'owner', displayName: 'Owner A', role: 'owner', active: true, version: 1 },
-      { id: '33333333-3333-4333-8333-333333333332', username: 'operator', displayName: 'Operator B', role: 'operator', active: true, version: 1 }
+      { id: '33333333-3333-4333-8333-333333333332', username: 'operator', displayName: 'Operator B', role: 'operator', active: true, version: 1 },
+      { id: '33333333-3333-4333-8333-333333333333', username: 'admin', displayName: 'Admin C', role: 'admin', active: true, version: 1 }
     ],
-    passwords: { owner: 'owner-pass', operator: 'operator-pass' },
+    passwords: { owner: 'owner-pass', operator: 'operator-pass', admin: 'admin-pass' },
     sitePassword: 'gate-pass',
     siteSessions: new Map(), userSessions: new Map(), trustedDevices: new Map(), resumeTokens: new Map(),
     leases: new Map(), operations: new Map(), deletedModules: [], snapshots: [],
@@ -37,6 +38,7 @@ function freshState() {
 
 let state = freshState();
 const clone = (value) => JSON.parse(JSON.stringify(value));
+const byteSize = (value) => Buffer.byteLength(JSON.stringify(value == null ? null : value), 'utf8');
 const now = () => Date.now();
 const sha256 = (value) => createHash('sha256').update(String(value), 'utf8').digest('hex');
 const canonical = (value) => {
@@ -183,6 +185,40 @@ function rpc(name, p) {
     }
     return clone(state.statusResponse);
   }
+  if (name === 'monthly_v7_get_storage_stats') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    if (!['owner', 'admin'].includes(actor.role)) return { ok: false, error: 'FORBIDDEN' };
+    const contentBytes = byteSize(state.report) + state.modules.reduce((total, module) => total + byteSize(module), 0);
+    const snapshotBytes = state.snapshots
+      .filter((snapshot) => !snapshot.reportId || snapshot.reportId === state.report.id)
+      .reduce((total, snapshot) => total + byteSize(snapshot), 0);
+    const appDatabasePhysicalBytes = Math.max(8192, byteSize({
+      report: state.report, modules: state.modules, records: state.records,
+      users: state.users, snapshots: state.snapshots, topicReports: state.topicReports,
+      topicSnapshots: state.topicSnapshots
+    }));
+    return {
+      ok: true,
+      generatedAt: new Date(now()).toISOString(),
+      staticSiteHost: 'github-pages',
+      staticSiteInSupabase: false,
+      databaseTotalBytes: appDatabasePhysicalBytes + 32768,
+      appDatabasePhysicalBytes,
+      storageObjectBytes: 0,
+      storageObjectCount: 0,
+      monthlyReports: [{
+        id: state.report.id,
+        legacyFileId: state.report.legacyFileId,
+        title: state.report.title,
+        reportDate: state.report.date,
+        contentBytes,
+        snapshotBytes,
+        logicalBytes: contentBytes + snapshotBytes,
+        updatedAt: new Date(now()).toISOString()
+      }]
+    };
+  }
   if (name === 'monthly_v7_topic_list_reports') {
     const actor = topicActor(p);
     if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
@@ -194,6 +230,10 @@ function rpc(name, p) {
         const lease = state.topicLeases.get(report.id);
         const active = Boolean(lease && !lease.released && lease.expiresAt > now());
         const holder = active ? state.users.find((user) => user.id === lease.holderUserId) : null;
+        const contentBytes = byteSize(report);
+        const snapshotBytes = state.topicSnapshots
+          .filter((snapshot) => snapshot.reportId === report.id)
+          .reduce((total, snapshot) => total + byteSize(snapshot), 0);
         return {
           id: report.id,
           systemNumber: report.systemNumber,
@@ -202,6 +242,9 @@ function rpc(name, p) {
           revision: report.revision,
           status: report.status,
           moduleCount: Array.isArray(report.content && report.content.modules) ? report.content.modules.length : 0,
+          contentBytes,
+          snapshotBytes,
+          logicalBytes: contentBytes + snapshotBytes,
           createdAt: report.createdAt,
           updatedAt: report.updatedAt,
           updatedBy: state.users.find((user) => user.id === report.updatedByUserId)?.displayName || '',
@@ -685,13 +728,56 @@ function rpc(name, p) {
     state.siteSessions.delete(p.p_site_session_id);
     return { ok: true, revoked: true, trustedDeviceRevoked: false };
   }
+  if (name === 'monthly_v7_update_user') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    if (!['owner', 'admin'].includes(actor.role)) return { ok: false, error: 'FORBIDDEN' };
+    const target = state.users.find((entry) => entry.id === p.p_target_user_id && entry.active !== false);
+    if (!target) return { ok: false, error: 'ENTITY_NOT_FOUND' };
+    const passwordChanged = Boolean(p.p_new_password);
+    if (actor.role !== 'owner' && (target.role === 'owner' || p.p_role === 'owner')) return { ok: false, error: 'FORBIDDEN' };
+    if (passwordChanged && actor.role !== 'owner' && target.id !== actor.id) return { ok: false, error: 'FORBIDDEN' };
+    if (passwordChanged && String(p.p_new_password).length < 8) return { ok: false, error: 'INVALID_PAYLOAD' };
+    const requestHash = sha256(canonical({
+      command: 'update_user', targetUserId: target.id,
+      username: p.p_username, displayName: p.p_display_name, role: p.p_role,
+      passwordDigest: passwordChanged ? sha256(p.p_new_password) : null
+    }));
+    const replay = replayOperation(p.p_operation_id, actor.id, requestHash);
+    if (replay) return replay;
+    if (state.users.some((entry) => entry.id !== target.id && entry.username === p.p_username)) {
+      return { ok: false, error: 'USERNAME_EXISTS' };
+    }
+    const oldUsername = target.username;
+    const oldPassword = state.passwords[oldUsername];
+    target.username = String(p.p_username || '').trim();
+    target.displayName = String(p.p_display_name || target.username).trim();
+    target.role = p.p_role;
+    target.version += 1;
+    if (target.username !== oldUsername) delete state.passwords[oldUsername];
+    state.passwords[target.username] = passwordChanged ? String(p.p_new_password) : oldPassword;
+    for (const [sessionId, session] of state.userSessions.entries()) {
+      if (session.userId === target.id) state.userSessions.delete(sessionId);
+    }
+    for (const token of state.resumeTokens.values()) {
+      if (token.purpose === 'user' && token.userId === target.id) token.revoked = true;
+    }
+    const result = {
+      ok: true,
+      user: clone(target),
+      passwordChanged,
+      requiresUserReauth: passwordChanged,
+      operationId: p.p_operation_id
+    };
+    return storeOperation(p.p_operation_id, actor.id, requestHash, result);
+  }
   if (name === 'monthly_v7_update_site_password') {
     const session = state.userSessions.get(p.p_user_session_id);
     const actor = session && session.clientSessionId === p.p_client_session_id
       ? state.users.find((entry) => entry.id === session.userId)
       : null;
     if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
-    if (!['owner', 'admin'].includes(actor.role)) return { ok: false, error: 'FORBIDDEN' };
+    if (actor.role !== 'owner') return { ok: false, error: 'FORBIDDEN' };
     if (String(p.p_new_password || '').length < 8) return { ok: false, error: 'INVALID_PAYLOAD' };
     const requestHash = sha256(canonical({
       command: 'update_site_password',
@@ -1089,7 +1175,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/supabase-config.js') {
     res.writeHead(200, { 'Content-Type': mime['.js'] });
-    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace',topicRequestTimeoutMs:800};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.1.0'});`);
+    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace',topicRequestTimeoutMs:800};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.2.0'});`);
   }
   if (url.pathname === '/vendor/supabase-2.112.2.js') { res.writeHead(200, { 'Content-Type': mime['.js'] }); return res.end(fakeSdk); }
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;
