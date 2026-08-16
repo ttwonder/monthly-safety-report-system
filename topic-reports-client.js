@@ -475,6 +475,9 @@
       if (!isUuid(reportId) || !Number.isInteger(Number(expectedRevision)) || Number(expectedRevision) < 1) {
         throw new Error('TOPIC_DELETE_SCOPE_INVALID');
       }
+      const pendingScope = this.operationScope('delete', reportId, reportId);
+      const pending = this.readPending(pendingScope);
+      if (pending) return this.retryPendingOperation(pending);
       return this.executeOperation({
         operationType: 'delete',
         reportId,

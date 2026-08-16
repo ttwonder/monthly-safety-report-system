@@ -334,6 +334,43 @@ test('Owner刪除專題使用獨立topic RPC且lost ACK重送沿用同一operati
   assert.equal(sessionStorage.length, 0);
 });
 
+test('刪除lost ACK後即使清單revision漂移仍重播原operation與原revision', async () => {
+  const sessionStorage = new MemoryStorage();
+  const calls = [];
+  let first = true;
+  const transport = {
+    async ensureAnonymous() {},
+    async rpc(name, params) {
+      calls.push({ name, params: JSON.parse(JSON.stringify(params)) });
+      assert.equal(name, 'monthly_v7_topic_delete_report');
+      if (first) {
+        first = false;
+        const error = new Error('RPC_TIMEOUT');
+        error.code = 'RPC_TIMEOUT';
+        throw error;
+      }
+      return { ok: true, deleted: true, reportId: report().id, operationId: params.p_operation_id };
+    }
+  };
+  const client = new TopicReportClient({
+    transport, config: { workspaceKey: 'workspace-test' }, identity: identity(),
+    sessionStorage, draftStorage: new MemoryStorage(),
+    idFactory: () => '88888888-8888-4888-8888-888888888888'
+  });
+  await client.initialize();
+  await assert.rejects(
+    () => client.deleteReport({ reportId: report().id, expectedRevision: 1 }),
+    /RPC_TIMEOUT/
+  );
+
+  const deleted = await client.deleteReport({ reportId: report().id, expectedRevision: 2 });
+  assert.equal(deleted.deleted, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].params.p_operation_id, calls[1].params.p_operation_id);
+  assert.equal(calls[1].params.p_expected_revision, 1);
+  assert.equal(sessionStorage.length, 0);
+});
+
 test('不保存退出只在無pending save時釋放，且release ACK後才清草稿', async () => {
   const sessionStorage = new MemoryStorage();
   const draftStorage = new MemoryStorage();

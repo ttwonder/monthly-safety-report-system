@@ -554,6 +554,71 @@ test('清單隱藏內部欄位、名稱最寬、表頭雙向排序、Owner刪除
   }
 });
 
+test('Owner刪除lost ACK後遇revision漂移會先對帳原operation再用新revision完成', async ({ browser, request }) => {
+  const ownerContext = await browser.newContext();
+  const operatorContext = await browser.newContext();
+  const ownerMonthly = await ownerContext.newPage();
+  const operatorMonthly = await operatorContext.newPage();
+  try {
+    await enterAndLogin(ownerMonthly, 'owner', 'owner-pass');
+    await enterAndLogin(operatorMonthly, 'operator', 'operator-pass');
+    const ownerList = await openTopicList(ownerMonthly);
+    const editor = await createTopic(ownerList, '刪除對帳專題');
+    const reportId = new URL(editor.url()).searchParams.get('report');
+    await completeEditing(editor);
+    await ownerList.locator('#topicRefreshReports').click();
+
+    const deleteRequests = [];
+    await ownerList.route('**/__fake_rpc', async (route) => {
+      const body = route.request().postDataJSON();
+      if (body?.name === 'monthly_v7_topic_delete_report') {
+        deleteRequests.push(JSON.parse(JSON.stringify(body.params)));
+      }
+      await route.continue();
+    });
+    await request.post('/__fake_hang_rpc?name=monthly_v7_topic_delete_report&count=1');
+    ownerList.once('dialog', (dialog) => dialog.accept());
+    await ownerList.locator(`[data-delete-report="${reportId}"]`).click();
+    await expect(ownerList.locator('#topicListStatus')).toContainText('逾時', { timeout: 10000 });
+    expect(await ownerList.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith('topic:v1:pending:delete:')).length)).toBe(1);
+
+    const operatorList = await openTopicList(operatorMonthly);
+    const popupPromise = operatorList.waitForEvent('popup');
+    await operatorList.locator(`[data-open-report="${reportId}"]`).click();
+    const operatorEditor = await popupPromise;
+    await expect(operatorEditor.locator('#topicModeBadge')).toHaveText('可編輯', { timeout: 20000 });
+    await operatorEditor.locator('#topicReportTitle').fill('刪除對帳專題（遠端修訂）');
+    await completeEditing(operatorEditor);
+
+    await ownerList.locator('#topicRefreshReports').click();
+    await expect(ownerList.locator('#topicReportsBody')).toContainText('刪除對帳專題（遠端修訂）');
+    const beforeRetry = await (await request.get('/__fake_state')).json();
+    const currentRevision = beforeRetry.topicReports.find((report) => report.id === reportId).revision;
+
+    ownerList.once('dialog', (dialog) => dialog.accept());
+    await ownerList.locator(`[data-delete-report="${reportId}"]`).click();
+    await expect(ownerList.locator('#topicListStatus')).toContainText('已由其他窗口更新');
+    expect(await ownerList.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith('topic:v1:pending:delete:')).length)).toBe(0);
+    expect(deleteRequests).toHaveLength(2);
+    expect(deleteRequests[1].p_operation_id).toBe(deleteRequests[0].p_operation_id);
+    expect(deleteRequests[1].p_expected_revision).toBe(deleteRequests[0].p_expected_revision);
+    expect(deleteRequests[1].p_expected_revision).toBeLessThan(currentRevision);
+
+    ownerList.once('dialog', (dialog) => dialog.accept());
+    await ownerList.locator(`[data-delete-report="${reportId}"]`).click();
+    await expect(ownerList.locator('#topicReportsBody tr')).toHaveCount(0, { timeout: 20000 });
+    expect(deleteRequests).toHaveLength(3);
+    expect(deleteRequests[2].p_operation_id).not.toBe(deleteRequests[0].p_operation_id);
+    expect(deleteRequests[2].p_expected_revision).toBe(currentRevision);
+    const after = await (await request.get('/__fake_state')).json();
+    expect(after.topicReports.find((report) => report.id === reportId).deletedAt).toBeTruthy();
+    expect(after.rpcCounts.monthly_v7_topic_delete_report).toBe(2);
+  } finally {
+    await ownerContext.close();
+    await operatorContext.close();
+  }
+});
+
 test('不保存並退出在release結果不明前先同步保留最新本機草稿', async ({ page, request }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);
