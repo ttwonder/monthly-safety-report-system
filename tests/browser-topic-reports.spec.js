@@ -732,23 +732,53 @@ test('數值框貼合相鄰文字大小並保留可選取的前後雙空格', as
     const reference = highlight.closest('.topic-editable').querySelector('.topic-reference-text');
     const highlightStyle = getComputedStyle(highlight);
     const referenceStyle = getComputedStyle(reference);
+    const highlightRect = highlight.getBoundingClientRect();
+    const referenceRect = reference.getBoundingClientRect();
     return {
       text: highlight.textContent,
       inlineWidth: highlight.style.width,
       whiteSpace: highlightStyle.whiteSpace,
       fontSize: Number.parseFloat(highlightStyle.fontSize),
       referenceFontSize: Number.parseFloat(referenceStyle.fontSize),
-      height: highlight.getBoundingClientRect().height,
-      referenceHeight: reference.getBoundingClientRect().height,
-      width: highlight.getBoundingClientRect().width
+      height: highlightRect.height,
+      referenceHeight: referenceRect.height,
+      width: highlightRect.width,
+      display: highlightStyle.display,
+      verticalAlign: highlightStyle.verticalAlign,
+      backgroundColor: highlightStyle.backgroundColor,
+      color: highlightStyle.color,
+      borderWidth: highlightStyle.borderTopWidth,
+      borderRadius: highlightStyle.borderTopLeftRadius,
+      paddingLeft: highlightStyle.paddingLeft,
+      paddingRight: highlightStyle.paddingRight,
+      fontWeight: highlightStyle.fontWeight,
+      marginLeft: highlightStyle.marginLeft,
+      boxShadow: highlightStyle.boxShadow,
+      printColorAdjust: highlightStyle.printColorAdjust || highlightStyle.webkitPrintColorAdjust,
+      bottomDelta: Math.abs(highlightRect.bottom - referenceRect.bottom)
     };
   });
   expect(geometry.text).toBe('  重要數值 100  ');
   expect(geometry.inlineWidth).toBe('');
   expect(geometry.whiteSpace).toBe('pre-wrap');
   expect(geometry.fontSize).toBe(geometry.referenceFontSize);
-  expect(geometry.height).toBeLessThanOrEqual(geometry.referenceHeight * 1.45);
+  expect(geometry.height).toBeLessThanOrEqual(geometry.referenceHeight * 1.25);
   expect(geometry.width).toBeLessThan(240);
+  expect(geometry).toEqual(expect.objectContaining({
+    display: 'inline',
+    verticalAlign: 'baseline',
+    backgroundColor: 'rgb(253, 242, 248)',
+    color: 'rgb(190, 24, 93)',
+    borderWidth: '1px',
+    borderRadius: '4px',
+    paddingLeft: '4px',
+    paddingRight: '4px',
+    fontWeight: '700',
+    marginLeft: '0px',
+    printColorAdjust: 'exact'
+  }));
+  expect(geometry.boxShadow).not.toBe('none');
+  expect(geometry.bottomDelta).toBeLessThanOrEqual(3);
   await testInfo.attach('topic-editor-highlight-compact.png', {
     body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
   });
@@ -816,13 +846,16 @@ test('插入表格可拖曳欄界並在保存重開後保留欄寬', async ({ pa
   expect(reopenedWidths[1]).toBeCloseTo(resized[1], 2);
 });
 
-test('專題PDF百分比縮放會套用到列印區且不修改報告Revision', async ({ page, request }) => {
+test('專題PDF縮放與直橫方向會套用到列印區且不修改報告Revision', async ({ page, request }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);
   const editor = await createTopic(list, 'PDF縮放專題');
   const scale = editor.locator('#topicPdfScale');
+  const orientation = editor.locator('#topicPdfOrientation');
   await expect(scale).toHaveValue('100');
+  await expect(orientation).toHaveValue('portrait');
   await scale.selectOption('80');
+  await orientation.selectOption('landscape');
 
   await editor.evaluate(() => {
     window.__topicScalePrintObserved = null;
@@ -830,23 +863,193 @@ test('專題PDF百分比縮放會套用到列印區且不修改報告Revision', 
       const area = document.querySelector('#topicPrintArea');
       window.__topicScalePrintObserved = {
         selected: document.querySelector('#topicPdfScale').value,
+        selectedOrientation: document.querySelector('#topicPdfOrientation').value,
         dataScale: area.dataset.pdfScale,
+        dataOrientation: area.dataset.pdfOrientation,
         zoom: area.style.getPropertyValue('--topic-pdf-scale'),
-        width: area.style.getPropertyValue('--topic-pdf-width')
+        width: area.style.getPropertyValue('--topic-pdf-width'),
+        pageRule: document.querySelector('#topicPrintPageStyle')?.textContent || ''
       };
     };
   });
   await editor.locator('#topicPrint').click();
   await expect.poll(() => editor.evaluate(() => window.__topicScalePrintObserved)).not.toBeNull();
   expect(await editor.evaluate(() => window.__topicScalePrintObserved)).toEqual({
-    selected: '80', dataScale: '80', zoom: '0.8', width: '125%'
+    selected: '80', selectedOrientation: 'landscape', dataScale: '80', dataOrientation: 'landscape',
+    zoom: '0.8', width: '125%', pageRule: '@page { size: A4 landscape; margin: 10mm; }'
   });
+  expect(await editor.evaluate(() => localStorage.getItem('topic:v1:pdf-orientation'))).toBe('landscape');
   const state = await (await request.get('/__fake_state')).json();
   expect(state.topicReports[0].revision).toBe(1);
   expect(state.topicSnapshots).toHaveLength(1);
 });
 
-test('雙欄專題PDF維持整頁物件百分比並產生可讀A4檔', async ({ page }, testInfo) => {
+test('專題PDF等待snapshot期間內容變更會fail closed且不混用新圖表與舊資料表', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, 'PDF snapshot intent 專題');
+  const editable = editor.locator('.topic-editable').first();
+  await editable.click();
+  await editor.locator('[data-insert="trend"]').click();
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 2);
+
+  let releaseSnapshot;
+  let signalSnapshotStarted;
+  const snapshotGate = new Promise((resolve) => { releaseSnapshot = resolve; });
+  const snapshotStarted = new Promise((resolve) => { signalSnapshotStarted = resolve; });
+  let held = false;
+  await editor.route('**/__fake_rpc', async (route) => {
+    const body = route.request().postDataJSON();
+    if (!held && body?.name === 'monthly_v7_topic_create_snapshot') {
+      held = true;
+      signalSnapshotStarted();
+      await snapshotGate;
+    }
+    await route.continue();
+  });
+  await editor.evaluate(() => {
+    window.__topicIntentPrintCount = 0;
+    window.print = () => { window.__topicIntentPrintCount += 1; };
+  });
+
+  await editor.locator('#topicPrint').click();
+  await snapshotStarted;
+  const liveValue = editor.locator('.topic-trend-card tbody tr').first().locator('td').first();
+  await expect(liveValue).toHaveAttribute('contenteditable', 'false');
+  await liveValue.evaluate((cell) => {
+    cell.contentEditable = 'true';
+    cell.textContent = '999';
+    cell.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '999' }));
+  });
+  releaseSnapshot();
+
+  await expect(editor.locator('#topicLeaseNotice')).toContainText('列印等待期間內容已變更', { timeout: 10000 });
+  expect(await editor.evaluate(() => window.__topicIntentPrintCount)).toBe(0);
+  await expect(liveValue).toHaveText('999');
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.topicReports[0].revision).toBe(2);
+  expect(state.topicSnapshots).toHaveLength(1);
+});
+
+test('專題PDF等待snapshot期間取得編輯並恢復草稿也會以整體內容世代fail closed', async ({ browser, request }) => {
+  const context = await browser.newContext();
+  const monthly = await context.newPage();
+  let releaseSnapshot = () => {};
+  try {
+    await enterAndLogin(monthly, 'owner', 'owner-pass');
+    const list = await openTopicList(monthly);
+    const first = await createTopic(list, 'PDF restore draft intent 專題');
+    const reportId = new URL(first.url()).searchParams.get('report');
+    const secondPromise = first.waitForEvent('popup');
+    await first.evaluate(() => window.open(window.location.href, '_blank'));
+    const second = await secondPromise;
+    await expect(second.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+    await expect(second.locator('#topicModeBadge')).toHaveText('唯讀');
+
+    const cloud = await (await request.get('/__fake_state')).json();
+    const report = cloud.topicReports.find((item) => item.id === reportId);
+    await second.evaluate(({ id, revision, content }) => {
+      const identity = window.TopicReportEditor.getIdentity();
+      const editorState = window.TopicReportEditor.getState();
+      const draftContent = structuredClone(content);
+      draftContent.modules[0].columns[0] = '<p>等待列印時恢復的整體草稿</p>';
+      const key = `topic:v1:draft:${id}:${identity.user.id}:${editorState.editorWindowId}`;
+      localStorage.setItem(key, JSON.stringify({
+        version: 1, domain: 'topic', reportId: id, actorUserId: identity.user.id,
+        editorWindowId: editorState.editorWindowId, baseRevision: revision,
+        content: draftContent, savedLocallyAt: new Date().toISOString()
+      }));
+    }, { id: reportId, revision: report.revision, content: report.content });
+
+    let signalSnapshotStarted;
+    const snapshotGate = new Promise((resolve) => { releaseSnapshot = resolve; });
+    const snapshotStarted = new Promise((resolve) => { signalSnapshotStarted = resolve; });
+    let held = false;
+    await second.route('**/__fake_rpc', async (route) => {
+      const body = route.request().postDataJSON();
+      if (!held && body?.name === 'monthly_v7_topic_create_snapshot') {
+        held = true;
+        signalSnapshotStarted();
+        await snapshotGate;
+      }
+      await route.continue();
+    });
+    await second.evaluate(() => {
+      window.__topicRestorePrintCount = 0;
+      window.print = () => { window.__topicRestorePrintCount += 1; };
+    });
+
+    await second.locator('#topicPrint').click();
+    await snapshotStarted;
+    await expect(second.locator('#topicAcquireEdit')).toBeDisabled();
+    first.once('dialog', (dialog) => dialog.accept());
+    const firstClosed = first.waitForEvent('close');
+    await first.locator('#topicDiscardExit').click();
+    await firstClosed;
+
+    second.on('dialog', (dialog) => dialog.accept());
+    await second.evaluate(() => {
+      const acquire = document.querySelector('#topicAcquireEdit');
+      acquire.hidden = false;
+      acquire.disabled = false;
+      acquire.click();
+    });
+    await expect(second.locator('#topicModeBadge')).toHaveText('可編輯', { timeout: 20000 });
+    await expect(second.locator('.topic-editable').first()).toContainText('等待列印時恢復的整體草稿');
+    releaseSnapshot();
+
+    await expect(second.locator('#topicLeaseNotice')).toContainText('列印等待期間內容已變更', { timeout: 10000 });
+    expect(await second.evaluate(() => window.__topicRestorePrintCount)).toBe(0);
+  } finally {
+    releaseSnapshot();
+    await context.close();
+  }
+});
+
+test('專題PDF等待snapshot clone內所有圖片decode完成且拒絕重入列印', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, 'PDF clone decode 專題');
+  const editable = editor.locator('.topic-editable').first();
+  await editable.click();
+  await editor.locator('[data-insert="trend"]').click();
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 2);
+
+  await editor.evaluate(() => {
+    const originalDecode = HTMLImageElement.prototype.decode;
+    window.__topicDecodeStarted = 0;
+    window.__topicDecodeResolvers = [];
+    window.__topicDecodePrintCount = 0;
+    HTMLImageElement.prototype.decode = function patchedDecode() {
+      if (this.closest('#topicPrintArea')) {
+        window.__topicDecodeStarted += 1;
+        return new Promise((resolve) => { window.__topicDecodeResolvers.push(resolve); });
+      }
+      return originalDecode ? originalDecode.call(this) : Promise.resolve();
+    };
+    window.__releaseTopicImageDecode = () => {
+      window.__topicDecodeResolvers.splice(0).forEach((resolve) => resolve());
+    };
+    window.print = () => { window.__topicDecodePrintCount += 1; };
+  });
+
+  const before = await (await request.get('/__fake_state')).json();
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicDecodeStarted)).toBeGreaterThan(0);
+  expect(await editor.evaluate(() => window.__topicDecodePrintCount)).toBe(0);
+  await expect(editor.locator('#topicPrint')).toBeDisabled();
+  await editor.evaluate(() => document.querySelector('#topicPrint').click());
+  await editor.waitForTimeout(350);
+  const during = await (await request.get('/__fake_state')).json();
+  expect(during.topicSnapshots.length - before.topicSnapshots.length).toBe(1);
+  expect(await editor.evaluate(() => window.__topicDecodeStarted)).toBe(1);
+  await editor.evaluate(() => window.__releaseTopicImageDecode());
+  await expect.poll(() => editor.evaluate(() => window.__topicDecodePrintCount)).toBe(1);
+});
+
+test('雙欄專題PDF維持整頁物件百分比、原色並產生可讀A4橫向檔', async ({ page }, testInfo) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);
   const editor = await createTopic(list, 'PDF資訊卡版面專題');
@@ -871,11 +1074,12 @@ test('雙欄專題PDF維持整頁物件百分比並產生可讀A4檔', async ({ 
   await rightColumn.fill('右欄 ');
   await rightColumn.click();
   await rightColumn.press('End');
-  for (const type of ['kpi', 'progress', 'zone']) {
+  for (const type of ['kpi', 'progress', 'zone', 'trend']) {
     await editor.locator(`[data-insert="${type}"]`).click();
   }
   await expect(editor.locator('.topic-kpi-card')).toHaveCount(1);
   await editor.locator('#topicPdfScale').selectOption('100');
+  await editor.locator('#topicPdfOrientation').selectOption('landscape');
   await editor.evaluate(() => {
     window.__topicLayoutPrintObserved = false;
     window.print = () => { window.__topicLayoutPrintObserved = true; };
@@ -927,7 +1131,34 @@ test('雙欄專題PDF維持整頁物件百分比並產生可讀A4檔', async ({ 
           fontSize: Number.parseFloat(style.fontSize)
         };
       }),
-      toggleDisplay: getComputedStyle(area.querySelector('.topic-kpi-avg-toggle')).display
+      toggleDisplay: getComputedStyle(area.querySelector('.topic-kpi-avg-toggle')).display,
+      trendImage: (() => {
+        const image = area.querySelector('.topic-trend-card img.topic-inline-image');
+        if (!image || !image.naturalWidth || !image.naturalHeight) return null;
+        const probe = document.createElement('canvas');
+        probe.width = image.naturalWidth;
+        probe.height = image.naturalHeight;
+        const context = probe.getContext('2d', { willReadFrequently: true });
+        context.drawImage(image, 0, 0);
+        const pixels = context.getImageData(0, 0, probe.width, probe.height).data;
+        let inkPixels = 0;
+        for (let index = 0; index < pixels.length; index += 4) {
+          const [r, g, b, a] = [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]];
+          if (a > 24 && (r < 245 || g < 245 || b < 245)) inkPixels += 1;
+        }
+        return { naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight, srcLength: image.src.length, inkPixels };
+      })(),
+      printColors: (() => {
+        const selector = '.topic-highlight,.topic-indicator-card,.topic-kpi-card,.topic-progress-card,.topic-zone-card,.topic-trend-card,.topic-kpi-track,.topic-progress-fill,.topic-zone-track';
+        const nodes = [area, ...area.querySelectorAll(selector)];
+        return {
+          exact: nodes.map((node) => getComputedStyle(node).printColorAdjust || getComputedStyle(node).webkitPrintColorAdjust),
+          highlightBackground: getComputedStyle(area.querySelector('.topic-highlight')).backgroundColor,
+          kpiGradient: getComputedStyle(area.querySelector('.topic-kpi-track')).backgroundImage,
+          progressBackground: getComputedStyle(area.querySelector('.topic-progress-fill')).backgroundColor,
+          zoneGradient: getComputedStyle(area.querySelector('.topic-zone-track')).backgroundImage
+        };
+      })()
     };
   });
   expect(geometry.layout).toBe('1:1');
@@ -947,17 +1178,44 @@ test('雙欄專題PDF維持整頁物件百分比並產生可讀A4檔', async ({ 
     JSON.stringify(geometry, null, 2)
   ).toBe(true);
   expect(geometry.toggleDisplay).toBe('none');
+  expect(geometry.trendImage).toEqual(expect.objectContaining({
+    naturalWidth: expect.any(Number), naturalHeight: expect.any(Number), srcLength: expect.any(Number), inkPixels: expect.any(Number)
+  }));
+  expect(geometry.trendImage.naturalWidth).toBeGreaterThan(150);
+  expect(geometry.trendImage.naturalHeight).toBeGreaterThan(150);
+  expect(geometry.trendImage.srcLength).toBeGreaterThan(3000);
+  expect(geometry.trendImage.inkPixels).toBeGreaterThan(1200);
+  expect(geometry.printColors.exact.every((value) => value === 'exact')).toBe(true);
+  expect(geometry.printColors.highlightBackground).toBe('rgb(253, 242, 248)');
+  expect(geometry.printColors.kpiGradient).not.toBe('none');
+  expect(geometry.printColors.progressBackground).toBe('rgb(34, 197, 94)');
+  expect(geometry.printColors.zoneGradient).not.toBe('none');
 
   await testInfo.attach('topic-layout-dual-column-100-percent.png', {
     body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
   });
-  const pdf = await editor.pdf({
-    format: 'A4', printBackground: true,
-    margin: { top: '10mm', right: '10mm', bottom: '10mm', left: '10mm' }
-  });
+  const pdf = await editor.pdf({ printBackground: false, preferCSSPageSize: true });
   expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
   expect(pdf.length).toBeGreaterThan(5000);
-  await testInfo.attach('topic-layout-dual-column-100-percent.pdf', { body: pdf, contentType: 'application/pdf' });
+  const mediaBox = (buffer) => {
+    const match = buffer.toString('latin1').match(/\/MediaBox\s*\[\s*0\s+0\s+([0-9.]+)\s+([0-9.]+)\s*\]/);
+    return match ? { width: Number(match[1]), height: Number(match[2]) } : null;
+  };
+  expect(mediaBox(pdf)).toEqual(expect.objectContaining({ width: expect.any(Number), height: expect.any(Number) }));
+  expect(mediaBox(pdf).width).toBeGreaterThan(mediaBox(pdf).height);
+  await testInfo.attach('topic-layout-dual-column-color-landscape.pdf', { body: pdf, contentType: 'application/pdf' });
+
+  await editor.evaluate(() => document.body.classList.remove('topic-printing-report'));
+  await editor.emulateMedia({ media: 'screen' });
+  await editor.locator('#topicPdfOrientation').selectOption('portrait');
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.locator('#topicPrintArea').getAttribute('data-pdf-orientation')).toBe('portrait');
+  await editor.emulateMedia({ media: 'print' });
+  await editor.evaluate(() => document.body.classList.add('topic-printing-report'));
+  const portraitPdf = await editor.pdf({ printBackground: false, preferCSSPageSize: true });
+  expect(portraitPdf.subarray(0, 5).toString()).toBe('%PDF-');
+  expect(mediaBox(portraitPdf).height).toBeGreaterThan(mediaBox(portraitPdf).width);
+  await testInfo.attach('topic-layout-dual-column-color-portrait.pdf', { body: portraitPdf, contentType: 'application/pdf' });
 });
 
 test('編輯區塊在標題操作下方，色塊、字級、自動編號及物件百分比與刪除可保存', async ({ page, request }) => {
@@ -1029,7 +1287,7 @@ test('編輯區塊在標題操作下方，色塊、字級、自動編號及物�
   await expect(editor.locator('.topic-editable').first().locator('ol')).toHaveCount(1);
 });
 
-test('趨勢圖固定高度不延伸，可增減指標與週期並保存重開', async ({ page, request }) => {
+test('趨勢圖固定高度且完整顯示緊湊數值表，可增減指標與週期並保存重開', async ({ page, request }, testInfo) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);
   const editor = await createTopic(list, '趨勢圖穩定性專題');
@@ -1057,8 +1315,10 @@ test('趨勢圖固定高度不延伸，可增減指標與週期並保存重開',
   expect(firstHeights.every((sample) => sample.area >= 219 && sample.area <= 221 && sample.canvas <= 221 && sample.card < 600)).toBe(true);
 
   await editor.locator('[data-topic-trend-action="series-add"]').click();
+  await editor.locator('[data-topic-trend-action="series-add"]').click();
+  await editor.locator('[data-topic-trend-action="series-add"]').click();
   await editor.locator('[data-topic-trend-action="period-add"]').click();
-  await expect(trend.locator('thead th')).toHaveCount(4);
+  await expect(trend.locator('thead th')).toHaveCount(6);
   await expect(trend.locator('tbody tr')).toHaveCount(4);
   await trend.locator('thead th').last().fill('事故率');
   await trend.locator('tbody tr').last().locator('td').first().fill('Q4');
@@ -1066,6 +1326,36 @@ test('趨勢圖固定高度不延伸，可增減指標與週期並保存重開',
   await editor.locator('[data-topic-object-width="70"]').click();
   await expect(trend.locator('.topic-chart-canvas-area')).toHaveCSS('height', '280px');
   expect(await trend.evaluate((node) => node.style.width)).toBe('70%');
+  const tableGeometry = await trend.evaluate((card) => {
+    const wrapper = card.querySelector('.topic-chart-table-area');
+    const table = card.querySelector('.topic-chart-data');
+    const cells = Array.from(table.querySelectorAll('th,td'));
+    const wrapperRect = wrapper.getBoundingClientRect();
+    const tableRect = table.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    return {
+      wrapperClientWidth: wrapper.clientWidth,
+      wrapperScrollWidth: wrapper.scrollWidth,
+      overflowX: getComputedStyle(wrapper).overflowX,
+      tableLeft: tableRect.left,
+      tableRight: tableRect.right,
+      cardLeft: cardRect.left,
+      cardRight: cardRect.right,
+      maxFontSize: Math.max(...cells.map((cell) => Number.parseFloat(getComputedStyle(cell).fontSize))),
+      maxCellHeight: Math.max(...cells.map((cell) => cell.getBoundingClientRect().height)),
+      maxPaddingY: Math.max(...cells.map((cell) => Number.parseFloat(getComputedStyle(cell).paddingTop) + Number.parseFloat(getComputedStyle(cell).paddingBottom)))
+    };
+  });
+  expect(tableGeometry.wrapperScrollWidth).toBeLessThanOrEqual(tableGeometry.wrapperClientWidth + 1);
+  expect(tableGeometry.overflowX).toBe('visible');
+  expect(tableGeometry.tableLeft).toBeGreaterThanOrEqual(tableGeometry.cardLeft - 1);
+  expect(tableGeometry.tableRight).toBeLessThanOrEqual(tableGeometry.cardRight + 1);
+  expect(tableGeometry.maxFontSize).toBeLessThanOrEqual(11);
+  expect(tableGeometry.maxCellHeight).toBeLessThanOrEqual(22);
+  expect(tableGeometry.maxPaddingY).toBeLessThanOrEqual(4);
+  await testInfo.attach('topic-trend-table-five-series-complete.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
 
   await editor.locator('#topicSave').click();
   await expectEditorRevision(editor, 2);
@@ -1078,7 +1368,7 @@ test('趨勢圖固定高度不延伸，可增減指標與週期並保存重開',
   await editor.reload();
   await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
   const reopened = editor.locator('.topic-trend-card');
-  await expect(reopened.locator('thead th')).toHaveCount(4);
+  await expect(reopened.locator('thead th')).toHaveCount(6);
   await expect(reopened.locator('tbody tr')).toHaveCount(4);
   await expect(reopened).toContainText('事故率');
   await expect(reopened.locator('.topic-chart-canvas-area')).toHaveCSS('height', '280px');

@@ -6,7 +6,7 @@
   <title>專題報告編輯器</title>
   <meta name="color-scheme" content="light">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer">
-  <link rel="stylesheet" href="./topic-reports.css?v=1.4.0">
+  <link rel="stylesheet" href="./topic-reports.css?v=1.5.0">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
@@ -106,6 +106,10 @@
             <option value="90">90%</option><option value="100" selected>100%</option>
             <option value="110">110%</option><option value="120">120%</option>
           </select>
+          <label class="topic-toolbar-label" for="topicPdfOrientation">PDF方向</label>
+          <select id="topicPdfOrientation" class="topic-tool-select" aria-label="PDF列印方向">
+            <option value="portrait" selected>直向</option><option value="landscape">橫向</option>
+          </select>
           <button id="topicPrint" type="button" class="topic-btn"><i class="fas fa-file-pdf"></i>單份專題 PDF</button>
           <button id="topicReset" type="button" class="topic-btn topic-btn-warning"><i class="fas fa-rotate-left"></i>重置本機草稿</button>
           <button id="topicComplete" type="button" class="topic-btn topic-btn-success"><i class="fas fa-check-double"></i>完成編輯</button>
@@ -181,8 +185,8 @@
 
   <script src="./supabase-config.js?v=7.2.0"></script>
   <script src="./vendor/supabase-2.112.2.js?v=7.2.0"></script>
-  <script src="./topic-reports-core.js?v=1.4.0"></script>
-  <script src="./topic-reports-client.js?v=1.4.0"></script>
-  <script src="./topic-report-editor.js?v=1.4.0"></script>
+  <script src="./topic-reports-core.js?v=1.5.0"></script>
+  <script src="./topic-reports-client.js?v=1.5.0"></script>
+  <script src="./topic-report-editor.js?v=1.5.0"></script>
 </body>
 </html>

@@ -61,6 +61,14 @@ test('趨勢高度限制在固定安全範圍', () => {
   assert.equal(editor.normalizeChartHeight('bad'), 220);
 });
 
+test('PDF方向只接受直向與橫向，無效值回退直向', () => {
+  assert.equal(editor.normalizePdfOrientation('portrait'), 'portrait');
+  assert.equal(editor.normalizePdfOrientation('landscape'), 'landscape');
+  assert.equal(editor.normalizePdfOrientation('LANDSCAPE'), 'landscape');
+  assert.equal(editor.normalizePdfOrientation('bad'), 'portrait');
+  assert.equal(editor.normalizePdfOrientation(null), 'portrait');
+});
+
 test('Excel rows轉回topic內容時保留項次順序、版型與PDF設定', () => {
   const base = core.createBlankTopicContent({ title: 'Excel專題', reportDate: '2026-08-16' });
   const content = editor.workbookRowsToContent([

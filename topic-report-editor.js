@@ -11,7 +11,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi) {
   'use strict';
 
-  const BUILD_ID = '1.4.0';
+  const BUILD_ID = '1.5.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -174,6 +174,9 @@
     const numeric = Number.parseInt(String(value == null ? '' : value).replace('%', '').trim(), 10);
     return PDF_SCALES.includes(numeric) ? numeric : 100;
   }
+  function normalizePdfOrientation(value) {
+    return String(value == null ? '' : value).trim().toLowerCase() === 'landscape' ? 'landscape' : 'portrait';
+  }
 
   function normalizePrintObjectWidth(value, layout, columnIndex) {
     const match = /^([0-9]{1,3}(?:\.[0-9]+)?)%$/.exec(String(value || '').trim());
@@ -292,6 +295,8 @@
     currentContent: null,
     dirty: false,
     dirtySince: 0,
+    editGeneration: 0,
+    printing: false,
     saving: false,
     uncertain: false,
     releaseUncertain: false,
@@ -369,7 +374,10 @@
       TOPIC_RELEASE_NOT_CONFIRMED: '編輯權釋放尚未獲得確認；草稿仍保留，請稍後重試。',
       TOPIC_PENDING_OPERATION_MISMATCH: '上一筆保存結果尚未確認；請先還原到原內容並重試保存。',
       TOPIC_EDITOR_REPORT_ID_INVALID: '專題報告網址缺少有效report ID。',
-      TOPIC_SAVE_SCOPE_INVALID: '保存範圍不完整，已停止寫入。'
+      TOPIC_SAVE_SCOPE_INVALID: '保存範圍不完整，已停止寫入。',
+      TOPIC_PRINT_CONTENT_CHANGED: '列印等待期間內容已變更；未輸出混合版本，請保存後重新輸出 PDF。',
+      TOPIC_PRINT_IMAGE_NOT_READY: '列印圖片尚未完成解碼；已停止輸出，請稍後重試。',
+      TOPIC_CHART_PRINT_NOT_READY: '趨勢圖尚未完成繪製；已停止輸出，請稍後重試。'
     };
     if (/Could not find the function|PGRST202|schema cache/i.test(String(error && error.message || ''))) {
       return '專題報告雲端migration尚未安裝；本窗口不會改動月報資料。';
@@ -606,6 +614,7 @@
 
   function renderContent(content) {
     const normalized = core.normalizeTopicContent(content);
+    state.editGeneration += 1;
     state.currentContent = normalized;
     $('topicReportTitle').value = normalized.title;
     $('topicReportDate').value = normalized.reportDate;
@@ -621,30 +630,32 @@
     badge.textContent = state.mode === 'edit' ? '可編輯' : '唯讀';
   }
   function updateControls() {
-    const editable = state.mode === 'edit' && !state.saving && !state.uncertain && !state.releaseUncertain;
+    const editable = state.mode === 'edit' && !state.saving && !state.printing
+      && !state.uncertain && !state.releaseUncertain;
     const releaseRecord = state.releaseUncertain ? readReleaseCheck() : null;
     const releaseAction = releaseRecord && releaseRecord.action || 'complete';
     const mutations = root.document.querySelectorAll(
       '[data-command],[data-insert],[data-text-color],#topicFontSize,[data-topic-object-width],[data-topic-object-delete],[data-topic-trend-action],[data-topic-trend-height],#topicAddModule,#topicExcelImport,#topicReset,#topicComplete,#topicDiscardExit,' +
-      '#topicFontEn,#topicFontZh,#topicTextColor,[data-module-action],[data-module-layout],[data-module-pdf],[data-module-pdf-order]'
+      '#topicFontEn,#topicFontZh,#topicTextColor,#topicPdfScale,#topicPdfOrientation,' +
+      '[data-module-action],[data-module-layout],[data-module-pdf],[data-module-pdf-order]'
     );
     mutations.forEach((control) => { control.disabled = !editable; });
-    $('topicSave').disabled = state.saving || state.releaseUncertain || (!state.uncertain && state.mode !== 'edit');
-    $('topicComplete').disabled = state.saving || state.uncertain
+    $('topicSave').disabled = state.saving || state.printing || state.releaseUncertain || (!state.uncertain && state.mode !== 'edit');
+    $('topicComplete').disabled = state.saving || state.printing || state.uncertain
       || (state.releaseUncertain ? releaseAction !== 'complete' : state.mode !== 'edit');
-    $('topicDiscardExit').disabled = state.saving || state.uncertain
+    $('topicDiscardExit').disabled = state.saving || state.printing || state.uncertain
       || (state.releaseUncertain ? releaseAction !== 'discard' : state.mode !== 'edit');
-    $('topicSync').disabled = state.saving || state.releaseUncertain;
-    $('topicPrint').disabled = state.saving;
-    $('topicExcelExport').disabled = state.saving;
+    $('topicSync').disabled = state.saving || state.printing || state.releaseUncertain;
+    $('topicPrint').disabled = state.saving || state.printing;
+    $('topicExcelExport').disabled = state.saving || state.printing;
     root.document.querySelectorAll('[data-footer-action]').forEach((control) => {
       const action = control.dataset.footerAction;
-      if (action === 'save') control.disabled = state.saving || state.uncertain || state.releaseUncertain || state.mode !== 'edit';
+      if (action === 'save') control.disabled = state.saving || state.printing || state.uncertain || state.releaseUncertain || state.mode !== 'edit';
       else if (action === 'discard') {
-        control.disabled = state.saving || state.uncertain
+        control.disabled = state.saving || state.printing || state.uncertain
           || (state.releaseUncertain ? releaseAction !== 'discard' : state.mode !== 'edit');
       } else {
-        control.disabled = state.saving || state.uncertain
+        control.disabled = state.saving || state.printing || state.uncertain
           || (state.releaseUncertain ? releaseAction !== 'complete' : state.mode !== 'edit');
       }
     });
@@ -653,7 +664,10 @@
     root.document.querySelectorAll('.topic-module-title').forEach((input) => { input.readOnly = !editable; });
     root.document.querySelectorAll('.topic-editable').forEach((editor) => { editor.contentEditable = editable ? 'true' : 'false'; });
     root.document.querySelectorAll('[data-topic-editable="true"]').forEach((element) => { element.contentEditable = editable ? 'true' : 'false'; });
-    $('topicAcquireEdit').hidden = state.mode === 'edit' || state.saving || state.uncertain || state.releaseUncertain;
+    const acquireBlocked = state.mode === 'edit' || state.saving || state.printing
+      || state.uncertain || state.releaseUncertain;
+    $('topicAcquireEdit').hidden = acquireBlocked;
+    $('topicAcquireEdit').disabled = acquireBlocked;
   }
   function setMode(mode, message, tone = '') {
     state.mode = mode === 'edit' ? 'edit' : 'readonly';
@@ -772,6 +786,7 @@
   function markDirty() {
     if (state.mode !== 'edit' || state.saving || state.uncertain) return;
     if (!state.dirty) state.dirtySince = Date.now();
+    state.editGeneration += 1;
     state.dirty = true;
     setLeaseNotice('尚未保存；本機草稿將在800ms內更新。', 'warning');
     scheduleDraft();
@@ -1187,6 +1202,59 @@
     });
     return { labels, series };
   }
+  function createChartForCard(card, chartMap, options = {}) {
+    const canvas = card.querySelector('canvas.topic-chart-canvas');
+    const area = card.querySelector('.topic-chart-canvas-area');
+    if (!canvas || !area || !root.Chart) return null;
+    const height = normalizeChartHeight(area.dataset.topicChartHeight);
+    const responsive = options.responsive !== false;
+    area.dataset.topicChartHeight = String(height);
+    area.style.height = `${height}px`;
+    if (responsive) {
+      canvas.removeAttribute('width');
+      canvas.removeAttribute('height');
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+    } else {
+      const width = Math.max(320, Number(options.width) || 720);
+      canvas.width = width;
+      canvas.height = height;
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+    }
+    const existing = chartMap.get(canvas);
+    if (existing) { try { existing.destroy(); } catch (_error) { /* noop */ } }
+    const attached = typeof root.Chart.getChart === 'function' ? root.Chart.getChart(canvas) : null;
+    if (attached && attached !== existing) { try { attached.destroy(); } catch (_error) { /* noop */ } }
+    const palette = ['#4f46e5', '#0f766e', '#dc2626', '#ca8a04', '#7c3aed'];
+    const data = chartValues(card);
+    const datasets = data.series.map((item, index) => ({
+      label: item.label,
+      data: item.values,
+      borderColor: palette[index % palette.length],
+      backgroundColor: `${palette[index % palette.length]}22`,
+      borderWidth: 2,
+      pointRadius: 3,
+      fill: false,
+      tension: .28
+    }));
+    const chart = new root.Chart(canvas, {
+      type: 'line',
+      data: { labels: data.labels, datasets },
+      options: {
+        responsive,
+        maintainAspectRatio: false,
+        animation: false,
+        resizeDelay: responsive ? 80 : 0,
+        layout: { padding: { top: 8, right: 8 } },
+        plugins: { legend: { display: true, position: 'top' } },
+        scales: { y: { beginAtZero: true }, x: { grid: { display: false } } }
+      }
+    });
+    chartMap.set(canvas, chart);
+    return chart;
+  }
+
   function renderCharts() {
     if (!root.Chart || !$('topicModules')) return;
     state.charts.forEach((chart, canvas) => {
@@ -1195,47 +1263,8 @@
         state.charts.delete(canvas);
       }
     });
-    const palette = ['#4f46e5', '#0f766e', '#dc2626', '#ca8a04', '#7c3aed'];
     $('topicModules').querySelectorAll('.topic-trend-card').forEach((card) => {
-      const canvas = card.querySelector('canvas.topic-chart-canvas');
-      const area = card.querySelector('.topic-chart-canvas-area');
-      if (!canvas || !area) return;
-      const height = normalizeChartHeight(area.dataset.topicChartHeight);
-      area.dataset.topicChartHeight = String(height);
-      area.style.height = `${height}px`;
-      canvas.removeAttribute('width');
-      canvas.removeAttribute('height');
-      canvas.style.width = '100%';
-      canvas.style.height = '100%';
-      const existing = state.charts.get(canvas);
-      if (existing) { try { existing.destroy(); } catch (_error) { /* noop */ } }
-      const attached = typeof root.Chart.getChart === 'function' ? root.Chart.getChart(canvas) : null;
-      if (attached && attached !== existing) { try { attached.destroy(); } catch (_error) { /* noop */ } }
-      const data = chartValues(card);
-      const datasets = data.series.map((item, index) => ({
-        label: item.label,
-        data: item.values,
-        borderColor: palette[index % palette.length],
-        backgroundColor: `${palette[index % palette.length]}22`,
-        borderWidth: 2,
-        pointRadius: 3,
-        fill: false,
-        tension: .28
-      }));
-      const chart = new root.Chart(canvas, {
-        type: 'line',
-        data: { labels: data.labels, datasets },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false,
-          resizeDelay: 80,
-          layout: { padding: { top: 8, right: 8 } },
-          plugins: { legend: { display: true, position: 'top' } },
-          scales: { y: { beginAtZero: true }, x: { grid: { display: false } } }
-        }
-      });
-      state.charts.set(canvas, chart);
+      createChartForCard(card, state.charts);
     });
   }
 
@@ -1706,11 +1735,111 @@
     });
   }
 
-  function buildPrintArea(reportProjection) {
+  function applyPrintPageOrientation(value) {
+    const orientation = normalizePdfOrientation(value);
+    let style = $('topicPrintPageStyle');
+    if (!style) {
+      style = root.document.createElement('style');
+      style.id = 'topicPrintPageStyle';
+      style.media = 'print';
+      root.document.head.appendChild(style);
+    }
+    style.textContent = `@page { size: A4 ${orientation}; margin: 10mm; }`;
+    return orientation;
+  }
+
+  function capturePrintIntent() {
+    return Object.freeze({
+      reportId: state.reportId,
+      revision: Number(state.report && state.report.revision),
+      editGeneration: state.editGeneration,
+      scale: normalizePdfScale($('topicPdfScale') && $('topicPdfScale').value),
+      orientation: normalizePdfOrientation($('topicPdfOrientation') && $('topicPdfOrientation').value)
+    });
+  }
+
+  function assertPrintIntent(intent) {
+    if (!intent || intent.reportId !== state.reportId
+      || intent.revision !== Number(state.report && state.report.revision)
+      || intent.editGeneration !== state.editGeneration) {
+      throw new Error('TOPIC_PRINT_CONTENT_CHANGED');
+    }
+  }
+
+  function waitAnimationFrames() {
+    const frame = typeof root.requestAnimationFrame === 'function'
+      ? root.requestAnimationFrame.bind(root) : (callback) => root.setTimeout(callback, 0);
+    return new Promise((resolve) => frame(() => frame(resolve)));
+  }
+
+  async function waitBounded(promise, timeoutMs, code) {
+    let timer = null;
+    try {
+      await Promise.race([
+        promise,
+        new Promise((_resolve, reject) => {
+          timer = root.setTimeout(() => reject(new Error(code)), timeoutMs);
+        })
+      ]);
+    } finally {
+      root.clearTimeout(timer);
+    }
+  }
+
+  async function waitForPrintImages(scope) {
+    const images = Array.from(scope.querySelectorAll('img'));
+    await Promise.all(images.map(async (image) => {
+      if (!image.complete) {
+        await waitBounded(new Promise((resolve, reject) => {
+          image.addEventListener('load', resolve, { once: true });
+          image.addEventListener('error', () => reject(new Error('TOPIC_PRINT_IMAGE_NOT_READY')), { once: true });
+        }), 4000, 'TOPIC_PRINT_IMAGE_NOT_READY');
+      }
+      if (!image.naturalWidth || !image.naturalHeight) throw new Error('TOPIC_PRINT_IMAGE_NOT_READY');
+      if (typeof image.decode === 'function') {
+        await waitBounded(Promise.resolve().then(() => image.decode()), 4000, 'TOPIC_PRINT_IMAGE_NOT_READY');
+      }
+      if (!image.naturalWidth || !image.naturalHeight) throw new Error('TOPIC_PRINT_IMAGE_NOT_READY');
+    }));
+  }
+
+  async function renderPrintAreaCharts() {
+    const printArea = $('topicPrintArea');
+    const cards = Array.from(printArea.querySelectorAll('.topic-trend-card'));
+    if (cards.length && !root.Chart) throw new Error('TOPIC_CHART_PRINT_NOT_READY');
+    const printCharts = new Map();
+    const chartWidth = printArea.dataset.pdfOrientation === 'landscape' ? 840 : 620;
+    try {
+      cards.forEach((card) => {
+        if (!createChartForCard(card, printCharts, { responsive: false, width: chartWidth })) {
+          throw new Error('TOPIC_CHART_PRINT_NOT_READY');
+        }
+      });
+      await waitAnimationFrames();
+      printCharts.forEach((chart) => chart.update('none'));
+      await waitAnimationFrames();
+      printCharts.forEach((chart, canvas) => {
+        const source = chart.toBase64Image('image/png', 1);
+        if (!/^data:image\/png;base64,/i.test(source)) throw new Error('TOPIC_CHART_PRINT_NOT_READY');
+        const image = root.document.createElement('img');
+        image.className = 'topic-inline-image topic-chart-print-image';
+        image.src = source;
+        image.alt = '趨勢圖';
+        canvas.replaceWith(image);
+      });
+    } finally {
+      printCharts.forEach((chart) => { try { chart.destroy(); } catch (_error) { /* noop */ } });
+    }
+    await waitForPrintImages(printArea);
+  }
+
+  function buildPrintArea(reportProjection, intent) {
     const content = core.normalizeTopicContent(reportProjection.content);
-    const scale = normalizePdfScale($('topicPdfScale') && $('topicPdfScale').value);
+    const scale = intent.scale;
+    const orientation = applyPrintPageOrientation(intent.orientation);
     const printArea = $('topicPrintArea');
     printArea.dataset.pdfScale = String(scale);
+    printArea.dataset.pdfOrientation = orientation;
     printArea.style.setProperty('--topic-pdf-scale', String(scale / 100));
     printArea.style.setProperty('--topic-pdf-width', `${10000 / scale}%`);
     $('topicPrintTitle').textContent = content.title;
@@ -1719,10 +1848,6 @@
     rootNode.replaceChildren();
     const selected = content.modules.filter((module) => module.selectedForPdf !== false)
       .sort((a, b) => Number(a.pdfOrder || 0) - Number(b.pdfOrder || 0));
-    const liveImages = Array.from(state.charts.values()).map((chart) => {
-      try { return chart.toBase64Image('image/png', 1); } catch (_error) { return ''; }
-    });
-    let chartIndex = 0;
     selected.forEach((module) => {
       const section = root.document.createElement('section');
       section.className = 'topic-print-module';
@@ -1733,13 +1858,6 @@
         const column = root.document.createElement('div'); column.className = 'topic-print-column';
         setSanitizedHtml(column, html);
         applyPrintObjectWidths(column, module.colLayout, columnIndex);
-        column.querySelectorAll('canvas.topic-chart-canvas').forEach((canvas) => {
-          const source = liveImages[chartIndex++] || '';
-          if (source) {
-            const image = root.document.createElement('img'); image.className = 'topic-inline-image'; image.src = source; image.alt = '趨勢圖';
-            canvas.replaceWith(image);
-          } else canvas.remove();
-        });
         columns.appendChild(column);
       });
       section.append(heading, columns);
@@ -1752,26 +1870,38 @@
     });
   }
   async function printReport() {
-    if (state.mode === 'edit' && (state.dirty || state.uncertain)) await saveNow();
-    const snapshot = await state.client.createSnapshot({
-      reportId: state.reportId, expectedRevision: state.report.revision, editorWindowId: state.editorWindowId
-    });
-    const projection = snapshot.snapshot && snapshot.snapshot.report;
-    if (!projection || projection.id !== state.reportId || Number(projection.revision) !== Number(state.report.revision)) {
-      throw new Error('SNAPSHOT_VERIFICATION_FAILED');
+    if (state.printing) return;
+    state.printing = true;
+    updateControls();
+    try {
+      if (state.mode === 'edit' && (state.dirty || state.uncertain)) await saveNow();
+      const intent = capturePrintIntent();
+      const snapshot = await state.client.createSnapshot({
+        reportId: intent.reportId, expectedRevision: intent.revision, editorWindowId: state.editorWindowId
+      });
+      const projection = snapshot.snapshot && snapshot.snapshot.report;
+      if (!projection || projection.id !== intent.reportId || Number(projection.revision) !== intent.revision) {
+        throw new Error('SNAPSHOT_VERIFICATION_FAILED');
+      }
+      assertPrintIntent(intent);
+      buildPrintArea(projection, intent);
+      await renderPrintAreaCharts();
+      assertPrintIntent(intent);
+      const oldTitle = root.document.title;
+      root.document.title = core.buildReportExportName(projection);
+      root.document.body.classList.add('topic-printing-report');
+      const cleanup = () => {
+        root.document.body.classList.remove('topic-printing-report');
+        root.document.title = oldTitle;
+        root.removeEventListener('afterprint', cleanup);
+      };
+      root.addEventListener('afterprint', cleanup, { once: true });
+      try { root.print(); }
+      finally { root.setTimeout(cleanup, 1200); }
+    } finally {
+      state.printing = false;
+      updateControls();
     }
-    buildPrintArea(projection);
-    const oldTitle = root.document.title;
-    root.document.title = core.buildReportExportName(projection);
-    root.document.body.classList.add('topic-printing-report');
-    const cleanup = () => {
-      root.document.body.classList.remove('topic-printing-report');
-      root.document.title = oldTitle;
-      root.removeEventListener('afterprint', cleanup);
-    };
-    root.addEventListener('afterprint', cleanup, { once: true });
-    root.print();
-    root.setTimeout(cleanup, 1200);
   }
 
   function runAction(action) {
@@ -1822,6 +1952,11 @@
       const scale = normalizePdfScale(event.target.value);
       event.target.value = String(scale);
       root.localStorage.setItem('topic:v1:pdf-scale', String(scale));
+    });
+    $('topicPdfOrientation').addEventListener('change', (event) => {
+      const orientation = normalizePdfOrientation(event.target.value);
+      event.target.value = orientation;
+      root.localStorage.setItem('topic:v1:pdf-orientation', orientation);
     });
     $('topicAddModule').addEventListener('click', addModule);
     $('topicSave').addEventListener('click', () => runAction(saveNow));
@@ -2010,6 +2145,7 @@
     const collapsed = root.localStorage.getItem('topic:v1:toolbar-collapsed');
     if (collapsed === 'true') $('topicToolbarCollapse').click();
     $('topicPdfScale').value = String(normalizePdfScale(root.localStorage.getItem('topic:v1:pdf-scale') || 100));
+    $('topicPdfOrientation').value = normalizePdfOrientation(root.localStorage.getItem('topic:v1:pdf-orientation') || 'portrait');
     boot();
   }
 
@@ -2028,6 +2164,7 @@
     normalizeObjectWidth,
     normalizeChartHeight,
     normalizePdfScale,
+    normalizePdfOrientation,
     normalizePrintObjectWidth,
     mount,
     getIdentity: () => state.identity ? clone(state.identity) : null,
