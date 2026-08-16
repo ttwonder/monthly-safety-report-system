@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.27';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.0.28';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -4507,6 +4507,7 @@
             cloud.parentNode.insertBefore(printArea, cloud.nextSibling);
 
             window.addEventListener('afterprint', () => {
+                v1RestorePdfDocumentTitle();
                 document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
                 document.body.dataset.printSource = '';
             });
@@ -4656,6 +4657,40 @@
 
         const V1_PDF_PRINT_SETTINGS_KEY = 'monthly_pdf_print_settings_v1';
         const V1_PDF_SCALE_OPTIONS = Object.freeze([85, 90, 95, 100]);
+        let v1PdfOriginalDocumentTitle = '';
+        let v1PdfExportTitleActive = false;
+
+        function v1PdfExportTitle(date = new Date()) {
+            const value = date instanceof Date && Number.isFinite(date.getTime()) ? date : new Date();
+            const year = String(value.getFullYear()).padStart(4, '0');
+            const month = String(value.getMonth() + 1).padStart(2, '0');
+            const day = String(value.getDate()).padStart(2, '0');
+            return `公司月度安全會議報告_${year}-${month}-${day}`;
+        }
+
+        function v1RestorePdfDocumentTitle() {
+            if (!v1PdfExportTitleActive) return false;
+            document.title = v1PdfOriginalDocumentTitle;
+            v1PdfOriginalDocumentTitle = '';
+            v1PdfExportTitleActive = false;
+            return true;
+        }
+
+        function v1PrintWithExportTitle(date = new Date()) {
+            if (!v1PdfExportTitleActive) {
+                v1PdfOriginalDocumentTitle = document.title;
+                v1PdfExportTitleActive = true;
+            }
+            const exportTitle = v1PdfExportTitle(date);
+            document.title = exportTitle;
+            try {
+                window.print();
+            } catch (error) {
+                v1RestorePdfDocumentTitle();
+                throw error;
+            }
+            return exportTitle;
+        }
 
         function v1NormalizePdfPrintSettings(value) {
             const requestedScale = Number(value?.scalePercent);
@@ -5051,6 +5086,7 @@
 
         function v1CanCompactSplitPdfModule(row) {
             if (!row || row.querySelector('.trend-chart-container')) return false;
+            if (row.querySelector('.module-content-cell img.content-inline-img')) return false;
             if (row.querySelector('table.pdf-splittable-table')) return true;
             const visibleBlocks = Array.from(row.querySelectorAll('.module-content-cell .editable-div')).flatMap((editable) =>
                 Array.from(editable.children).filter((child) => {
@@ -5551,7 +5587,7 @@
             setTimeout(() => {
                 try {
                     v7AssertFormalSnapshotIntent(floor);
-                    window.print();
+                    v1PrintWithExportTitle();
                 } catch (error) {
                     document.body.classList.remove('pdf-print-mode', 'pdf-render-prep');
                     v7ReportFormalPdfFailure(error);
@@ -5646,7 +5682,7 @@
             const ok = await prepareV1PdfPrintArea();
             if (!ok) return;
             document.body.classList.add('pdf-print-mode');
-            setTimeout(() => window.print(), 80);
+            setTimeout(() => v1PrintWithExportTitle(), 80);
         }
 
         async function v1ListSavedReports() {
@@ -5697,7 +5733,7 @@
             if (!ok) return;
             document.body.dataset.printSource = 'current-draft';
             document.body.classList.add('pdf-print-mode');
-            setTimeout(() => window.print(), 80);
+            setTimeout(() => v1PrintWithExportTitle(), 80);
         }
 
         async function v1LoadReportById(fileId) {

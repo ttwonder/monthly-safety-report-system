@@ -279,7 +279,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.27';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.0.28';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -319,7 +319,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.27'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.0.28'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -522,7 +522,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.0.27', config: '7.0.27', core: '7.0.27', client: '7.0.27', v7: '7.0.27'
+      page: '7.0.28', config: '7.0.28', core: '7.0.28', client: '7.0.28', v7: '7.0.28'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -4234,8 +4234,15 @@ test('列印目前內容依勾選與 PDF 順序輸出，不帶版本提示，且
     renderTable();
     window.MonthlyV7App.transport.requestTimeoutMs = 35;
     window.__currentDraftPrintCalls = 0;
+    window.__currentDraftOriginalTitle = document.title;
+    const exportDate = new Date();
+    window.__currentDraftExpectedPrintTitle = `公司月度安全會議報告_${String(exportDate.getFullYear()).padStart(4, '0')}-${String(exportDate.getMonth() + 1).padStart(2, '0')}-${String(exportDate.getDate()).padStart(2, '0')}`;
+    window.__currentDraftObservedPrintTitle = '';
     window.__currentDraftCloudWrites = [];
-    window.print = () => { window.__currentDraftPrintCalls += 1; };
+    window.print = () => {
+      window.__currentDraftPrintCalls += 1;
+      window.__currentDraftObservedPrintTitle = document.title;
+    };
     const transport = window.MonthlyV7App.transport;
     const originalRpc = transport.rpc.bind(transport);
     transport.rpc = async (name, params) => {
@@ -4258,6 +4265,8 @@ test('列印目前內容依勾選與 PDF 順序輸出，不帶版本提示，且
   }).toBeGreaterThan(0);
 
   expect(await page.evaluate(() => window.__currentDraftPrintCalls)).toBe(1);
+  expect(await page.evaluate(() => window.__currentDraftObservedPrintTitle))
+    .toBe(await page.evaluate(() => window.__currentDraftExpectedPrintTitle));
   expect(dialogs).toEqual([]);
   await expect(page.locator('body')).toHaveAttribute('data-print-source', 'current-draft');
   await expect(page.locator('#pdfPrintArea .module-card-row')).toHaveCount(2);
@@ -4280,6 +4289,8 @@ test('列印目前內容依勾選與 PDF 順序輸出，不帶版本提示，且
   expect(after.modules[0].revision).toBe(before.modules[0].revision);
   expect(after.operations).toEqual(before.operations);
   expect(after.snapshots).toEqual(before.snapshots);
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  expect(await page.evaluate(() => document.title)).toBe(await page.evaluate(() => window.__currentDraftOriginalTitle));
 });
 
 test('列印目前內容沒有勾選模塊時提示並停止，不輸出空白文件', async ({ page }) => {
@@ -5154,6 +5165,27 @@ test('PDF輸出提供85至100比例，預設95並套用緊湊分頁', async ({ p
   expect(Math.abs((applied.cloneWidth * applied.zoom) - (applied.areaWidth * applied.zoom))).toBeLessThanOrEqual(2);
 });
 
+test('PDF匯出名稱使用公司月度安全會議報告與匯出當日日期，列印後恢復頁面標題', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const state = await page.evaluate(() => {
+    const originalTitle = document.title;
+    const originalPrint = window.print;
+    let observedTitle = '';
+    window.print = () => { observedTitle = document.title; };
+    const exportTitle = v1PrintWithExportTitle(new Date(2026, 7, 16, 23, 30, 0));
+    const titleBeforeAfterPrint = document.title;
+    window.dispatchEvent(new Event('afterprint'));
+    const restoredTitle = document.title;
+    window.print = originalPrint;
+    return { originalTitle, exportTitle, observedTitle, titleBeforeAfterPrint, restoredTitle };
+  });
+
+  expect(state.exportTitle).toBe('公司月度安全會議報告_2026-08-16');
+  expect(state.observedTitle).toBe(state.exportTitle);
+  expect(state.titleBeforeAfterPrint).toBe(state.exportTitle);
+  expect(state.restoredTitle).toBe(state.originalTitle);
+});
+
 test('PDF準備等待大型內嵌圖片完成解碼後才量測分頁', async ({ page }) => {
   await page.route('**/__slow_pdf_fixture.svg', async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 650));
@@ -5225,6 +5257,7 @@ test('PDF並排內嵌截圖由正常flow row承載並整列避開頁尾', async 
     document.querySelector('.report-header-section').style.height = '520px';
     renderTable();
     v1EnsureModuleFields();
+    v1SavePdfPrintSettings({ scalePercent: 95, compact: true });
   });
 
   await page.evaluate(() => {
@@ -5267,7 +5300,10 @@ test('PDF並排內嵌截圖由正常flow row承載並整列避開頁尾', async 
       first: box(first),
       next: box(next),
       rowTag: first?.tagName || '',
-      nativeTableRows: area.querySelectorAll('tr.module-card-row').length
+      nativeTableRows: area.querySelectorAll('tr.module-card-row').length,
+      keepTogether: first.classList.contains('pdf-keep-together'),
+      compactSplit: first.classList.contains('pdf-compact-split'),
+      breakInside: getComputedStyle(first).breakInside
     };
   });
 
@@ -5284,10 +5320,13 @@ test('PDF並排內嵌截圖由正常flow row承載並整列避開頁尾', async 
   expect(layout.flow.height).toBeGreaterThanOrEqual(layout.image.height - 1);
   expect(layout.rowTag).toBe('SECTION');
   expect(layout.nativeTableRows).toBe(0);
+  expect(layout.keepTogether).toBe(true);
+  expect(layout.compactSplit).toBe(false);
+  expect(layout.breakInside).toBe('avoid');
   expect(layout.first.bottom).toBeLessThanOrEqual(layout.next.top + 1);
 });
 
-test('PDF雙欄block圖片模塊改用中立容器避免tr grid分頁重疊', async ({ page }) => {
+test('PDF雙欄block圖片模塊改用中立容器避免tr grid分頁重疊', async ({ page }, testInfo) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.evaluate(() => {
     const items = reportData.map((item) => JSON.parse(JSON.stringify(item)));
@@ -5312,6 +5351,7 @@ test('PDF雙欄block圖片模塊改用中立容器避免tr grid分頁重疊', as
     document.querySelector('.report-header-section').style.height = '500px';
     renderTable();
     v1EnsureModuleFields();
+    v1SavePdfPrintSettings({ scalePercent: 95, compact: true });
   });
   await page.evaluate(() => {
     window.__blockImagePdfState = { status: 'pending', error: '' };
@@ -5333,14 +5373,23 @@ test('PDF雙欄block圖片模塊改用中立容器避免tr grid分頁重疊', as
       height: Number(row.dataset.pdfModuleHeight || 0),
       rowTag: row?.tagName || '',
       nativeTableRows: area.querySelectorAll('tr.module-card-row').length,
-      blockImage: Boolean(row.querySelector('img.content-inline-img.layout-block:not(.pdf-inline-layout-row img)'))
+      blockImage: Boolean(row.querySelector('img.content-inline-img.layout-block:not(.pdf-inline-layout-row img)')),
+      keepTogether: row.classList.contains('pdf-keep-together'),
+      compactSplit: row.classList.contains('pdf-compact-split'),
+      breakInside: getComputedStyle(row).breakInside
     };
   });
+  const pdfPath = testInfo.outputPath('compact-block-image-no-overlap.pdf');
+  const pdf = await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
+  await testInfo.attach('compact-block-image-no-overlap.pdf', { body: pdf, contentType: 'application/pdf' });
   expect(state.height).toBeGreaterThan(state.remaining);
   expect(state.height).toBeLessThanOrEqual(state.pageHeight);
   expect(state.blockImage).toBe(true);
   expect(state.rowTag).toBe('SECTION');
   expect(state.nativeTableRows).toBe(0);
+  expect(state.keepTogether).toBe(true);
+  expect(state.compactSplit).toBe(false);
+  expect(state.breakInside).toBe('avoid');
 });
 
 test('接近頁尾的趨勢圖模塊整體移頁，canvas留在卡片內且不壓到下一模塊', async ({ page }, testInfo) => {
