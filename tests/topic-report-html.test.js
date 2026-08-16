@@ -20,7 +20,7 @@ function ids(html) {
 test('月報只在數據管理右側新增外部專題入口且mirror逐byte一致', async () => {
   const [index, mirror] = await Promise.all([read('index.html'), read('月度安全會議報告-v4.html')]);
   assert.equal(index, mirror);
-  const marker = '<a id="topicReportsEntry" class="v1-tab-btn v1-topic-entry" href="./topic-reports.html?v=1.2.0" target="topic-reports"';
+  const marker = '<a id="topicReportsEntry" class="v1-tab-btn v1-topic-entry" href="./topic-reports.html?v=1.3.0" target="topic-reports"';
   assert.equal(index.split(marker).length - 1, 1);
   const dataIndex = index.indexOf('>數據管理</button>');
   const topicIndex = index.indexOf(marker);
@@ -73,6 +73,7 @@ test('專題編輯頁是獨立窗口且完整列出編輯、模塊、保存、Ex
     'topicLeaseNotice', 'topicSystemNumber', 'topicRevision', 'topicReportTitle',
     'topicReportDate', 'topicModules', 'topicAddModule', 'topicSave', 'topicComplete',
     'topicDiscardExit', 'topicSync', 'topicPrint', 'topicReset', 'topicExcelImport', 'topicExcelExport',
+    'topicPdfScale',
     'topicTextColorPalette', 'topicFontSize', 'topicObjectToolbar', 'topicTrendControls', 'topicTrendHeight',
     'topicExcelFile', 'topicImageFile', 'topicAttachmentFile', 'topicPrintArea'
   ];
@@ -107,7 +108,7 @@ test('topic資產版本完全一致且list/editor啟動前執行混版fail-close
   const core = require(join(ROOT, 'topic-reports-core.js'));
   const client = require(join(ROOT, 'topic-reports-client.js'));
   const editor = require(join(ROOT, 'topic-report-editor.js'));
-  assert.equal(core.BUILD_ID, '1.2.0');
+  assert.equal(core.BUILD_ID, '1.3.0');
   assert.equal(client.BUILD_ID, core.BUILD_ID);
   assert.equal(editor.BUILD_ID, core.BUILD_ID);
   for (const file of ['topic-reports-page.js', 'topic-report-editor.js']) {
@@ -120,7 +121,7 @@ test('topic資產版本完全一致且list/editor啟動前執行混版fail-close
     const versions = [...html.matchAll(/(?:topic-reports-(?:core|client)|topic-reports-page|topic-report-editor)\.js\?v=([^"']+)/g)]
       .map((match) => match[1]);
     assert.ok(versions.length >= 3, `${file}應載入三個versioned topic資產`);
-    assert.deepEqual([...new Set(versions)], ['1.2.0']);
+    assert.deepEqual([...new Set(versions)], ['1.3.0']);
   }
 });
 

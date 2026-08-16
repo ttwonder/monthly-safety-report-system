@@ -669,6 +669,134 @@ test('不保存並退出不呼叫save、ACK後清草稿並立即釋放鎖', asyn
   await expect(list.locator('#topicReportsBody [data-delete-report]')).toBeEnabled();
 });
 
+test('專題項次標頭、操作列與空白內容區保持緊湊', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '緊湊編輯區專題');
+  await editor.setViewportSize({ width: 1440, height: 1000 });
+
+  const geometry = await editor.locator('.topic-module').first().evaluate((module) => {
+    const rect = (selector) => module.querySelector(selector).getBoundingClientRect();
+    const topbar = rect('.topic-module-topbar');
+    const actions = rect('.topic-module-actions');
+    const order = rect('[data-module-pdf-order]');
+    const editable = rect('.topic-editable');
+    const title = rect('.topic-module-title');
+    const index = rect('.topic-module-heading small');
+    return {
+      topbarHeight: topbar.height,
+      actionsHeight: actions.height,
+      orderWidth: order.width,
+      editableHeight: editable.height,
+      titleCenterY: title.top + title.height / 2,
+      indexCenterY: index.top + index.height / 2
+    };
+  });
+
+  expect(geometry.orderWidth).toBeLessThanOrEqual(88);
+  expect(geometry.actionsHeight).toBeLessThanOrEqual(58);
+  expect(geometry.topbarHeight).toBeLessThanOrEqual(64);
+  expect(geometry.editableHeight).toBeLessThanOrEqual(120);
+  expect(Math.abs(geometry.titleCenterY - geometry.indexCenterY)).toBeLessThanOrEqual(4);
+});
+
+test('專題PDF百分比縮放會套用到列印區且不修改報告Revision', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, 'PDF縮放專題');
+  const scale = editor.locator('#topicPdfScale');
+  await expect(scale).toHaveValue('100');
+  await scale.selectOption('80');
+
+  await editor.evaluate(() => {
+    window.__topicScalePrintObserved = null;
+    window.print = () => {
+      const area = document.querySelector('#topicPrintArea');
+      window.__topicScalePrintObserved = {
+        selected: document.querySelector('#topicPdfScale').value,
+        dataScale: area.dataset.pdfScale,
+        zoom: area.style.getPropertyValue('--topic-pdf-scale'),
+        width: area.style.getPropertyValue('--topic-pdf-width')
+      };
+    };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicScalePrintObserved)).not.toBeNull();
+  expect(await editor.evaluate(() => window.__topicScalePrintObserved)).toEqual({
+    selected: '80', dataScale: '80', zoom: '0.8', width: '125%'
+  });
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.topicReports[0].revision).toBe(1);
+  expect(state.topicSnapshots).toHaveLength(1);
+});
+
+test('專題PDF中的30%資訊卡維持可讀橫排並產生A4檔', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, 'PDF資訊卡版面專題');
+  const editable = editor.locator('.topic-editable').first();
+  await editable.fill('PDF資訊卡版面驗證 ');
+  await editable.click();
+  await editable.press('End');
+  for (const type of ['indicator-blue', 'kpi', 'progress', 'zone']) {
+    await editor.locator(`[data-insert="${type}"]`).click();
+  }
+  await expect(editor.locator('.topic-kpi-card')).toHaveCount(1);
+  await editor.locator('#topicPdfScale').selectOption('100');
+  await editor.evaluate(() => {
+    window.__topicLayoutPrintObserved = false;
+    window.print = () => { window.__topicLayoutPrintObserved = true; };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicLayoutPrintObserved)).toBe(true);
+
+  await editor.setViewportSize({ width: 718, height: 1000 });
+  await editor.emulateMedia({ media: 'print' });
+  const geometry = await editor.evaluate(() => {
+    document.body.classList.add('topic-printing-report');
+    const area = document.querySelector('#topicPrintArea');
+    const cards = Array.from(area.querySelectorAll('.topic-kpi-card,.topic-progress-card,.topic-zone-card'));
+    const labels = [
+      ...area.querySelectorAll('.topic-kpi-card .topic-card-values > span:not(.topic-kpi-avg-toggle)'),
+      ...area.querySelectorAll('.topic-progress-card .topic-card-head > span'),
+      ...area.querySelectorAll('.topic-zone-card .topic-card-head > span')
+    ];
+    return {
+      cards: cards.map((card) => ({
+        width: card.getBoundingClientRect().width,
+        height: card.getBoundingClientRect().height,
+        clientWidth: card.clientWidth,
+        scrollWidth: card.scrollWidth
+      })),
+      labels: labels.map((label) => {
+        const style = getComputedStyle(label);
+        return {
+          whiteSpace: style.whiteSpace,
+          height: label.getBoundingClientRect().height,
+          fontSize: Number.parseFloat(style.fontSize)
+        };
+      }),
+      toggleDisplay: getComputedStyle(area.querySelector('.topic-kpi-avg-toggle')).display
+    };
+  });
+  expect(geometry.cards).toHaveLength(3);
+  expect(geometry.cards.every((card) => card.width >= 170 && card.scrollWidth <= card.clientWidth + 1)).toBe(true);
+  expect(geometry.labels.length).toBeGreaterThanOrEqual(5);
+  expect(
+    geometry.labels.every((label) => label.whiteSpace === 'nowrap' && label.height <= label.fontSize * 2.1),
+    JSON.stringify(geometry, null, 2)
+  ).toBe(true);
+  expect(geometry.toggleDisplay).toBe('none');
+
+  const pdf = await editor.pdf({
+    format: 'A4', printBackground: true,
+    margin: { top: '10mm', right: '10mm', bottom: '10mm', left: '10mm' }
+  });
+  expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
+  expect(pdf.length).toBeGreaterThan(5000);
+  await testInfo.attach('topic-layout-100-percent.pdf', { body: pdf, contentType: 'application/pdf' });
+});
+
 test('編輯區塊在標題操作下方，色塊、字級、自動編號及物件百分比與刪除可保存', async ({ page, request }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);

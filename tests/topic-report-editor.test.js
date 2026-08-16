@@ -105,6 +105,15 @@ test('指標百分比處理除零、負數及超界值', () => {
   assert.equal(editor.clampedPercent('bad', 0, 100), 0);
 });
 
+test('PDF縮放只接受明確百分比且無效值回到100%', () => {
+  for (const value of [60, 70, 80, 90, 100, 110, 120]) {
+    assert.equal(editor.normalizePdfScale(value), value);
+    assert.equal(editor.normalizePdfScale(`${value}%`), value);
+  }
+  assert.equal(editor.normalizePdfScale('95%'), 100);
+  assert.equal(editor.normalizePdfScale('javascript:1'), 100);
+});
+
 test('插入內容百分比只接受月報同級預設值', () => {
   for (const value of [20, 25, 30, 45, 70, 100]) {
     assert.equal(editor.normalizeObjectWidth(`${value}%`), `${value}%`);

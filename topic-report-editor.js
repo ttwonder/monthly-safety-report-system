@@ -11,7 +11,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi) {
   'use strict';
 
-  const BUILD_ID = '1.2.0';
+  const BUILD_ID = '1.3.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -161,6 +161,7 @@
   }
 
   const OBJECT_WIDTHS = Object.freeze([20, 25, 30, 45, 70, 100]);
+  const PDF_SCALES = Object.freeze([60, 70, 80, 90, 100, 110, 120]);
   function normalizeObjectWidth(value) {
     const numeric = Number(String(value == null ? '' : value).replace('%', '').trim());
     return OBJECT_WIDTHS.includes(numeric) ? `${numeric}%` : '100%';
@@ -168,6 +169,10 @@
   function normalizeChartHeight(value) {
     const numeric = Number.parseInt(value, 10);
     return Number.isFinite(numeric) ? Math.max(160, Math.min(500, numeric)) : 220;
+  }
+  function normalizePdfScale(value) {
+    const numeric = Number.parseInt(String(value == null ? '' : value).replace('%', '').trim(), 10);
+    return PDF_SCALES.includes(numeric) ? numeric : 100;
   }
 
   function isAllowedImage(file) {
@@ -515,10 +520,11 @@
       title.value = module.title;
       title.maxLength = 240;
       title.dataset.moduleTitle = module.id;
-      titleRow.append(icon, title);
       const count = root.document.createElement('small');
+      count.className = 'topic-module-index';
       count.textContent = `項次 ${index + 1}`;
-      heading.append(titleRow, count);
+      titleRow.append(icon, title, count);
+      heading.append(titleRow);
 
       const contentCell = root.document.createElement('div');
       contentCell.className = 'topic-module-content';
@@ -559,7 +565,9 @@
       pdfLabel.append(pdfCheck, root.document.createTextNode(' PDF勾選'));
       const pdfOrder = root.document.createElement('input');
       pdfOrder.type = 'number'; pdfOrder.min = '1'; pdfOrder.max = '999';
-      pdfOrder.className = 'topic-input'; pdfOrder.style.minHeight = '34px';
+      pdfOrder.className = 'topic-input topic-pdf-order-input';
+      pdfOrder.setAttribute('aria-label', 'PDF順序');
+      pdfOrder.title = 'PDF順序';
       pdfOrder.value = String(module.pdfOrder || index + 1);
       pdfOrder.dataset.modulePdfOrder = module.id;
       actions.append(
@@ -1553,6 +1561,11 @@
 
   function buildPrintArea(reportProjection) {
     const content = core.normalizeTopicContent(reportProjection.content);
+    const scale = normalizePdfScale($('topicPdfScale') && $('topicPdfScale').value);
+    const printArea = $('topicPrintArea');
+    printArea.dataset.pdfScale = String(scale);
+    printArea.style.setProperty('--topic-pdf-scale', String(scale / 100));
+    printArea.style.setProperty('--topic-pdf-width', `${10000 / scale}%`);
     $('topicPrintTitle').textContent = content.title;
     $('topicPrintMeta').textContent = `${reportProjection.systemNumber}　報告日期：${content.reportDate}　Revision：R${reportProjection.revision}`;
     const rootNode = $('topicPrintModules');
@@ -1657,6 +1670,11 @@
     $('topicFontSize').addEventListener('change', (event) => applyFontSize(event.target.value));
     $('topicFontEn').addEventListener('change', markDirty);
     $('topicFontZh').addEventListener('change', markDirty);
+    $('topicPdfScale').addEventListener('change', (event) => {
+      const scale = normalizePdfScale(event.target.value);
+      event.target.value = String(scale);
+      root.localStorage.setItem('topic:v1:pdf-scale', String(scale));
+    });
     $('topicAddModule').addEventListener('click', addModule);
     $('topicSave').addEventListener('click', () => runAction(saveNow));
     $('topicComplete').addEventListener('click', () => runAction(completeEditing));
@@ -1836,6 +1854,7 @@
     if (pinned === 'false') $('topicToolbarPin').click();
     const collapsed = root.localStorage.getItem('topic:v1:toolbar-collapsed');
     if (collapsed === 'true') $('topicToolbarCollapse').click();
+    $('topicPdfScale').value = String(normalizePdfScale(root.localStorage.getItem('topic:v1:pdf-scale') || 100));
     boot();
   }
 
@@ -1853,6 +1872,7 @@
     clampedPercent,
     normalizeObjectWidth,
     normalizeChartHeight,
+    normalizePdfScale,
     mount,
     getIdentity: () => state.identity ? clone(state.identity) : null,
     getState: () => ({
