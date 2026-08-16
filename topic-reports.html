@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>專題報告清單</title>
+  <meta name="color-scheme" content="light">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer">
+  <link rel="stylesheet" href="./topic-reports.css?v=1.0.0">
+</head>
+<body>
+  <div id="topicIdentityGate" class="topic-gate" aria-live="polite">
+    <section class="topic-gate-card">
+      <div class="topic-gate-icon"><i class="fas fa-file-shield"></i></div>
+      <h1>正在確認專題報告身份</h1>
+      <p id="topicIdentityGateMessage">請稍候；本頁只接收月報系統已驗證的身份，不會載入月報內容。</p>
+      <div class="topic-actions" style="justify-content:center">
+        <button id="topicIdentityRetry" class="topic-btn topic-btn-primary" type="button"><i class="fas fa-rotate"></i>重新確認</button>
+        <a class="topic-btn" href="./index.html"><i class="fas fa-arrow-left"></i>返回月報系統</a>
+      </div>
+    </section>
+  </div>
+
+  <main id="topicReportsPage" class="topic-app-shell" hidden>
+    <header class="topic-header">
+      <img class="topic-logo" src="./assets/fpmc-logo.png" width="241" height="197" alt="台塑海運 FPMC Logo">
+      <div class="topic-heading">
+        <h1><i class="fas fa-folder-open" aria-hidden="true"></i> 專題報告</h1>
+        <p>每份報告具有永久系統編號；不同報告可同時編輯，同一報告只允許一個編輯窗口。</p>
+      </div>
+      <div id="topicCurrentUser" class="topic-identity" aria-label="目前身份"></div>
+      <div class="topic-actions no-print">
+        <a class="topic-btn" href="./index.html"><i class="fas fa-arrow-left"></i>月報系統</a>
+      </div>
+    </header>
+
+    <section class="topic-card">
+      <div class="topic-actions no-print">
+        <button id="topicAddReport" type="button" class="topic-btn topic-btn-primary"><i class="fas fa-plus"></i>新增專題報告</button>
+        <button id="topicRefreshReports" type="button" class="topic-btn"><i class="fas fa-arrows-rotate"></i>同步最新</button>
+        <button id="topicPrintHistory" type="button" class="topic-btn"><i class="fas fa-file-pdf"></i>歷史清單 PDF</button>
+      </div>
+      <div id="topicListStatus" class="topic-status" role="status" aria-live="polite">尚未載入</div>
+      <div class="topic-table-wrap">
+        <table id="topicReportsTable" class="topic-table" aria-label="專題報告歷史清單">
+          <thead>
+            <tr>
+              <th>系統編號</th><th>專題名稱</th><th>報告日期</th><th>狀態</th>
+              <th>模塊</th><th>Revision</th><th>最後更新</th><th class="no-print">操作</th>
+            </tr>
+          </thead>
+          <tbody id="topicReportsBody"></tbody>
+        </table>
+        <div id="topicReportsEmpty" class="topic-empty" hidden>
+          <i class="fas fa-folder-open"></i>
+          目前尚無專題報告
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <section id="topicHistoryPrintArea" class="topic-history-print" aria-hidden="true">
+    <div class="topic-print-header">
+      <h1>專題報告歷史清單</h1>
+      <div id="topicHistoryPrintMeta" class="topic-print-meta"></div>
+    </div>
+    <table>
+      <thead><tr><th>系統編號</th><th>專題名稱</th><th>日期</th><th>狀態</th><th>Revision</th><th>最後更新</th></tr></thead>
+      <tbody id="topicHistoryPrintBody"></tbody>
+    </table>
+  </section>
+
+  <dialog id="topicCreateDialog" class="topic-dialog">
+    <form id="topicCreateForm" method="dialog" class="topic-dialog-body">
+      <h2><i class="fas fa-file-circle-plus"></i> 新增專題報告</h2>
+      <div class="topic-field">
+        <label for="topicCreateTitle">專題名稱</label>
+        <input id="topicCreateTitle" class="topic-input" maxlength="240" required autocomplete="off" placeholder="例如：繫泊作業安全專題">
+      </div>
+      <div class="topic-field">
+        <label for="topicCreateDate">報告日期</label>
+        <input id="topicCreateDate" class="topic-input" type="date" required>
+      </div>
+      <div class="topic-dialog-actions">
+        <button id="topicCreateCancel" type="button" class="topic-btn">取消</button>
+        <button id="topicCreateConfirm" type="submit" class="topic-btn topic-btn-primary"><i class="fas fa-plus"></i>建立並開啟</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="topicToast" class="topic-toast" role="status" aria-live="polite"></div>
+
+  <script src="./supabase-config.js?v=7.1.0"></script>
+  <script src="./vendor/supabase-2.112.2.js?v=7.1.0"></script>
+  <script src="./topic-reports-core.js?v=1.0.0"></script>
+  <script src="./topic-reports-client.js?v=1.0.0"></script>
+  <script src="./topic-reports-page.js?v=1.0.0"></script>
+</body>
+</html>

@@ -29,7 +29,8 @@ function freshState() {
     sitePassword: 'gate-pass',
     siteSessions: new Map(), userSessions: new Map(), trustedDevices: new Map(), resumeTokens: new Map(),
     leases: new Map(), operations: new Map(), deletedModules: [], snapshots: [],
-    hangRpcCounts: new Map(), hangAfterCommitCounts: new Map(),
+    topicReports: [], topicLeases: new Map(), topicOperations: new Map(), topicSnapshots: [], topicSequence: 0,
+    hangRpcCounts: new Map(), hangAfterCommitCounts: new Map(), failRpcCounts: new Map(),
     sequence: 0, events: []
   };
 }
@@ -69,6 +70,64 @@ function storeOperation(operationId, actorUserId, requestHash, result) {
   return clone(result);
 }
 
+function topicActor(p) {
+  const session = state.userSessions.get(p.p_user_session_id);
+  if (!session || session.clientSessionId !== p.p_client_session_id) return null;
+  return state.users.find((user) => user.id === session.userId && user.active !== false && user.version === session.userVersion) || null;
+}
+
+function topicReportJson(report) {
+  return {
+    id: report.id,
+    systemNumber: report.systemNumber,
+    title: report.title,
+    reportDate: report.reportDate,
+    content: clone(report.content),
+    revision: report.revision,
+    status: report.status,
+    createdAt: report.createdAt,
+    updatedAt: report.updatedAt,
+    createdByUserId: report.createdByUserId,
+    updatedByUserId: report.updatedByUserId
+  };
+}
+
+function topicLeaseJson(lease) {
+  return {
+    ok: true,
+    editable: true,
+    reportId: lease.reportId,
+    leaseId: lease.leaseId,
+    fencingToken: lease.fencingToken,
+    editorWindowId: lease.editorWindowId,
+    expiresAt: new Date(lease.expiresAt).toISOString()
+  };
+}
+
+function replayTopicOperation(operationId, actorUserId, requestHash) {
+  const existing = state.topicOperations.get(operationId);
+  if (!existing) return null;
+  if (existing.actorUserId !== actorUserId || existing.requestHash !== requestHash) {
+    return { ok: false, error: 'IDEMPOTENCY_MISMATCH' };
+  }
+  return clone(existing.result);
+}
+
+function storeTopicOperation(operationId, actorUserId, requestHash, result) {
+  state.topicOperations.set(operationId, { actorUserId, requestHash, result: clone(result) });
+  return clone(result);
+}
+
+function topicLeaseMatches(lease, actor, p) {
+  return Boolean(lease && !lease.released && lease.expiresAt > now()
+    && lease.leaseId === p.p_lease_id
+    && lease.fencingToken === Number(p.p_fencing_token)
+    && lease.holderUserId === actor.id
+    && lease.holderUserSessionId === p.p_user_session_id
+    && lease.clientSessionId === p.p_client_session_id
+    && lease.editorWindowId === p.p_editor_window_id);
+}
+
 function resultState() {
   return {
     rpcCounts: Object.fromEntries(state.rpcCounts.entries()),
@@ -85,6 +144,18 @@ function resultState() {
       result: operation.result || operation
     })),
     leases: Array.from(state.leases.entries()).map(([key, value]) => ({ key, ...value })),
+    topicReports: clone(state.topicReports),
+    topicLeases: Array.from(state.topicLeases.values()).map((lease) => ({
+      ...clone(lease),
+      released: Boolean(lease.released || lease.expiresAt <= now())
+    })),
+    topicSnapshots: clone(state.topicSnapshots),
+    topicOperations: Array.from(state.topicOperations.entries()).map(([operationId, operation]) => ({
+      operationId,
+      actorUserId: operation.actorUserId,
+      requestHash: operation.requestHash,
+      result: clone(operation.result)
+    })),
     trustedDeviceCount: state.trustedDevices.size,
     activeTrustedDeviceCount: Array.from(state.trustedDevices.values())
       .filter((device) => !device.revoked && device.expiresAt > now()).length,
@@ -97,6 +168,13 @@ function resultState() {
 
 function rpc(name, p) {
   state.rpcCounts.set(name, Number(state.rpcCounts.get(name) || 0) + 1);
+  const failRemaining = Number(state.failRpcCounts.get(name) || 0);
+  if (failRemaining > 0) {
+    state.failRpcCounts.set(name, failRemaining - 1);
+    const error = new Error('FORCED_RPC_FAILURE');
+    error.code = 'FORCED_RPC_FAILURE';
+    throw error;
+  }
   if (name === 'monthly_v7_get_status') {
     if (state.statusFailure) {
       const error = new Error(state.statusFailure.message || 'STATUS_UNAVAILABLE');
@@ -104,6 +182,248 @@ function rpc(name, p) {
       throw error;
     }
     return clone(state.statusResponse);
+  }
+  if (name === 'monthly_v7_topic_list_reports') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const reports = state.topicReports
+      .slice()
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)) || b.systemNumber.localeCompare(a.systemNumber))
+      .map((report) => {
+        const lease = state.topicLeases.get(report.id);
+        const active = Boolean(lease && !lease.released && lease.expiresAt > now());
+        const holder = active ? state.users.find((user) => user.id === lease.holderUserId) : null;
+        return {
+          id: report.id,
+          systemNumber: report.systemNumber,
+          title: report.title,
+          reportDate: report.reportDate,
+          revision: report.revision,
+          status: report.status,
+          moduleCount: Array.isArray(report.content && report.content.modules) ? report.content.modules.length : 0,
+          createdAt: report.createdAt,
+          updatedAt: report.updatedAt,
+          updatedBy: state.users.find((user) => user.id === report.updatedByUserId)?.displayName || '',
+          editing: active,
+          holderDisplayName: holder && holder.displayName,
+          leaseExpiresAt: active ? new Date(lease.expiresAt).toISOString() : null
+        };
+      });
+    return { ok: true, reports, actor: clone(actor) };
+  }
+  if (name === 'monthly_v7_topic_get_report') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const report = state.topicReports.find((entry) => entry.id === p.p_report_id);
+    if (!report) return { ok: false, error: 'ENTITY_NOT_FOUND' };
+    const lease = state.topicLeases.get(report.id);
+    const active = Boolean(lease && !lease.released && lease.expiresAt > now());
+    const holder = active ? state.users.find((user) => user.id === lease.holderUserId) : null;
+    return {
+      ok: true,
+      report: topicReportJson(report),
+      editing: active,
+      holderDisplayName: holder && holder.displayName,
+      leaseExpiresAt: active ? new Date(lease.expiresAt).toISOString() : null,
+      actor: clone(actor)
+    };
+  }
+  if (name === 'monthly_v7_topic_create_report') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const requestHash = canonical({
+      command: 'create_report', editorWindowId: p.p_editor_window_id,
+      title: p.p_title, reportDate: p.p_report_date, content: p.p_content
+    });
+    const replay = replayTopicOperation(p.p_operation_id, actor.id, requestHash);
+    if (replay) return replay;
+    if (!p.p_editor_window_id || !String(p.p_title || '').trim() || !p.p_report_date
+      || !p.p_content || p.p_content.domain !== 'topic' || !Array.isArray(p.p_content.modules)) {
+      return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'INVALID_PAYLOAD' });
+    }
+    state.topicSequence += 1;
+    const businessDate = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date()).replace(/-/g, '');
+    const timestamp = new Date().toISOString();
+    const report = {
+      id: randomUUID(),
+      systemNumber: `SR-${businessDate}-${String(state.topicSequence).padStart(3, '0')}`,
+      title: String(p.p_title).trim(),
+      reportDate: p.p_report_date,
+      content: { ...clone(p.p_content), schemaVersion: 1, domain: 'topic', title: String(p.p_title).trim(), reportDate: p.p_report_date },
+      revision: 1,
+      status: 'draft',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      createdByUserId: actor.id,
+      updatedByUserId: actor.id
+    };
+    const lease = {
+      reportId: report.id,
+      leaseId: randomUUID(),
+      fencingToken: 1,
+      holderUserId: actor.id,
+      holderUserSessionId: p.p_user_session_id,
+      clientSessionId: p.p_client_session_id,
+      editorWindowId: p.p_editor_window_id,
+      claimedAt: now(),
+      heartbeatAt: now(),
+      expiresAt: now() + 90000,
+      released: false
+    };
+    state.topicReports.push(report);
+    state.topicLeases.set(report.id, lease);
+    return storeTopicOperation(p.p_operation_id, actor.id, requestHash, {
+      ok: true,
+      report: topicReportJson(report),
+      lease: topicLeaseJson(lease),
+      operationId: p.p_operation_id
+    });
+  }
+  if (name === 'monthly_v7_topic_acquire_report_lease') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const report = state.topicReports.find((entry) => entry.id === p.p_report_id);
+    if (!report) return { ok: false, error: 'ENTITY_NOT_FOUND' };
+    const old = state.topicLeases.get(report.id);
+    const active = Boolean(old && !old.released && old.expiresAt > now());
+    if (active) {
+      const sameWindow = old.holderUserId === actor.id
+        && old.holderUserSessionId === p.p_user_session_id
+        && old.clientSessionId === p.p_client_session_id
+        && old.editorWindowId === p.p_editor_window_id;
+      if (!sameWindow) {
+        const holder = state.users.find((user) => user.id === old.holderUserId);
+        return {
+          ok: false, error: 'LEASE_HELD', reportId: report.id,
+          holderDisplayName: holder && holder.displayName,
+          expiresAt: new Date(old.expiresAt).toISOString()
+        };
+      }
+      old.heartbeatAt = now();
+      old.expiresAt = now() + Math.max(30, Math.min(180, Number(p.p_ttl_seconds || 90))) * 1000;
+      return topicLeaseJson(old);
+    }
+    const lease = {
+      reportId: report.id,
+      leaseId: randomUUID(),
+      fencingToken: old ? old.fencingToken + 1 : 1,
+      holderUserId: actor.id,
+      holderUserSessionId: p.p_user_session_id,
+      clientSessionId: p.p_client_session_id,
+      editorWindowId: p.p_editor_window_id,
+      claimedAt: now(),
+      heartbeatAt: now(),
+      expiresAt: now() + Math.max(30, Math.min(180, Number(p.p_ttl_seconds || 90))) * 1000,
+      released: false
+    };
+    state.topicLeases.set(report.id, lease);
+    return topicLeaseJson(lease);
+  }
+  if (name === 'monthly_v7_topic_heartbeat_report_lease') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const lease = state.topicLeases.get(p.p_report_id);
+    if (!topicLeaseMatches(lease, actor, p)) return { ok: false, error: 'LEASE_LOST' };
+    lease.heartbeatAt = now();
+    lease.expiresAt = now() + Math.max(30, Math.min(180, Number(p.p_ttl_seconds || 90))) * 1000;
+    return topicLeaseJson(lease);
+  }
+  if (name === 'monthly_v7_topic_release_report_lease') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const lease = state.topicLeases.get(p.p_report_id);
+    if (!topicLeaseMatches(lease, actor, p)) return { ok: false, error: 'LEASE_LOST' };
+    lease.heartbeatAt = now();
+    lease.expiresAt = now() - 1;
+    lease.released = true;
+    return {
+      ok: true, released: true, reportId: lease.reportId,
+      leaseId: lease.leaseId, fencingToken: lease.fencingToken
+    };
+  }
+  if (name === 'monthly_v7_topic_save_report') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const requestHash = canonical({
+      command: 'save_report', reportId: p.p_report_id, editorWindowId: p.p_editor_window_id,
+      leaseId: p.p_lease_id, fencingToken: Number(p.p_fencing_token),
+      expectedRevision: Number(p.p_expected_revision), title: p.p_title,
+      reportDate: p.p_report_date, status: p.p_status, content: p.p_content
+    });
+    const replay = replayTopicOperation(p.p_operation_id, actor.id, requestHash);
+    if (replay) return replay;
+    const report = state.topicReports.find((entry) => entry.id === p.p_report_id);
+    const lease = state.topicLeases.get(p.p_report_id);
+    if (!report) return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'ENTITY_NOT_FOUND' });
+    if (!topicLeaseMatches(lease, actor, p)) {
+      return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'LEASE_LOST' });
+    }
+    if (report.revision !== Number(p.p_expected_revision)) {
+      return storeTopicOperation(p.p_operation_id, actor.id, requestHash, {
+        ok: false, error: 'REVISION_CONFLICT', currentRevision: report.revision, report: topicReportJson(report)
+      });
+    }
+    report.title = String(p.p_title).trim();
+    report.reportDate = p.p_report_date;
+    report.status = p.p_status;
+    report.content = { ...clone(p.p_content), schemaVersion: 1, domain: 'topic', title: report.title, reportDate: report.reportDate };
+    report.revision += 1;
+    report.updatedAt = new Date().toISOString();
+    report.updatedByUserId = actor.id;
+    lease.heartbeatAt = now();
+    lease.expiresAt = now() + 90000;
+    return storeTopicOperation(p.p_operation_id, actor.id, requestHash, {
+      ok: true,
+      report: topicReportJson(report),
+      lease: topicLeaseJson(lease),
+      operationId: p.p_operation_id
+    });
+  }
+  if (name === 'monthly_v7_topic_create_snapshot') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const requestHash = canonical({
+      command: 'create_snapshot', reportId: p.p_report_id, expectedRevision: Number(p.p_expected_revision)
+    });
+    const replay = replayTopicOperation(p.p_operation_id, actor.id, requestHash);
+    if (replay) return replay;
+    const report = state.topicReports.find((entry) => entry.id === p.p_report_id);
+    if (!report) return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'ENTITY_NOT_FOUND' });
+    if (report.revision !== Number(p.p_expected_revision)) {
+      return storeTopicOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'REVISION_CONFLICT', currentRevision: report.revision });
+    }
+    const snapshot = {
+      id: randomUUID(),
+      reportId: report.id,
+      reportRevision: report.revision,
+      content: { domain: 'topic', report: topicReportJson(report) },
+      contentSha256: sha256(canonical(topicReportJson(report))),
+      createdAt: new Date().toISOString(),
+      createdByUserId: actor.id
+    };
+    state.topicSnapshots.push(snapshot);
+    return storeTopicOperation(p.p_operation_id, actor.id, requestHash, {
+      ok: true,
+      snapshotId: snapshot.id,
+      reportRevision: snapshot.reportRevision,
+      contentSha256: snapshot.contentSha256,
+      createdAt: snapshot.createdAt,
+      snapshot: clone(snapshot.content),
+      operationId: p.p_operation_id
+    });
+  }
+  if (name === 'monthly_v7_topic_get_snapshot') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    const snapshot = state.topicSnapshots.find((entry) => entry.id === p.p_snapshot_id);
+    if (!snapshot) return { ok: false, error: 'SNAPSHOT_NOT_FOUND' };
+    return {
+      ok: true, snapshotId: snapshot.id, reportRevision: snapshot.reportRevision,
+      contentSha256: snapshot.contentSha256, createdAt: snapshot.createdAt,
+      snapshot: clone(snapshot.content)
+    };
   }
   if (name === 'monthly_v7_open_site') {
     if (p.p_password !== state.sitePassword) return { ok: false, error: 'INVALID_CREDENTIALS' };
@@ -618,6 +938,12 @@ const mime = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascri
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/__fake_reset' && req.method === 'POST') { state = freshState(); res.writeHead(204); return res.end(); }
+  if (url.pathname === '/__fake_fail_rpc' && req.method === 'POST') {
+    const name = String(url.searchParams.get('name') || '');
+    const count = Math.max(0, Number(url.searchParams.get('count') || 1));
+    state.failRpcCounts.set(name, count);
+    res.writeHead(204); return res.end();
+  }
   if (url.pathname === '/__fake_status' && req.method === 'POST') {
     const kind = String(url.searchParams.get('kind') || 'normalized');
     state.statusFailure = null;
@@ -717,7 +1043,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/supabase-config.js') {
     res.writeHead(200, { 'Content-Type': mime['.js'] });
-    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace'};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.0.28'});`);
+    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace',topicRequestTimeoutMs:800};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.1.0'});`);
   }
   if (url.pathname === '/vendor/supabase-2.112.2.js') { res.writeHead(200, { 'Content-Type': mime['.js'] }); return res.end(fakeSdk); }
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;

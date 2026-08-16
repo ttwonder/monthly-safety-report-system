@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>專題報告編輯器</title>
+  <meta name="color-scheme" content="light">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer">
+  <link rel="stylesheet" href="./topic-reports.css?v=1.0.0">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+</head>
+<body>
+  <div id="topicEditorGate" class="topic-gate" aria-live="polite">
+    <section class="topic-gate-card">
+      <div class="topic-gate-icon"><i class="fas fa-pen-to-square"></i></div>
+      <h1>正在開啟專題報告</h1>
+      <p id="topicEditorGateMessage">正在確認身份、讀取已保存revision及取得編輯權。</p>
+      <div class="topic-actions" style="justify-content:center">
+        <button id="topicEditorRetry" type="button" class="topic-btn topic-btn-primary"><i class="fas fa-rotate"></i>重新確認</button>
+        <a class="topic-btn" href="./topic-reports.html"><i class="fas fa-list"></i>返回專題清單</a>
+      </div>
+    </section>
+  </div>
+
+  <main id="topicEditorPage" class="topic-app-shell topic-editor-shell" hidden>
+    <header class="topic-header topic-editor-header">
+      <img class="topic-logo" src="./assets/fpmc-logo.png" width="241" height="197" alt="台塑海運 FPMC Logo">
+      <div class="topic-heading">
+        <h1><i class="fas fa-file-pen"></i> 專題報告編輯器</h1>
+        <p>保存只更新本專題；完成編輯會在保存ACK後釋放整份報告編輯權。</p>
+      </div>
+      <div id="topicCurrentUser" class="topic-identity" aria-label="目前身份"></div>
+      <div class="topic-actions no-print">
+        <a class="topic-btn" href="./topic-reports.html"><i class="fas fa-list"></i>專題清單</a>
+      </div>
+    </header>
+
+    <section id="topicEditorToolbar" class="topic-editor-toolbar no-print" data-pinned="true" data-collapsed="false">
+      <div class="topic-toolbar-head">
+        <strong><i class="fas fa-sliders"></i> 編輯工具列</strong>
+        <div class="topic-toolbar-controls">
+          <button id="topicToolbarPin" type="button" class="topic-tool-btn" aria-pressed="true"><i class="fas fa-thumbtack"></i>固定顯示 · 已固定</button>
+          <button id="topicToolbarCollapse" type="button" class="topic-tool-btn" aria-expanded="true"><i class="fas fa-chevron-up"></i>收合</button>
+        </div>
+      </div>
+      <div id="topicToolbarContent" class="topic-toolbar-content">
+        <div class="topic-toolbar-row">
+          <span class="topic-toolbar-label">基礎編輯</span>
+          <button type="button" class="topic-tool-btn" data-command="bold" title="粗體"><i class="fas fa-bold"></i>粗體</button>
+          <button type="button" class="topic-tool-btn" data-command="italic" title="斜體"><i class="fas fa-italic"></i>斜體</button>
+          <button type="button" class="topic-tool-btn" data-command="underline" title="底線"><i class="fas fa-underline"></i>底線</button>
+          <button type="button" class="topic-tool-btn" data-command="insertUnorderedList" title="項目符號"><i class="fas fa-list-ul"></i>項目符號</button>
+          <label class="topic-tool-btn" for="topicTextColor"><i class="fas fa-palette"></i>文字顏色</label>
+          <input id="topicTextColor" class="topic-color-input" type="color" value="#111827" aria-label="文字顏色">
+          <select id="topicFontEn" class="topic-tool-select" aria-label="英數字體">
+            <option value="Arial,Helvetica,sans-serif">英：Arial</option>
+            <option value="Georgia,'Times New Roman',serif">英：Times</option>
+            <option value="'Courier New',monospace">英：Courier</option>
+          </select>
+          <select id="topicFontZh" class="topic-tool-select" aria-label="中文字體">
+            <option value="'Microsoft JhengHei','PingFang TC',sans-serif">中：微軟正黑體</option>
+            <option value="'PMingLiU',MingLiU,serif">中：新細明體</option>
+          </select>
+        </div>
+        <div class="topic-toolbar-row">
+          <span class="topic-toolbar-label">插入內容</span>
+          <button type="button" class="topic-tool-btn" data-insert="image"><i class="fas fa-image"></i>圖片</button>
+          <button type="button" class="topic-tool-btn" data-insert="table"><i class="fas fa-table"></i>表格</button>
+          <button type="button" class="topic-tool-btn" data-insert="highlight"><i class="fas fa-keyboard"></i>數值框</button>
+          <button type="button" class="topic-tool-btn" data-insert="indicator-blue"><i class="fas fa-id-card"></i>指標卡(藍)</button>
+          <button type="button" class="topic-tool-btn" data-insert="indicator-orange"><i class="fas fa-id-card"></i>指標卡(橘)</button>
+          <button type="button" class="topic-tool-btn" data-insert="kpi"><i class="fas fa-sliders"></i>KPI卡</button>
+          <button type="button" class="topic-tool-btn" data-insert="progress"><i class="fas fa-list-check"></i>進度卡</button>
+          <button type="button" class="topic-tool-btn" data-insert="zone"><i class="fas fa-ruler-combined"></i>三色卡</button>
+          <button type="button" class="topic-tool-btn" data-insert="trend"><i class="fas fa-chart-area"></i>趨勢圖</button>
+          <button type="button" class="topic-tool-btn" data-insert="attachment"><i class="fas fa-paperclip"></i>附件</button>
+        </div>
+        <div class="topic-toolbar-row">
+          <span class="topic-toolbar-label">報告操作</span>
+          <span class="topic-toolbar-label" title="每個項次右側可獨立選擇">版型：單欄／雙欄</span>
+          <button id="topicAddModule" type="button" class="topic-tool-btn"><i class="fas fa-plus"></i>新增項次</button>
+          <button id="topicExcelImport" type="button" class="topic-tool-btn"><i class="fas fa-file-import"></i>Excel匯入</button>
+          <button id="topicExcelExport" type="button" class="topic-tool-btn"><i class="fas fa-file-excel"></i>Excel匯出</button>
+          <button id="topicSave" type="button" class="topic-btn topic-btn-primary"><i class="fas fa-cloud-arrow-up"></i>保存</button>
+          <button id="topicSync" type="button" class="topic-btn"><i class="fas fa-arrows-rotate"></i>同步最新</button>
+          <button id="topicPrint" type="button" class="topic-btn"><i class="fas fa-file-pdf"></i>單份專題 PDF</button>
+          <button id="topicReset" type="button" class="topic-btn topic-btn-warning"><i class="fas fa-rotate-left"></i>重置本機草稿</button>
+          <button id="topicComplete" type="button" class="topic-btn topic-btn-success"><i class="fas fa-check-double"></i>完成編輯</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="topic-card">
+      <div class="topic-editor-meta">
+        <div class="topic-field">
+          <label for="topicReportTitle">專題名稱</label>
+          <input id="topicReportTitle" class="topic-input" maxlength="240" autocomplete="off">
+        </div>
+        <div class="topic-field">
+          <label for="topicReportDate">報告日期</label>
+          <input id="topicReportDate" class="topic-input" type="date">
+        </div>
+        <div class="topic-field">
+          <label>系統編號／Revision</label>
+          <div class="topic-meta-readonly"><span id="topicSystemNumber">—</span>&nbsp;／&nbsp;R<span id="topicRevision">—</span></div>
+        </div>
+      </div>
+      <div class="topic-editor-state">
+        <span id="topicModeBadge" class="topic-mode-badge" data-mode="readonly">確認中</span>
+        <span id="topicLeaseNotice" class="topic-lease-notice" role="status" aria-live="polite"></span>
+        <button id="topicAcquireEdit" type="button" class="topic-btn no-print" hidden><i class="fas fa-lock-open"></i>重新取得編輯權</button>
+      </div>
+      <div id="topicModules" class="topic-modules" aria-label="專題報告項次"></div>
+    </section>
+
+    <footer class="topic-editor-footer no-print">
+      <button type="button" class="topic-btn topic-btn-primary" data-footer-action="save"><i class="fas fa-cloud-arrow-up"></i>保存</button>
+      <button type="button" class="topic-btn topic-btn-success" data-footer-action="complete"><i class="fas fa-check-double"></i>完成編輯並釋放</button>
+    </footer>
+  </main>
+
+  <section id="topicPrintArea" class="topic-print-area" aria-hidden="true">
+    <div class="topic-print-header">
+      <h1 id="topicPrintTitle">專題報告</h1>
+      <div id="topicPrintMeta" class="topic-print-meta"></div>
+    </div>
+    <div id="topicPrintModules"></div>
+  </section>
+
+  <input id="topicExcelFile" type="file" accept=".xlsx,.xls" hidden>
+  <input id="topicImageFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+  <input id="topicAttachmentFile" type="file" hidden>
+  <div id="topicToast" class="topic-toast" role="status" aria-live="polite"></div>
+
+  <script src="./supabase-config.js?v=7.1.0"></script>
+  <script src="./vendor/supabase-2.112.2.js?v=7.1.0"></script>
+  <script src="./topic-reports-core.js?v=1.0.0"></script>
+  <script src="./topic-reports-client.js?v=1.0.0"></script>
+  <script src="./topic-report-editor.js?v=1.0.0"></script>
+</body>
+</html>

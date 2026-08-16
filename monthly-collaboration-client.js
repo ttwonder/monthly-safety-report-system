@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.0.28';
+  const buildId = '7.1.0';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
