@@ -6,7 +6,7 @@
   <title>專題報告編輯器</title>
   <meta name="color-scheme" content="light">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer">
-  <link rel="stylesheet" href="./topic-reports.css?v=1.7.0">
+  <link rel="stylesheet" href="./topic-reports.css?v=1.8.0">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
@@ -143,7 +143,7 @@
     </footer>
   </main>
 
-  <div id="topicObjectToolbar" class="topic-object-toolbar no-print" role="toolbar" aria-label="插入內容大小與刪除" hidden>
+  <div id="topicObjectToolbar" class="topic-object-toolbar no-print" role="toolbar" aria-label="插入內容大小、版面與刪除" hidden>
     <strong>大小</strong>
     <button type="button" data-topic-object-width="20">20%</button>
     <button type="button" data-topic-object-width="25">25%</button>
@@ -151,6 +151,24 @@
     <button type="button" data-topic-object-width="45">45%</button>
     <button type="button" data-topic-object-width="70">70%</button>
     <button type="button" data-topic-object-width="100">100%</button>
+    <span id="topicIndicatorControls" class="topic-object-subcontrols" hidden>
+      <span class="topic-object-separator" aria-hidden="true"></span>
+      <strong>列(橫)</strong>
+      <button type="button" data-topic-indicator-action="row-before" aria-label="在上方新增資料列" title="在上方新增資料列">↑＋</button>
+      <button type="button" data-topic-indicator-action="row-after" aria-label="在下方新增資料列" title="在下方新增資料列">↓＋</button>
+      <button type="button" data-topic-indicator-action="row-remove" aria-label="刪除目前資料列" title="刪除目前資料列">列−</button>
+      <strong>欄(直)</strong>
+      <button type="button" data-topic-indicator-action="column-before" aria-label="在左側新增欄位" title="在左側新增欄位">←＋</button>
+      <button type="button" data-topic-indicator-action="column-after" aria-label="在右側新增欄位" title="在右側新增欄位">→＋</button>
+      <button type="button" data-topic-indicator-action="column-remove" aria-label="刪除目前欄位" title="刪除目前欄位">欄−</button>
+    </span>
+    <span id="topicImageControls" class="topic-object-subcontrols" hidden>
+      <span class="topic-object-separator" aria-hidden="true"></span>
+      <strong>圖片對齊</strong>
+      <button type="button" data-topic-image-align="left" aria-label="圖片左對齊" title="圖片左對齊"><i class="fas fa-align-left" aria-hidden="true"></i></button>
+      <button type="button" data-topic-image-align="center" aria-label="圖片置中" title="圖片置中"><i class="fas fa-align-center" aria-hidden="true"></i></button>
+      <button type="button" data-topic-image-align="right" aria-label="圖片右對齊" title="圖片右對齊"><i class="fas fa-align-right" aria-hidden="true"></i></button>
+    </span>
     <span id="topicTrendControls" class="topic-trend-controls" hidden>
       <span class="topic-object-separator" aria-hidden="true"></span>
       <strong>指標</strong>
@@ -184,8 +202,8 @@
 
   <script src="./supabase-config.js?v=7.4.0"></script>
   <script src="./vendor/supabase-2.112.2.js?v=7.4.0"></script>
-  <script src="./topic-reports-core.js?v=1.7.0"></script>
-  <script src="./topic-reports-client.js?v=1.7.0"></script>
-  <script src="./topic-report-editor.js?v=1.7.0"></script>
+  <script src="./topic-reports-core.js?v=1.8.0"></script>
+  <script src="./topic-reports-client.js?v=1.8.0"></script>
+  <script src="./topic-report-editor.js?v=1.8.0"></script>
 </body>
 </html>

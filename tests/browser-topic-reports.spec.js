@@ -912,6 +912,220 @@ test('插入表格可拖曳欄界並在保存重開後保留欄寬', async ({ pa
   expect(reopenedWidths[1]).toBeCloseTo(resized[1], 2);
 });
 
+test('指標卡採月報T型版面並可增減橫向列與直向欄且保存重開與PDF保留', async ({ page, request }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '指標卡矩陣專題');
+  await editor.setViewportSize({ width: 1500, height: 1000 });
+  const editable = editor.locator('.topic-editable').first();
+  const legacy = await editor.evaluate(() => {
+    const html = window.TopicReportEditor.sanitizeStoredHtml('<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#f97316"><thead><tr><th class="topic-indicator-title" colspan="2">舊卡</th></tr></thead><tbody><tr><td>名稱</td><td>1</td></tr></tbody></table>');
+    const documentNode = new DOMParser().parseFromString(html, 'text/html');
+    const table = documentNode.querySelector('.topic-indicator-card');
+    return { columns: table.querySelectorAll('colgroup col').length, colspan: table.tHead.rows[0].cells[0].colSpan };
+  });
+  expect(legacy).toEqual({ columns: 2, colspan: 2 });
+  await editable.evaluate((element) => {
+    element.focus();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.locator('[data-insert="indicator-orange"]').click();
+  await editor.locator('[data-insert="indicator-orange"]').click();
+  await editor.locator('[data-insert="indicator-blue"]').click();
+  await editor.locator('[data-insert="indicator-blue"]').click();
+  const cards = editor.locator('.topic-indicator-card');
+  await expect(cards).toHaveCount(4);
+  const matrix = await editable.evaluate((host) => {
+    const rects = Array.from(host.querySelectorAll('.topic-indicator-card')).map((node) => node.getBoundingClientRect());
+    const hostWidth = host.getBoundingClientRect().width;
+    return {
+      firstThreeSameTop: rects.slice(0, 3).every((rect) => Math.abs(rect.top - rects[0].top) <= 1),
+      fourthWrapped: rects[3].top > rects[0].top + 20,
+      widthRatios: rects.map((rect) => rect.width / hostWidth)
+    };
+  });
+  expect(matrix.firstThreeSameTop).toBe(true);
+  expect(matrix.fourthWrapped).toBe(true);
+  expect(matrix.widthRatios.every((ratio) => ratio >= 0.28 && ratio <= 0.31)).toBe(true);
+  const card = cards.first();
+  await card.locator('tbody tr').first().locator('td').first().click();
+  await expect(editor.locator('#topicIndicatorControls')).toBeVisible();
+  await expect(card.locator('colgroup col')).toHaveCount(2);
+  await editor.locator('[data-topic-object-width="70"]').click();
+
+  const initial = await card.evaluate((table) => {
+    const rect = table.getBoundingClientRect();
+    const editor = table.closest('.topic-editable');
+    const editorRect = editor.getBoundingClientRect();
+    const row = table.tBodies[0].rows[0];
+    const lastCell = row.cells[row.cells.length - 1].getBoundingClientRect();
+    const title = table.tHead.rows[0].cells[0].getBoundingClientRect();
+    const widths = Array.from(table.querySelectorAll('colgroup col')).map((column) => Number.parseFloat(column.style.width));
+    return {
+      ratio: rect.width / editorRect.width,
+      lastCellRightDelta: Math.abs(rect.right - lastCell.right),
+      titleRightDelta: Math.abs(rect.right - title.right),
+      widths
+    };
+  });
+  expect(initial.ratio).toBeGreaterThan(0.67);
+  expect(initial.ratio).toBeLessThan(0.72);
+  expect(initial.lastCellRightDelta).toBeLessThanOrEqual(2);
+  expect(initial.titleRightDelta).toBeLessThanOrEqual(2);
+  expect(initial.widths[0]).toBeCloseTo(66.66, 1);
+  expect(initial.widths[1]).toBeCloseTo(33.34, 1);
+
+  await editor.locator('[data-topic-indicator-action="row-after"]').click();
+  await expect(card.locator('tbody tr')).toHaveCount(4);
+  await card.locator('tbody tr').last().locator('td').first().click();
+  await editor.locator('[data-topic-indicator-action="row-remove"]').click();
+  await expect(card.locator('tbody tr')).toHaveCount(3);
+  await card.locator('tbody tr').last().locator('td').first().click();
+  await editor.locator('[data-topic-indicator-action="row-after"]').click();
+  await expect(card.locator('tbody tr')).toHaveCount(4);
+
+  await card.locator('tbody tr').first().locator('td').last().click();
+  await editor.locator('[data-topic-indicator-action="column-after"]').click();
+  await expect(card.locator('tbody tr').first().locator('td')).toHaveCount(3);
+  await expect(card.locator('thead th')).toHaveAttribute('colspan', '3');
+  await expect(card.locator('colgroup col')).toHaveCount(3);
+  await card.locator('tbody tr').first().locator('td').last().click();
+  await editor.locator('[data-topic-indicator-action="column-remove"]').click();
+  await expect(card.locator('tbody tr').first().locator('td')).toHaveCount(2);
+  await card.locator('tbody tr').first().locator('td').last().click();
+  await editor.locator('[data-topic-indicator-action="column-after"]').click();
+  await expect(card.locator('tbody tr').first().locator('td')).toHaveCount(3);
+  await card.locator('tbody tr').last().locator('td').last().fill('新增值');
+
+  await editor.setViewportSize({ width: 390, height: 844 });
+  await card.scrollIntoViewIfNeeded();
+  await card.locator('tbody tr').first().locator('td').first().click();
+  const narrowToolbar = await editor.locator('#topicObjectToolbar').evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, viewportWidth: innerWidth };
+  });
+  expect(narrowToolbar.left).toBeGreaterThanOrEqual(0);
+  expect(narrowToolbar.right).toBeLessThanOrEqual(narrowToolbar.viewportWidth);
+  await editor.setViewportSize({ width: 1500, height: 1000 });
+  await card.locator('tbody tr').first().locator('td').first().click();
+
+  await testInfo.attach('topic-indicator-matrix-editor.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 2);
+  const saved = await (await request.get('/__fake_state')).json();
+  const savedHtml = saved.topicReports[0].content.modules[0].columns[0];
+  expect(savedHtml).toContain('<colgroup>');
+  expect(savedHtml).toContain('colspan="3"');
+  expect(savedHtml).toContain('新增值');
+
+  await editor.reload();
+  await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+  await expect(editor.locator('.topic-indicator-card')).toHaveCount(4);
+  const reopened = editor.locator('.topic-indicator-card').first();
+  await expect(reopened.locator('tbody tr')).toHaveCount(4);
+  await expect(reopened.locator('tbody tr').first().locator('td')).toHaveCount(3);
+  await expect(reopened.locator('colgroup col')).toHaveCount(3);
+
+  await editor.evaluate(() => {
+    window.__topicIndicatorPrintObserved = null;
+    window.print = () => {
+      const card = document.querySelector('#topicPrintArea .topic-indicator-card');
+      window.__topicIndicatorPrintObserved = {
+        rows: card.tBodies[0].rows.length,
+        columns: card.tBodies[0].rows[0].cells.length,
+        colspan: card.tHead.rows[0].cells[0].colSpan,
+        value: card.tBodies[0].rows[3].cells[2].textContent
+      };
+    };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicIndicatorPrintObserved)).toEqual({
+    rows: 4, columns: 3, colspan: 3, value: '新增值'
+  });
+});
+
+test('圖片可左中右對齊並在保存重開與PDF保留右對齊', async ({ page, request }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '圖片對齊專題');
+  await editor.setViewportSize({ width: 1400, height: 1000 });
+  const editable = editor.locator('.topic-editable').first();
+  await editable.click();
+  await editor.locator('#topicImageFile').setInputFiles({
+    name: 'alignment.png', mimeType: 'image/png',
+    buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2mAAAAABJRU5ErkJggg==', 'base64')
+  });
+  const image = editor.locator('img.topic-inline-image');
+  await expect(image).toHaveCount(1);
+  await image.click();
+  await expect(editor.locator('#topicImageControls')).toBeVisible();
+  await expect(image).toHaveAttribute('data-topic-align', 'center');
+
+  const geometry = () => image.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const editor = node.closest('.topic-editable');
+    const editorRect = editor.getBoundingClientRect();
+    const style = getComputedStyle(editor);
+    const left = editorRect.left + Number.parseFloat(style.paddingLeft);
+    const right = editorRect.right - Number.parseFloat(style.paddingRight);
+    return {
+      leftDelta: Math.abs(rect.left - left),
+      rightDelta: Math.abs(right - rect.right),
+      centerDelta: Math.abs((rect.left + rect.right) / 2 - (left + right) / 2)
+    };
+  });
+
+  await editor.locator('[data-topic-image-align="left"]').click();
+  await expect(image).toHaveAttribute('data-topic-align', 'left');
+  expect((await geometry()).leftDelta).toBeLessThanOrEqual(2);
+  await editor.locator('[data-topic-image-align="center"]').click();
+  expect((await geometry()).centerDelta).toBeLessThanOrEqual(2);
+  await editor.locator('[data-topic-image-align="right"]').click();
+  await expect(image).toHaveAttribute('data-topic-align', 'right');
+  expect((await geometry()).rightDelta).toBeLessThanOrEqual(2);
+
+  await testInfo.attach('topic-image-right-aligned.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 2);
+  const saved = await (await request.get('/__fake_state')).json();
+  expect(saved.topicReports[0].content.modules[0].columns[0]).toContain('data-topic-align="right"');
+
+  await editor.reload();
+  await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+  const reopened = editor.locator('img.topic-inline-image');
+  await expect(reopened).toHaveAttribute('data-topic-align', 'right');
+  await reopened.click();
+  await expect(editor.locator('[data-topic-image-align="right"]')).toHaveAttribute('aria-pressed', 'true');
+
+  await editor.evaluate(() => {
+    window.__topicImagePrintObserved = null;
+    window.print = () => {
+      const image = document.querySelector('#topicPrintArea img.topic-inline-image');
+      const column = image.closest('.topic-print-column');
+      const imageRect = image.getBoundingClientRect();
+      const columnRect = column.getBoundingClientRect();
+      window.__topicImagePrintObserved = {
+        align: image.dataset.topicAlign,
+        rightDelta: Math.abs(columnRect.right - imageRect.right)
+      };
+    };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicImagePrintObserved)).not.toBeNull();
+  const printGeometry = await editor.evaluate(() => window.__topicImagePrintObserved);
+  expect(printGeometry.align).toBe('right');
+  expect(printGeometry.rightDelta).toBeLessThanOrEqual(2);
+});
+
 test('專題PDF縮放與直橫方向會套用到列印區且不修改報告Revision', async ({ page, request }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);

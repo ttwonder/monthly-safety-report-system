@@ -11,7 +11,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi) {
   'use strict';
 
-  const BUILD_ID = '1.7.0';
+  const BUILD_ID = '1.8.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -133,8 +133,10 @@
       if (element.tagName === 'IMG') {
         element.classList.add('topic-inline-image');
         element.setAttribute('alt', element.getAttribute('alt') || '專題報告圖片');
+        element.dataset.topicAlign = normalizeImageAlignment(element.dataset.topicAlign);
       }
     });
+    template.content.querySelectorAll('table.topic-indicator-card').forEach((table) => normalizeIndicatorCardStructure(table));
     return template;
   }
 
@@ -165,6 +167,10 @@
   function normalizeObjectWidth(value) {
     const numeric = Number(String(value == null ? '' : value).replace('%', '').trim());
     return OBJECT_WIDTHS.includes(numeric) ? `${numeric}%` : '100%';
+  }
+  function normalizeImageAlignment(value) {
+    const alignment = String(value == null ? '' : value).trim().toLowerCase();
+    return ['left', 'center', 'right'].includes(alignment) ? alignment : 'center';
   }
   function normalizeChartHeight(value) {
     const numeric = Number.parseInt(value, 10);
@@ -214,8 +220,8 @@
   function buildBlockHtml(type) {
     const templates = {
       highlight: '<span class="topic-inline-block topic-highlight" data-topic-block="highlight" data-topic-editable="true" contenteditable="true">  重要數值 100  </span>',
-      'indicator-blue': '<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#2563eb" contenteditable="false"><thead><tr><th class="topic-indicator-title" colspan="2" data-topic-editable="true" contenteditable="true">指標名稱</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">檢查次數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">檢查缺失數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">平均缺失數</td><td data-topic-editable="true" contenteditable="true">0.0</td></tr></tbody></table>',
-      'indicator-orange': '<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#f97316" contenteditable="false"><thead><tr><th class="topic-indicator-title" colspan="2" data-topic-editable="true" contenteditable="true">指標名稱</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">檢查次數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">檢查缺失數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">平均缺失數</td><td data-topic-editable="true" contenteditable="true">0.0</td></tr></tbody></table>',
+      'indicator-blue': '<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#2563eb" contenteditable="false"><colgroup><col style="width:66.66%"><col style="width:33.34%"></colgroup><thead><tr><th class="topic-indicator-title" colspan="2" data-topic-editable="true" contenteditable="true">指標名稱</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">檢查次數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">檢查缺失數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">平均缺失數</td><td data-topic-editable="true" contenteditable="true">0.0</td></tr></tbody></table>',
+      'indicator-orange': '<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#f97316" contenteditable="false"><colgroup><col style="width:66.66%"><col style="width:33.34%"></colgroup><thead><tr><th class="topic-indicator-title" colspan="2" data-topic-editable="true" contenteditable="true">指標名稱</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">檢查次數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">檢查缺失數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">平均缺失數</td><td data-topic-editable="true" contenteditable="true">0.0</td></tr></tbody></table>',
       kpi: '<div class="topic-inline-block topic-kpi-card" data-topic-block="kpi" data-topic-show-avg="true" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">KPI 指標</strong><div class="topic-card-values"><span class="topic-kpi-avg-group"><span data-topic-editable="true" contenteditable="true">Avg</span> <b class="topic-metric-avg" data-topic-editable="true" contenteditable="true">65</b></span><span><span data-topic-editable="true" contenteditable="true">現值</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">50</b></span><span><span data-topic-editable="true" contenteditable="true">KPI</span> <b class="topic-metric-target" data-topic-editable="true" contenteditable="true">80</b></span><span class="topic-kpi-avg-toggle" data-topic-kpi-toggle="true" role="button" aria-label="顯示或隱藏Avg標線" contenteditable="false">Avg◉</span></div></div><div class="topic-kpi-track"><span class="topic-kpi-marker topic-kpi-target-marker"></span><span class="topic-kpi-marker topic-kpi-current-marker"></span><span class="topic-kpi-marker topic-kpi-avg-marker topic-kpi-avg-group"></span></div><div class="topic-card-boundaries"><span class="topic-metric-min" data-topic-editable="true" contenteditable="true">0</span><span class="topic-metric-max" data-topic-editable="true" contenteditable="true">100</span></div></div>',
       progress: '<div class="topic-inline-block topic-progress-card" data-topic-block="progress" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">項目名稱</strong><span><span data-topic-editable="true" contenteditable="true">完成度</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">50</b>%</span></div><div class="topic-progress-track"><div class="topic-progress-fill" style="width:50%"></div><span class="topic-progress-marker"></span></div></div>',
       zone: '<div class="topic-inline-block topic-zone-card" data-topic-block="zone" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">評估指標</strong><span><span data-topic-editable="true" contenteditable="true">現值</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">1.55</b></span></div><div class="topic-zone-upper"><span class="topic-zone-limit-mid" data-topic-editable="true" contenteditable="true">2.45</span></div><div class="topic-zone-track"><span class="topic-zone-marker"></span></div><div class="topic-zone-boundaries"><span class="topic-metric-min" data-topic-editable="true" contenteditable="true">0</span><span class="topic-zone-limit1" data-topic-editable="true" contenteditable="true">1.45</span><span class="topic-zone-limit2" data-topic-editable="true" contenteditable="true">3.45</span><span class="topic-metric-max" data-topic-editable="true" contenteditable="true">5</span></div></div>',
@@ -303,6 +309,7 @@
     lastRange: null,
     activeEditor: null,
     activeObject: null,
+    activeIndicatorCell: null,
     tableResize: null,
     pendingFileModuleId: '',
     broadcastChannel: null,
@@ -627,7 +634,7 @@
     const releaseRecord = state.releaseUncertain ? readReleaseCheck() : null;
     const releaseAction = releaseRecord && releaseRecord.action || 'complete';
     const mutations = root.document.querySelectorAll(
-      '[data-command],[data-insert],[data-text-color],#topicFontSize,[data-topic-object-width],[data-topic-object-delete],[data-topic-trend-action],[data-topic-trend-height],#topicAddModule,#topicExcelImport,#topicReset,#topicComplete,#topicDiscardExit,' +
+      '[data-command],[data-insert],[data-text-color],#topicFontSize,[data-topic-object-width],[data-topic-object-delete],[data-topic-indicator-action],[data-topic-image-align],[data-topic-trend-action],[data-topic-trend-height],#topicAddModule,#topicExcelImport,#topicReset,#topicComplete,#topicDiscardExit,' +
       '#topicFontEn,#topicFontZh,#topicTextColor,#topicPdfScale,#topicPdfOrientation,' +
       '[data-module-action],[data-module-layout],[data-module-pdf],[data-module-pdf-order]'
     );
@@ -883,8 +890,11 @@
   function hideObjectToolbar() {
     if (state.activeObject && state.activeObject.classList) state.activeObject.classList.remove('topic-object-selected');
     state.activeObject = null;
+    state.activeIndicatorCell = null;
     const toolbar = $('topicObjectToolbar');
     if (toolbar) toolbar.hidden = true;
+    if ($('topicIndicatorControls')) $('topicIndicatorControls').hidden = true;
+    if ($('topicImageControls')) $('topicImageControls').hidden = true;
     if ($('topicTrendControls')) $('topicTrendControls').hidden = true;
   }
   function positionObjectToolbar() {
@@ -904,13 +914,27 @@
     toolbar.querySelectorAll('[data-topic-object-width]').forEach((button) => {
       button.setAttribute('aria-pressed', String(Boolean(current) && `${button.dataset.topicObjectWidth}%` === current));
     });
+    const imageAlignment = object.classList.contains('topic-inline-image')
+      ? normalizeImageAlignment(object.dataset.topicAlign) : '';
+    toolbar.querySelectorAll('[data-topic-image-align]').forEach((button) => {
+      button.setAttribute('aria-pressed', String(button.dataset.topicImageAlign === imageAlignment));
+    });
   }
-  function selectObject(object) {
+  function selectObject(object, target) {
     if (state.mode !== 'edit' || !object || !object.closest('.topic-editable')) return;
     if (state.activeObject && state.activeObject !== object) state.activeObject.classList.remove('topic-object-selected');
     state.activeObject = object;
     object.classList.add('topic-object-selected');
+    const isIndicator = object.classList.contains('topic-indicator-card');
+    if (isIndicator) {
+      normalizeIndicatorCardStructure(object);
+      const candidate = target && target.closest && target.closest('td');
+      state.activeIndicatorCell = candidate && object.contains(candidate) ? candidate : currentIndicatorCell(object);
+    } else state.activeIndicatorCell = null;
+    const isImage = object.classList.contains('topic-inline-image');
     const isTrend = object.classList.contains('topic-trend-card');
+    $('topicIndicatorControls').hidden = !isIndicator;
+    $('topicImageControls').hidden = !isImage;
     $('topicTrendControls').hidden = !isTrend;
     if (isTrend) {
       const area = object.querySelector('.topic-chart-canvas-area');
@@ -925,6 +949,13 @@
     if (state.activeObject.classList.contains('topic-highlight')) state.activeObject.dataset.topicWidthUser = 'true';
     markDirty();
     updateDynamic(state.activeObject.closest('.topic-module') || $('topicModules'));
+    positionObjectToolbar();
+  }
+  function setImageAlignment(value) {
+    const image = state.activeObject;
+    if (state.mode !== 'edit' || !image || !image.classList.contains('topic-inline-image')) return;
+    image.dataset.topicAlign = normalizeImageAlignment(value);
+    markDirty();
     positionObjectToolbar();
   }
   function deleteActiveObject() {
@@ -988,6 +1019,116 @@
     updateDynamic(card);
     selectObject(card);
   }
+
+  function createIndicatorCell(text) {
+    const cell = root.document.createElement('td');
+    cell.dataset.topicEditable = 'true';
+    cell.contentEditable = state.mode === 'edit' ? 'true' : 'false';
+    cell.textContent = String(text == null ? '' : text);
+    return cell;
+  }
+
+  function normalizeIndicatorCardStructure(card) {
+    if (!card || !card.classList || !card.classList.contains('topic-indicator-card')) return 0;
+    let body = card.tBodies && card.tBodies[0];
+    if (!body) body = card.createTBody();
+    if (!body.rows.length) {
+      const row = body.insertRow();
+      row.append(createIndicatorCell('新指標'), createIndicatorCell('0'));
+    }
+    const columnCount = Math.max(2, ...Array.from(body.rows).map((row) => row.cells.length));
+    Array.from(body.rows).forEach((row) => {
+      while (row.cells.length < columnCount) row.appendChild(createIndicatorCell(row.cells.length === 0 ? '新指標' : '0'));
+    });
+
+    let head = card.tHead;
+    if (!head) head = card.createTHead();
+    let headerRow = head.rows[0];
+    if (!headerRow) headerRow = head.insertRow();
+    let title = headerRow.cells[0];
+    if (!title) {
+      title = root.document.createElement('th');
+      title.className = 'topic-indicator-title';
+      title.textContent = '指標名稱';
+      headerRow.appendChild(title);
+    }
+    while (headerRow.cells.length > 1) headerRow.deleteCell(-1);
+    title.classList.add('topic-indicator-title');
+    title.dataset.topicEditable = 'true';
+    title.contentEditable = state.mode === 'edit' ? 'true' : 'false';
+    title.colSpan = columnCount;
+
+    let colgroup = Array.from(card.children).find((child) => child.tagName === 'COLGROUP');
+    if (!colgroup) {
+      colgroup = root.document.createElement('colgroup');
+      card.insertBefore(colgroup, card.firstChild);
+    }
+    const widths = columnCount === 2
+      ? [66.66, 33.34]
+      : [50, ...Array.from({ length: columnCount - 1 }, () => 50 / (columnCount - 1))];
+    const columns = widths.map((width) => {
+      const column = root.document.createElement('col');
+      column.style.width = `${Math.round(width * 1000) / 1000}%`;
+      return column;
+    });
+    colgroup.replaceChildren(...columns);
+    return columnCount;
+  }
+
+  function currentIndicatorCell(card) {
+    const cell = state.activeIndicatorCell;
+    if (cell && root.document.contains(cell) && card.contains(cell) && cell.tagName === 'TD') return cell;
+    const body = card.tBodies && card.tBodies[0];
+    return body && body.rows[0] && body.rows[0].cells[0] || null;
+  }
+
+  function indicatorAction(action) {
+    const card = state.activeObject;
+    if (state.mode !== 'edit' || !card || !card.classList.contains('topic-indicator-card')) return;
+    const body = card.tBodies[0] || card.createTBody();
+    const columnCount = normalizeIndicatorCardStructure(card);
+    let cell = currentIndicatorCell(card);
+    if (!cell) return;
+    let row = cell.parentElement;
+    let rowIndex = Array.from(body.rows).indexOf(row);
+    let columnIndex = Array.from(row.cells).indexOf(cell);
+
+    if (action === 'row-before' || action === 'row-after') {
+      if (body.rows.length >= 20) { toast('指標卡最多支援20個資料列。', 'warning'); return; }
+      const insertIndex = rowIndex + (action === 'row-after' ? 1 : 0);
+      const newRow = body.insertRow(insertIndex);
+      for (let index = 0; index < columnCount; index += 1) {
+        newRow.appendChild(createIndicatorCell(index === 0 ? '新指標' : '0'));
+      }
+      state.activeIndicatorCell = newRow.cells[Math.min(columnIndex, columnCount - 1)];
+    } else if (action === 'row-remove') {
+      if (body.rows.length <= 1) { toast('指標卡至少保留1個資料列。', 'warning'); return; }
+      body.deleteRow(rowIndex);
+      rowIndex = Math.min(rowIndex, body.rows.length - 1);
+      state.activeIndicatorCell = body.rows[rowIndex].cells[Math.min(columnIndex, columnCount - 1)];
+    } else if (action === 'column-before' || action === 'column-after') {
+      if (columnCount >= 10) { toast('指標卡最多支援10欄。', 'warning'); return; }
+      const insertIndex = columnIndex + (action === 'column-after' ? 1 : 0);
+      Array.from(body.rows).forEach((dataRow) => {
+        const newCell = dataRow.insertCell(insertIndex);
+        newCell.dataset.topicEditable = 'true';
+        newCell.contentEditable = 'true';
+        newCell.textContent = insertIndex === 0 ? '新欄位' : '0';
+      });
+      state.activeIndicatorCell = body.rows[rowIndex].cells[insertIndex];
+    } else if (action === 'column-remove') {
+      if (columnCount <= 2) { toast('指標卡至少保留名稱與數值2欄。', 'warning'); return; }
+      Array.from(body.rows).forEach((dataRow) => dataRow.deleteCell(columnIndex));
+      columnIndex = Math.min(columnIndex, columnCount - 2);
+      state.activeIndicatorCell = body.rows[rowIndex].cells[columnIndex];
+    } else return;
+
+    normalizeIndicatorCardStructure(card);
+    markDirty();
+    updateDynamic(card);
+    selectObject(card, state.activeIndicatorCell);
+  }
+
   function makeTable() {
     const rows = Math.max(1, Math.min(20, Number(root.prompt('表格列數', '3')) || 3));
     const columns = Math.max(1, Math.min(10, Number(root.prompt('表格欄數', '3')) || 3));
@@ -1117,6 +1258,7 @@
   function updateDynamic(container) {
     const scope = container || $('topicModules');
     if (!scope) return;
+    scope.querySelectorAll('table.topic-indicator-card').forEach((table) => normalizeIndicatorCardStructure(table));
     prepareResizableTables(scope);
     scope.querySelectorAll('.topic-highlight').forEach((highlight) => {
       if (highlight.style.width === '25%' && highlight.dataset.topicWidthUser !== 'true') {
@@ -1322,7 +1464,7 @@
     if (!isAllowedImage(file)) throw new Error('圖片僅支援PNG/JPEG/WebP/GIF，且不得超過5MB。');
     const dataUrl = await fileDataUrl(file);
     if (!isSafeImageDataUrl(dataUrl)) throw new Error('圖片資料格式不安全。');
-    insertHtml(`<img class="topic-inline-image" style="width:45%" src="${dataUrl}" alt="${escapeHtml(file.name || '專題報告圖片')}">`);
+    insertHtml(`<img class="topic-inline-image" data-topic-align="center" style="width:45%" src="${dataUrl}" alt="${escapeHtml(file.name || '專題報告圖片')}">`);
   }
   function totalAttachmentBytes(content) {
     return content.modules.reduce((total, module) => total + (module.attachments || []).reduce((sum, item) => sum + Number(item.size || 0), 0), 0);
@@ -1982,7 +2124,7 @@
         markDirty(); updateDynamic(card); selectObject(card); return;
       }
       const object = objectFromTarget(event.target);
-      if (object) selectObject(object);
+      if (object) selectObject(object, event.target);
     });
     $('topicModules').addEventListener('pointerdown', (event) => {
       const handle = event.target.closest('[data-topic-table-resize-handle]');
@@ -1994,6 +2136,10 @@
     $('topicObjectToolbar').addEventListener('click', (event) => {
       const width = event.target.closest('[data-topic-object-width]');
       if (width) { setObjectWidth(width.dataset.topicObjectWidth); return; }
+      const indicator = event.target.closest('[data-topic-indicator-action]');
+      if (indicator) { indicatorAction(indicator.dataset.topicIndicatorAction); return; }
+      const imageAlignment = event.target.closest('[data-topic-image-align]');
+      if (imageAlignment) { setImageAlignment(imageAlignment.dataset.topicImageAlign); return; }
       const trend = event.target.closest('[data-topic-trend-action]');
       if (trend) { trendAction(trend.dataset.topicTrendAction); return; }
       if (event.target.closest('[data-topic-object-delete]')) deleteActiveObject();
@@ -2161,6 +2307,7 @@
     isSafeAttachmentDataUrl,
     clampedPercent,
     normalizeObjectWidth,
+    normalizeImageAlignment,
     normalizeChartHeight,
     normalizePdfScale,
     normalizePdfOrientation,

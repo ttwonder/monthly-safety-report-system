@@ -52,6 +52,16 @@ test('趨勢與動態卡片具備月報同級資料結構及固定圖表容器',
   ['topic-zone-limit1', 'topic-zone-limit-mid', 'topic-zone-limit2', 'topic-zone-marker'].forEach((name) => assert.match(zone, new RegExp(name)));
   const indicator = editor.buildBlockHtml('indicator-blue');
   assert.ok((indicator.match(/<tr\b/g) || []).length >= 4, '指標卡應有標題與三行資料');
+  assert.match(indicator, /<colgroup>\s*<col[^>]*width\s*:\s*66\.66/i);
+  assert.equal((indicator.match(/<col\b/g) || []).length, 2, '指標卡預設必須只有兩個權威欄寬');
+});
+
+test('圖片對齊只接受左中右且無效值回到置中', () => {
+  assert.equal(editor.normalizeImageAlignment('left'), 'left');
+  assert.equal(editor.normalizeImageAlignment('center'), 'center');
+  assert.equal(editor.normalizeImageAlignment('right'), 'right');
+  assert.equal(editor.normalizeImageAlignment('bad'), 'center');
+  assert.equal(editor.normalizeImageAlignment(null), 'center');
 });
 
 test('趨勢高度限制在固定安全範圍', () => {
