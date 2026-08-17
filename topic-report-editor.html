@@ -6,7 +6,7 @@
   <title>專題報告編輯器</title>
   <meta name="color-scheme" content="light">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer">
-  <link rel="stylesheet" href="./topic-reports.css?v=1.11.0">
+  <link rel="stylesheet" href="./topic-reports.css?v=1.12.0">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
@@ -81,16 +81,24 @@
         </div>
         <div class="topic-toolbar-row">
           <span class="topic-toolbar-label">插入內容</span>
-          <button type="button" class="topic-tool-btn" data-insert="image"><i class="fas fa-image"></i>圖片</button>
-          <button type="button" class="topic-tool-btn" data-insert="table"><i class="fas fa-table"></i>表格</button>
-          <button type="button" class="topic-tool-btn" data-insert="highlight"><i class="fas fa-keyboard"></i>數值框</button>
-          <button type="button" class="topic-tool-btn" data-insert="indicator-blue"><i class="fas fa-id-card"></i>指標卡(藍)</button>
-          <button type="button" class="topic-tool-btn" data-insert="indicator-orange"><i class="fas fa-id-card"></i>指標卡(橘)</button>
-          <button type="button" class="topic-tool-btn" data-insert="kpi"><i class="fas fa-sliders"></i>KPI卡</button>
-          <button type="button" class="topic-tool-btn" data-insert="progress"><i class="fas fa-list-check"></i>進度卡</button>
-          <button type="button" class="topic-tool-btn" data-insert="zone"><i class="fas fa-ruler-combined"></i>三色卡</button>
-          <button type="button" class="topic-tool-btn" data-insert="trend"><i class="fas fa-chart-area"></i>趨勢圖</button>
-          <button type="button" class="topic-tool-btn" data-insert="attachment"><i class="fas fa-paperclip"></i>附件</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-image" data-insert="image"><i class="fas fa-image"></i>圖片</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-table" data-insert="table"><i class="fas fa-table"></i>表格</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-highlight" data-insert="highlight"><i class="fas fa-keyboard"></i>數值框</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-indicator-blue" data-insert="indicator-blue"><i class="fas fa-id-card"></i>指標卡(藍)</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-indicator-orange" data-insert="indicator-orange"><i class="fas fa-id-card"></i>指標卡(橘)</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-kpi" data-insert="kpi"><i class="fas fa-sliders"></i>KPI卡</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-progress" data-insert="progress"><i class="fas fa-list-check"></i>進度卡</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-zone" data-insert="zone"><i class="fas fa-ruler-combined"></i>三色卡</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-trend" data-insert="trend"><i class="fas fa-chart-area"></i>趨勢圖</button>
+          <button type="button" class="topic-tool-btn topic-insert-btn topic-insert-attachment" data-insert="attachment"><i class="fas fa-paperclip"></i>附件</button>
+          <div class="topic-block-insert-group" data-topic-block-insert-group role="group" aria-label="插入五色內容區塊">
+            <span class="topic-toolbar-label">插入區塊：</span>
+            <button type="button" class="topic-block-insert-btn topic-block-insert-blue" data-insert="content-blue" aria-label="插入藍色資訊區塊" title="藍色：資訊／總結"><i class="fas fa-info-circle" aria-hidden="true"></i></button>
+            <button type="button" class="topic-block-insert-btn topic-block-insert-green" data-insert="content-green" aria-label="插入綠色達標區塊" title="綠色：數據／達標"><i class="fas fa-check-circle" aria-hidden="true"></i></button>
+            <button type="button" class="topic-block-insert-btn topic-block-insert-red" data-insert="content-red" aria-label="插入紅色警示區塊" title="紅色：異常／警示"><i class="fas fa-exclamation-circle" aria-hidden="true"></i></button>
+            <button type="button" class="topic-block-insert-btn topic-block-insert-orange" data-insert="content-orange" aria-label="插入橙色分析區塊" title="橙色：分析／趨勢"><i class="fas fa-chart-line" aria-hidden="true"></i></button>
+            <button type="button" class="topic-block-insert-btn topic-block-insert-purple" data-insert="content-purple" aria-label="插入紫色行動區塊" title="紫色：行動／計畫"><i class="fas fa-tasks" aria-hidden="true"></i></button>
+          </div>
         </div>
         <div class="topic-toolbar-row">
           <span class="topic-toolbar-label">報告操作</span>
@@ -202,9 +210,9 @@
 
   <script src="./supabase-config.js?v=7.6.0"></script>
   <script src="./vendor/supabase-2.112.2.js?v=7.6.0"></script>
-  <script src="./report-assets-storage.js?v=1.11.0"></script>
-  <script src="./topic-reports-core.js?v=1.11.0"></script>
-  <script src="./topic-reports-client.js?v=1.11.0"></script>
-  <script src="./topic-report-editor.js?v=1.11.0"></script>
+  <script src="./report-assets-storage.js?v=1.12.0"></script>
+  <script src="./topic-reports-core.js?v=1.12.0"></script>
+  <script src="./topic-reports-client.js?v=1.12.0"></script>
+  <script src="./topic-report-editor.js?v=1.12.0"></script>
 </body>
 </html>

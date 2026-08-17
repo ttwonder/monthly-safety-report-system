@@ -399,6 +399,81 @@ test('完整內容模塊、圖片附件、雙欄、Excel與正式snapshot PDF都
   expect(afterHistory.snapshots).toHaveLength(0);
 });
 
+test('專題工具列提供月報五色區塊並以色彩區分插入按鈕', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '五色區塊與彩色工具列專題');
+  await editor.setViewportSize({ width: 1700, height: 1000 });
+
+  const toolbar = await editor.evaluate(() => {
+    const types = ['image', 'table', 'highlight', 'indicator-blue', 'indicator-orange', 'kpi', 'progress', 'zone', 'trend', 'attachment'];
+    const buttons = types.map((type) => document.querySelector(`[data-insert="${type}"]`));
+    const group = document.querySelector('[data-topic-block-insert-group]');
+    const attachment = document.querySelector('[data-insert="attachment"]');
+    if (!group || !attachment || buttons.some((button) => !button)) {
+      return { missing: true, blockOrder: [], groupAfterAttachment: false, insertColors: [] };
+    }
+    return {
+      missing: false,
+      blockOrder: Array.from(group.querySelectorAll('[data-insert]')).map((button) => button.dataset.insert),
+      groupAfterAttachment: Boolean(attachment.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING),
+      insertColors: buttons.map((button) => {
+        const style = getComputedStyle(button);
+        return { type: button.dataset.insert, background: style.backgroundColor, border: style.borderColor, color: style.color };
+      })
+    };
+  });
+  expect(toolbar.missing).toBe(false);
+  expect(toolbar.blockOrder).toEqual([
+    'content-blue', 'content-green', 'content-red', 'content-orange', 'content-purple'
+  ]);
+  expect(toolbar.groupAfterAttachment).toBe(true);
+  expect(toolbar.insertColors.every((item) => item.background !== 'rgb(255, 255, 255)')).toBe(true);
+  expect(new Set(toolbar.insertColors.map((item) => item.background)).size).toBeGreaterThanOrEqual(8);
+  await testInfo.attach('topic-colored-insert-toolbar.png', {
+    body: await editor.locator('#topicEditorToolbar').screenshot(), contentType: 'image/png'
+  });
+
+  const editable = editor.locator('.topic-editable').first();
+  await editable.click();
+  const types = ['blue', 'green', 'red', 'orange', 'purple'];
+  for (const color of types) await editor.locator(`[data-insert="content-${color}"]`).click();
+  await expect(editable.locator('.topic-content-block')).toHaveCount(5);
+  for (let index = 0; index < types.length; index += 1) {
+    await editable.locator('.topic-content-block-title [data-topic-editable]').nth(index).fill(`${types[index]}標題`);
+    await editable.locator('.topic-content-block-body').nth(index).fill(`${types[index]}正文`);
+  }
+
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 2);
+  await editor.reload();
+  await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+  await expect(editor.locator('.topic-content-block')).toHaveCount(5);
+  await expect(editor.locator('.topic-content-block-title')).toHaveText(types.map((color) => `${color}標題`));
+  await expect(editor.locator('.topic-content-block-body')).toHaveText(types.map((color) => `${color}正文`));
+  await expect(editor.locator('.topic-content-block-title > i.fas')).toHaveCount(5);
+
+  await editor.evaluate(() => {
+    window.__topicColorBlockPrintObserved = false;
+    window.print = () => { window.__topicColorBlockPrintObserved = true; };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicColorBlockPrintObserved)).toBe(true);
+  await editor.emulateMedia({ media: 'print' });
+  await editor.evaluate(() => document.body.classList.add('topic-printing-report'));
+  const printed = await editor.evaluate(() => Array.from(document.querySelectorAll('#topicPrintArea .topic-content-block')).map((block) => {
+    const style = getComputedStyle(block);
+    return {
+      background: style.backgroundColor,
+      border: style.borderLeftColor,
+      printColorAdjust: style.printColorAdjust || style.webkitPrintColorAdjust
+    };
+  }));
+  expect(printed).toHaveLength(5);
+  expect(new Set(printed.map((item) => item.background)).size).toBe(5);
+  expect(printed.every((item) => item.printColorAdjust === 'exact')).toBe(true);
+});
+
 test('雲端或Excel HTML載入前以allowlist清洗，不執行事件屬性、script或遠端追蹤圖片', async ({ page }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);

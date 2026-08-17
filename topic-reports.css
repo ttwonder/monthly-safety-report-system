@@ -139,6 +139,38 @@ button,a { -webkit-tap-highlight-color:transparent; }
 }
 .topic-tool-btn:hover:not(:disabled) { border-color:#6366f1; color:#4338ca; background:#eef2ff; }
 .topic-tool-btn:disabled,.topic-tool-select:disabled { opacity:.45; cursor:not-allowed; }
+.topic-insert-btn {
+  border-color:var(--topic-insert-border); background:var(--topic-insert-bg); color:var(--topic-insert-ink);
+}
+.topic-tool-btn.topic-insert-btn:hover:not(:disabled) {
+  border-color:var(--topic-insert-ink); background:var(--topic-insert-hover); color:var(--topic-insert-ink);
+  transform:translateY(-1px);
+}
+.topic-insert-image { --topic-insert-bg:#eff6ff; --topic-insert-hover:#dbeafe; --topic-insert-border:#93c5fd; --topic-insert-ink:#1d4ed8; }
+.topic-insert-table { --topic-insert-bg:#ecfeff; --topic-insert-hover:#cffafe; --topic-insert-border:#67e8f9; --topic-insert-ink:#0e7490; }
+.topic-insert-highlight { --topic-insert-bg:#fdf2f8; --topic-insert-hover:#fce7f3; --topic-insert-border:#f9a8d4; --topic-insert-ink:#be185d; }
+.topic-insert-indicator-blue { --topic-insert-bg:#eef2ff; --topic-insert-hover:#e0e7ff; --topic-insert-border:#a5b4fc; --topic-insert-ink:#3730a3; }
+.topic-insert-indicator-orange { --topic-insert-bg:#fff7ed; --topic-insert-hover:#ffedd5; --topic-insert-border:#fdba74; --topic-insert-ink:#c2410c; }
+.topic-insert-kpi { --topic-insert-bg:#faf5ff; --topic-insert-hover:#f3e8ff; --topic-insert-border:#d8b4fe; --topic-insert-ink:#7e22ce; }
+.topic-insert-progress { --topic-insert-bg:#f0fdf4; --topic-insert-hover:#dcfce7; --topic-insert-border:#86efac; --topic-insert-ink:#15803d; }
+.topic-insert-zone { --topic-insert-bg:#fffbeb; --topic-insert-hover:#fef3c7; --topic-insert-border:#fcd34d; --topic-insert-ink:#a16207; }
+.topic-insert-trend { --topic-insert-bg:#f0f9ff; --topic-insert-hover:#e0f2fe; --topic-insert-border:#7dd3fc; --topic-insert-ink:#0369a1; }
+.topic-insert-attachment { --topic-insert-bg:#f8fafc; --topic-insert-hover:#f1f5f9; --topic-insert-border:#94a3b8; --topic-insert-ink:#475569; }
+.topic-block-insert-group {
+  display:inline-flex; align-items:center; gap:5px; margin-left:6px; padding:4px 6px;
+  border:1px solid #c7d2fe; border-radius:9px; background:rgba(255,255,255,.72);
+}
+.topic-block-insert-btn {
+  width:34px; height:34px; padding:0; border:1px solid currentColor; border-radius:7px;
+  display:inline-grid; place-items:center; background:var(--topic-block-bg); color:var(--topic-block-ink); cursor:pointer;
+}
+.topic-block-insert-btn:hover:not(:disabled) { background:var(--topic-block-hover); transform:translateY(-1px); }
+.topic-block-insert-btn:disabled { opacity:.45; cursor:not-allowed; }
+.topic-block-insert-blue { --topic-block-bg:#eff6ff; --topic-block-hover:#dbeafe; --topic-block-ink:#2563eb; }
+.topic-block-insert-green { --topic-block-bg:#f0fdf4; --topic-block-hover:#dcfce7; --topic-block-ink:#16a34a; }
+.topic-block-insert-red { --topic-block-bg:#fef2f2; --topic-block-hover:#fee2e2; --topic-block-ink:#dc2626; }
+.topic-block-insert-orange { --topic-block-bg:#fff7ed; --topic-block-hover:#ffedd5; --topic-block-ink:#ea580c; }
+.topic-block-insert-purple { --topic-block-bg:#faf5ff; --topic-block-hover:#f3e8ff; --topic-block-ink:#7c3aed; }
 .topic-color-palette { display:flex; align-items:center; gap:5px; flex-wrap:wrap; padding:4px 7px; border:1px solid #cbd5e1; border-radius:9px; background:#fff; }
 .topic-color-swatch { width:25px; height:25px; padding:0; border:2px solid #fff; border-radius:6px; background:var(--swatch); box-shadow:0 0 0 1px #94a3b8; cursor:pointer; }
 .topic-color-swatch:hover:not(:disabled),.topic-color-swatch:focus-visible { transform:scale(1.12); box-shadow:0 0 0 3px rgba(99,102,241,.28); outline:0; }
@@ -216,6 +248,25 @@ body.topic-table-resizing,body.topic-table-resizing * { cursor:col-resize !impor
 }
 .topic-highlight:focus { background-color:#fce7f3 !important; border-color:#f472b6 !important; outline:1px solid #ec4899; }
 .topic-highlight[data-topic-width-user="true"] { display:inline-block; box-sizing:border-box; vertical-align:top; margin:0 6px 6px 0; }
+.topic-content-block {
+  display:inline-block; max-width:100%; margin:0 0 8px; padding:4px 6px; vertical-align:top;
+  border-left:4px solid var(--topic-content-accent); border-radius:0 4px 4px 0;
+  background:var(--topic-content-bg); break-inside:avoid; page-break-inside:avoid;
+  -webkit-print-color-adjust:exact; print-color-adjust:exact;
+}
+.topic-content-block-title {
+  display:flex; align-items:center; gap:6px; padding-bottom:2px; margin-bottom:2px;
+  border-bottom:1px dashed var(--topic-content-rule); color:var(--topic-content-title);
+  font-size:14px; font-weight:700;
+}
+.topic-content-block-body { color:#334155; font-size:16px; line-height:1.6; }
+.topic-content-block-body ul { list-style:disc; padding-left:20px; margin:2px 0; }
+.topic-content-block-body ol { list-style:decimal; padding-left:20px; margin:2px 0; }
+.topic-content-block-blue { --topic-content-bg:#eff6ff; --topic-content-accent:#3b82f6; --topic-content-title:#1d4ed8; --topic-content-rule:#bfdbfe; }
+.topic-content-block-green { --topic-content-bg:#f0fdf4; --topic-content-accent:#22c55e; --topic-content-title:#15803d; --topic-content-rule:#bbf7d0; }
+.topic-content-block-red { --topic-content-bg:#fef2f2; --topic-content-accent:#ef4444; --topic-content-title:#b91c1c; --topic-content-rule:#fecaca; }
+.topic-content-block-orange { --topic-content-bg:#fff7ed; --topic-content-accent:#f97316; --topic-content-title:#c2410c; --topic-content-rule:#fed7aa; }
+.topic-content-block-purple { --topic-content-bg:#faf5ff; --topic-content-accent:#a855f7; --topic-content-title:#7e22ce; --topic-content-rule:#e9d5ff; }
 .topic-indicator-card,.topic-kpi-card,.topic-progress-card,.topic-zone-card,.topic-trend-card { display:inline-block; max-width:calc(100% - 6px); vertical-align:top; margin:0 6px 6px 0; padding:12px 14px; border:2px solid #cbd5e1; border-radius:6px; background:#fff; box-shadow:none; }
 .topic-indicator-card { display:inline-table; padding:0; border:2px solid var(--card-color,#f97316); border-collapse:collapse; table-layout:fixed; }
 .topic-indicator-card th,.topic-indicator-card td { min-width:0; border-color:var(--card-color,#f97316); padding:5px 7px; }

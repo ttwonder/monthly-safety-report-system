@@ -12,7 +12,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi, assetApi) {
   'use strict';
 
-  const BUILD_ID = '1.11.0';
+  const BUILD_ID = '1.12.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -42,6 +42,9 @@
     'class', 'style', 'title', 'alt', 'src', 'href', 'target', 'rel', 'colspan', 'rowspan',
     'width', 'height', 'contenteditable', 'role', 'aria-label', 'aria-hidden'
   ]);
+  const SAFE_CONTENT_ICON_CLASSES = new Set([
+    'fas', 'fa-info-circle', 'fa-check-circle', 'fa-exclamation-triangle', 'fa-chart-line', 'fa-tasks'
+  ]);
 
   function clone(value) { return value == null ? value : JSON.parse(JSON.stringify(value)); }
   function escapeHtml(value) {
@@ -57,7 +60,9 @@
     return String(value || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
   }
   function safeClassList(value) {
-    return String(value || '').split(/\s+/).filter((name) => /^topic-[a-z0-9_-]+$/i.test(name)).join(' ');
+    return String(value || '').split(/\s+/)
+      .filter((name) => /^topic-[a-z0-9_-]+$/i.test(name) || SAFE_CONTENT_ICON_CLASSES.has(name))
+      .join(' ');
   }
   function safeStyle(value) {
     const declarations = String(value || '').split(';');
@@ -248,6 +253,12 @@
   }
 
   function buildBlockHtml(type) {
+    const contentBlock = (color, icon, title) => (
+      `<div class="topic-content-block topic-content-block-${color}" data-topic-block="content-${color}" style="width:100%" contenteditable="false">` +
+        `<div class="topic-content-block-title"><i class="fas ${icon}" aria-hidden="true"></i><span data-topic-editable="true" contenteditable="true">${title}</span></div>` +
+        '<div class="topic-content-block-body" data-topic-editable="true" contenteditable="true">請輸入內容...</div>' +
+      '</div>'
+    );
     const templates = {
       highlight: '<span class="topic-inline-block topic-highlight" data-topic-block="highlight" data-topic-editable="true" contenteditable="true">  重要數值 100  </span>',
       'indicator-blue': '<table class="topic-inline-block topic-indicator-card topic-data-table" data-topic-block="indicator" style="width:30%;--card-color:#2563eb" contenteditable="false"><colgroup><col style="width:66.66%"><col style="width:33.34%"></colgroup><thead><tr><th class="topic-indicator-title" colspan="2" data-topic-editable="true" contenteditable="true">指標名稱</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">檢查次數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">檢查缺失數</td><td data-topic-editable="true" contenteditable="true">0</td></tr><tr><td data-topic-editable="true" contenteditable="true">平均缺失數</td><td data-topic-editable="true" contenteditable="true">0.0</td></tr></tbody></table>',
@@ -255,7 +266,12 @@
       kpi: '<div class="topic-inline-block topic-kpi-card" data-topic-block="kpi" data-topic-show-avg="true" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">KPI 指標</strong><div class="topic-card-values"><span class="topic-kpi-avg-group"><span data-topic-editable="true" contenteditable="true">Avg</span> <b class="topic-metric-avg" data-topic-editable="true" contenteditable="true">65</b></span><span><span data-topic-editable="true" contenteditable="true">現值</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">50</b></span><span><span data-topic-editable="true" contenteditable="true">KPI</span> <b class="topic-metric-target" data-topic-editable="true" contenteditable="true">80</b></span><span class="topic-kpi-avg-toggle" data-topic-kpi-toggle="true" role="button" aria-label="顯示或隱藏Avg標線" contenteditable="false">Avg◉</span></div></div><div class="topic-kpi-track"><span class="topic-kpi-marker topic-kpi-target-marker"></span><span class="topic-kpi-marker topic-kpi-current-marker"></span><span class="topic-kpi-marker topic-kpi-avg-marker topic-kpi-avg-group"></span></div><div class="topic-card-boundaries"><span class="topic-metric-min" data-topic-editable="true" contenteditable="true">0</span><span class="topic-metric-max" data-topic-editable="true" contenteditable="true">100</span></div></div>',
       progress: '<div class="topic-inline-block topic-progress-card" data-topic-block="progress" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">項目名稱</strong><span><span data-topic-editable="true" contenteditable="true">完成度</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">50</b>%</span></div><div class="topic-progress-track"><div class="topic-progress-fill" style="width:50%"></div><span class="topic-progress-marker"></span></div></div>',
       zone: '<div class="topic-inline-block topic-zone-card" data-topic-block="zone" style="width:30%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">評估指標</strong><span><span data-topic-editable="true" contenteditable="true">現值</span> <b class="topic-metric-current" data-topic-editable="true" contenteditable="true">1.55</b></span></div><div class="topic-zone-upper"><span class="topic-zone-limit-mid" data-topic-editable="true" contenteditable="true">2.45</span></div><div class="topic-zone-track"><span class="topic-zone-marker"></span></div><div class="topic-zone-boundaries"><span class="topic-metric-min" data-topic-editable="true" contenteditable="true">0</span><span class="topic-zone-limit1" data-topic-editable="true" contenteditable="true">1.45</span><span class="topic-zone-limit2" data-topic-editable="true" contenteditable="true">3.45</span><span class="topic-metric-max" data-topic-editable="true" contenteditable="true">5</span></div></div>',
-      trend: '<div class="topic-trend-card" data-topic-block="trend" style="width:45%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">多維度趨勢比較圖</strong></div><div class="topic-chart-layout"><div class="topic-chart-table-area"><table class="topic-data-table topic-chart-data" contenteditable="false"><thead><tr><th data-topic-editable="true" contenteditable="true">週期</th><th data-topic-editable="true" contenteditable="true">指標 1</th><th data-topic-editable="true" contenteditable="true">指標 2</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">Q1</td><td data-topic-editable="true" contenteditable="true">10</td><td data-topic-editable="true" contenteditable="true">15</td></tr><tr><td data-topic-editable="true" contenteditable="true">Q2</td><td data-topic-editable="true" contenteditable="true">20</td><td data-topic-editable="true" contenteditable="true">18</td></tr><tr><td data-topic-editable="true" contenteditable="true">Q3</td><td data-topic-editable="true" contenteditable="true">15</td><td data-topic-editable="true" contenteditable="true">22</td></tr></tbody></table></div><div class="topic-chart-canvas-area" data-topic-chart-height="220"><canvas class="topic-chart-canvas" contenteditable="false" aria-label="趨勢圖"></canvas></div></div></div>'
+      trend: '<div class="topic-trend-card" data-topic-block="trend" style="width:45%" contenteditable="false"><div class="topic-card-head"><strong data-topic-editable="true" contenteditable="true">多維度趨勢比較圖</strong></div><div class="topic-chart-layout"><div class="topic-chart-table-area"><table class="topic-data-table topic-chart-data" contenteditable="false"><thead><tr><th data-topic-editable="true" contenteditable="true">週期</th><th data-topic-editable="true" contenteditable="true">指標 1</th><th data-topic-editable="true" contenteditable="true">指標 2</th></tr></thead><tbody><tr><td data-topic-editable="true" contenteditable="true">Q1</td><td data-topic-editable="true" contenteditable="true">10</td><td data-topic-editable="true" contenteditable="true">15</td></tr><tr><td data-topic-editable="true" contenteditable="true">Q2</td><td data-topic-editable="true" contenteditable="true">20</td><td data-topic-editable="true" contenteditable="true">18</td></tr><tr><td data-topic-editable="true" contenteditable="true">Q3</td><td data-topic-editable="true" contenteditable="true">15</td><td data-topic-editable="true" contenteditable="true">22</td></tr></tbody></table></div><div class="topic-chart-canvas-area" data-topic-chart-height="220"><canvas class="topic-chart-canvas" contenteditable="false" aria-label="趨勢圖"></canvas></div></div></div>',
+      'content-blue': contentBlock('blue', 'fa-info-circle', '資訊標題'),
+      'content-green': contentBlock('green', 'fa-check-circle', '數據/達標'),
+      'content-red': contentBlock('red', 'fa-exclamation-triangle', '異常/警示'),
+      'content-orange': contentBlock('orange', 'fa-chart-line', '分析/趨勢'),
+      'content-purple': contentBlock('purple', 'fa-tasks', '行動/要求')
     };
     return templates[type] || '';
   }

@@ -11,7 +11,7 @@
 
   const BUCKET_NAME = 'report-assets';
   const MONTHLY_BUILD_ID = '7.6.0';
-  const TOPIC_BUILD_ID = '1.11.0';
+  const TOPIC_BUILD_ID = '1.12.0';
   const CACHE_CONTROL_SECONDS = '31536000';
   const DEFAULT_TIMEOUT_MS = 60000;
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

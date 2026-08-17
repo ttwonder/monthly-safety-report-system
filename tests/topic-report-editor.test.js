@@ -21,13 +21,35 @@ test('所有進階模塊模板不含全域id且包含可辨識class', () => {
     kpi: 'topic-kpi-card',
     progress: 'topic-progress-card',
     zone: 'topic-zone-card',
-    trend: 'topic-trend-card'
+    trend: 'topic-trend-card',
+    'content-blue': 'topic-content-block-blue',
+    'content-green': 'topic-content-block-green',
+    'content-red': 'topic-content-block-red',
+    'content-orange': 'topic-content-block-orange',
+    'content-purple': 'topic-content-block-purple'
   };
   for (const [type, className] of Object.entries(types)) {
     const html = editor.buildBlockHtml(type);
     assert.match(html, new RegExp(className));
     assert.doesNotMatch(html, /\bid=["']/i);
     assert.doesNotMatch(html, /<script|\son[a-z]+\s*=|javascript:/i);
+  }
+});
+
+test('五色內容區塊沿用月報標題語義且標題正文可編輯', () => {
+  const expectations = {
+    'content-blue': ['資訊標題', 'fa-info-circle'],
+    'content-green': ['數據/達標', 'fa-check-circle'],
+    'content-red': ['異常/警示', 'fa-exclamation-triangle'],
+    'content-orange': ['分析/趨勢', 'fa-chart-line'],
+    'content-purple': ['行動/要求', 'fa-tasks']
+  };
+  for (const [type, [title, icon]] of Object.entries(expectations)) {
+    const html = editor.buildBlockHtml(type);
+    assert.match(html, new RegExp(title.replace('/', '\\/')));
+    assert.match(html, new RegExp(icon));
+    assert.ok((html.match(/data-topic-editable=/g) || []).length >= 2);
+    assert.match(html, /請輸入內容/);
   }
 });
 
