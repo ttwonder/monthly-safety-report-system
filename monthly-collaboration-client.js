@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.2.0';
+  const buildId = '7.3.0';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
@@ -1572,6 +1572,29 @@
         && pendingKey !== `create_snapshot:${params.p_report_id}:${params.p_snapshot_kind}`) return pending;
       const previousRequest = normalizeRequest(previousParams);
       const currentRequest = normalizeRequest(params);
+      if (rpcName === 'monthly_v7_prune_report_pdf_snapshots') {
+        const pruneKeys = [
+          'p_workspace_key', 'p_user_session_id', 'p_client_session_id',
+          'p_report_id', 'p_keep_snapshot_id', 'p_expected_snapshot_ids'
+        ];
+        const validPruneRequest = (value) => hasExactKeys(value, pruneKeys)
+          && Array.isArray(value.p_expected_snapshot_ids)
+          && value.p_expected_snapshot_ids.length > 0
+          && new Set(value.p_expected_snapshot_ids).size === value.p_expected_snapshot_ids.length
+          && value.p_expected_snapshot_ids.every((id) => typeof id === 'string' && id)
+          && value.p_expected_snapshot_ids.includes(value.p_keep_snapshot_id);
+        if (!validPruneRequest(previousRequest)
+          || !validPruneRequest(currentRequest)
+          || pendingKey !== `prune_report_pdf_snapshots:${currentRequest.p_report_id}`
+          || String(previousRequest.p_workspace_key || '') !== String(currentRequest.p_workspace_key || '')
+          || String(previousRequest.p_report_id || '') !== String(currentRequest.p_report_id || '')) return pending;
+        const replayParams = JSON.parse(JSON.stringify(previousRequest));
+        for (const key of sessionKeys) replayParams[key] = currentRequest[key];
+        return Object.assign({}, pending, {
+          signature: JSON.stringify(replayParams),
+          replayParams
+        });
+      }
       if (canonicalValue(withoutKeys(previousRequest, sessionKeys)) === canonicalValue(withoutKeys(currentRequest, sessionKeys))) {
         return Object.assign({}, pending, { signature });
       }
@@ -2758,6 +2781,30 @@
         p_client_session_id: this.clientSessionId
       });
       return this.commandResult(result, 'GET_STORAGE_STATS_FAILED');
+    }
+
+    async pruneReportPdfSnapshots(reportId, keepSnapshotId, expectedSnapshotIds) {
+      this.requireUserSession();
+      const normalizedReportId = String(reportId || '').trim();
+      const normalizedKeepId = String(keepSnapshotId || '').trim();
+      const normalizedExpectedIds = Array.from(new Set(
+        (Array.isArray(expectedSnapshotIds) ? expectedSnapshotIds : [])
+          .map((id) => String(id || '').trim())
+          .filter(Boolean)
+      )).sort();
+      if (!normalizedReportId || !normalizedKeepId || !normalizedExpectedIds.includes(normalizedKeepId)) {
+        const error = new Error('INVALID_PAYLOAD');
+        error.code = 'INVALID_PAYLOAD';
+        throw error;
+      }
+      return this.commandResult(await this.executeOperation('monthly_v7_prune_report_pdf_snapshots', {
+        p_workspace_key: this.config.workspaceKey,
+        p_user_session_id: this.userSession.id,
+        p_client_session_id: this.clientSessionId,
+        p_report_id: normalizedReportId,
+        p_keep_snapshot_id: normalizedKeepId,
+        p_expected_snapshot_ids: normalizedExpectedIds
+      }, `prune_report_pdf_snapshots:${normalizedReportId}`), 'PRUNE_REPORT_PDF_SNAPSHOTS_FAILED');
     }
 
     async getEntity(entityType, entityId) {

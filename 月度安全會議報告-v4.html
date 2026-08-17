@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.2.0';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.3.0';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -4461,7 +4461,7 @@
                 <button class="v1-tab-btn" data-v1-tab="history" onclick="switchV1Tab('history')"><i class="fas fa-clock-rotate-left mr-1"></i>歷史 / 備份</button>
                 <button class="v1-tab-btn" data-v1-tab="records" onclick="switchV1Tab('records')"><i class="fas fa-database mr-1"></i>資料記錄</button>
                 <button class="v1-tab-btn" data-v1-tab="cloud" onclick="switchV1Tab('cloud')"><i class="fas fa-shield-halved mr-1"></i>數據管理</button>
-                <a id="topicReportsEntry" class="v1-tab-btn v1-topic-entry" href="./topic-reports.html?v=1.6.0" target="topic-reports" aria-label="在獨立窗口開啟專題報告"><i class="fas fa-file-circle-plus mr-1"></i>專題報告</a>
+                <a id="topicReportsEntry" class="v1-tab-btn v1-topic-entry" href="./topic-reports.html?v=1.7.0" target="topic-reports" aria-label="在獨立窗口開啟專題報告"><i class="fas fa-file-circle-plus mr-1"></i>專題報告</a>
                 <span class="v1-mode-indicator ml-auto text-indigo-700 font-bold px-2">${window.MonthlyV7App?.isActive?.() ? 'V7：逐項 lease / CAS / Realtime' : 'V6：切換前相容模式'}</span>
             `;
 
@@ -8882,7 +8882,8 @@
                 </div>`;
         }
         const V7_STORAGE_STATS_STATE = {
-            actorId: '', loading: false, data: null, error: '', requestId: 0
+            actorId: '', loading: false, data: null, error: '', requestId: 0,
+            pruningReportId: '', notice: ''
         };
         function v7StorageActorId() {
             const user = v5CurrentUser();
@@ -8894,6 +8895,34 @@
             const id = String(legacyFileId || '');
             return reports.find(report => String(report?.legacyFileId || report?.legacy_file_id || '') === id) || null;
         }
+        function v7ReportPdfSnapshotControlHtml(report) {
+            if (!Array.isArray(report?.pdfSnapshots)) {
+                return '<span class="text-[11px] text-amber-700">快照管理尚未啟用；請先更新 SQL</span>';
+            }
+            const snapshots = report.pdfSnapshots;
+            if (!snapshots.length) return '<span class="text-xs text-slate-400">無 PDF 快照</span>';
+            if (!v5IsOwner()) {
+                return `<span class="text-xs text-slate-600">${snapshots.length} 份 PDF 快照<br><span class="text-slate-400">僅 Owner 可清理</span></span>`;
+            }
+            if (snapshots.length === 1) {
+                return '<span class="text-xs text-emerald-700">1 份 PDF 快照｜已是最小保留</span>';
+            }
+            const reportId = v1EscapeAttr(report.id);
+            const busy = V7_STORAGE_STATS_STATE.pruningReportId === String(report.id || '');
+            const options = snapshots.map((snapshot, index) => {
+                const revision = Number(snapshot?.reportRevision || 0);
+                const hash = String(snapshot?.contentSha256 || '').slice(0, 8);
+                const creator = String(snapshot?.createdBy || '未知建立者');
+                const label = `${index === 0 ? '最新｜' : ''}${v4FmtTime(snapshot?.createdAt)}｜R${revision}｜${creator}｜${v7FormatBytes(snapshot?.logicalBytes)}${hash ? `｜${hash}` : ''}`;
+                return `<option value="${v1EscapeAttr(snapshot?.id)}">${v2RecordText(label)}</option>`;
+            }).join('');
+            return `
+                <div class="flex flex-col gap-1 min-w-[330px]">
+                    <select data-v7-pdf-snapshot-keep data-report-id="${reportId}" class="border border-indigo-100 rounded px-2 py-1 text-[11px]" ${busy ? 'disabled' : ''}>${options}</select>
+                    <button data-v7-prune-pdf-snapshots data-report-id="${reportId}" class="v1-small-btn v1-danger-btn" onclick="v7PruneReportPdfSnapshots(this.dataset.reportId)" ${busy ? 'disabled' : ''}>${busy ? '清理中…' : '只保留選擇版本'}</button>
+                    <span class="text-[10px] text-slate-500">目前 ${snapshots.length} 份；按下後會再次核對版本集合</span>
+                </div>`;
+        }
         function v7StorageStatsContentHtml() {
             const state = V7_STORAGE_STATS_STATE;
             if (state.loading && !state.data) return '<div class="v1-empty-state">正在讀取 Supabase 空間統計…</div>';
@@ -8904,13 +8933,14 @@
             if (!data) return '<div class="v1-empty-state">尚未讀取空間統計。</div>';
             const monthly = Array.isArray(data.monthlyReports) ? data.monthlyReports : [];
             const monthlyRows = monthly.map(report => `
-                <tr>
+                <tr data-v7-storage-report-id="${v1EscapeAttr(report.id)}">
                     <td>${v2RecordText(report.title || '月度安全會議報告')}</td>
                     <td>${v2RecordText(report.reportDate || '未填')}</td>
                     <td>${v7FormatBytes(report.contentBytes)}</td>
                     <td>${v7FormatBytes(report.snapshotBytes)}</td>
                     <td class="font-bold">${v7FormatBytes(report.logicalBytes)}</td>
-                </tr>`).join('') || '<tr><td colspan="5" class="text-center text-slate-500">目前沒有可計量的雲端月報。</td></tr>';
+                    <td>${v7ReportPdfSnapshotControlHtml(report)}</td>
+                </tr>`).join('') || '<tr><td colspan="6" class="text-center text-slate-500">目前沒有可計量的雲端月報。</td></tr>';
             return `
                 <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
                     <div class="rounded-lg border border-indigo-100 bg-indigo-50 p-3">
@@ -8936,8 +8966,10 @@
                 </div>
                 <div class="mt-3 text-xs font-bold text-slate-700">月報內容與快照邏輯量</div>
                 <div class="overflow-auto border border-slate-200 rounded-lg mt-1">
-                    <table style="table-layout:auto; min-width:720px;"><thead><tr><th>月報</th><th>日期</th><th>目前內容</th><th>歷史快照</th><th>單項合計</th></tr></thead><tbody>${monthlyRows}</tbody></table>
+                    <table style="table-layout:auto; min-width:1080px;"><thead><tr><th>月報</th><th>日期</th><th>目前內容</th><th>歷史快照</th><th>單項合計</th><th>PDF 快照管理</th></tr></thead><tbody>${monthlyRows}</tbody></table>
                 </div>
+                <div class="text-[11px] text-rose-700 mt-2">安全範圍：只刪除所選月報其他 PDF 快照；published／manual／history 與正常資料不會刪除。刪除後無法復原，且資料庫物理總量不一定立即縮小。</div>
+                ${state.notice ? `<div class="text-xs text-emerald-700 font-bold mt-1">${v2RecordText(state.notice)}</div>` : ''}
                 <div class="text-[11px] text-slate-500 mt-2">單項是可歸屬的資料列邏輯量（內容＋快照），不是共享 PostgreSQL 磁碟頁面；共用記錄與操作日誌只計入本系統資料表總量，Supabase 平台備份、WAL 及保留空間不在此 RPC 可讀範圍。更新：${v4FmtTime(data.generatedAt)}</div>
                 ${state.error ? `<div class="text-xs text-amber-700 mt-1">最近刷新失敗，仍顯示上次結果：${v2RecordText(state.error)}</div>` : ''}`;
         }
@@ -8956,7 +8988,52 @@
         }
         function v7RenderStorageStatsNode() {
             const node = document.getElementById('v7-storage-stats');
+            // Server strings are escaped by v2RecordText/v1EscapeAttr; only fixed UI markup reaches innerHTML.
             if (node) node.innerHTML = v7StorageStatsContentHtml();
+        }
+        async function v7PruneReportPdfSnapshots(reportId) {
+            const state = V7_STORAGE_STATS_STATE;
+            const normalizedReportId = String(reportId || '');
+            if (!v5IsOwner() || state.pruningReportId) return;
+            const report = (Array.isArray(state.data?.monthlyReports) ? state.data.monthlyReports : [])
+                .find(item => String(item?.id || '') === normalizedReportId);
+            const snapshots = Array.isArray(report?.pdfSnapshots) ? report.pdfSnapshots : [];
+            const select = Array.from(document.querySelectorAll('[data-v7-pdf-snapshot-keep]'))
+                .find(node => String(node.dataset.reportId || '') === normalizedReportId);
+            const keepSnapshotId = String(select?.value || '');
+            const keepSnapshot = snapshots.find(snapshot => String(snapshot?.id || '') === keepSnapshotId);
+            if (!report || snapshots.length < 2 || !keepSnapshot) return;
+            const deleteCount = snapshots.length - 1;
+            const keepLabel = `${v4FmtTime(keepSnapshot.createdAt)}｜R${Number(keepSnapshot.reportRevision || 0)}｜${v7FormatBytes(keepSnapshot.logicalBytes)}`;
+            const confirmed = confirm(
+                `月報：${report.title || '月度安全會議報告'}（${report.reportDate || '未填日期'}）\n\n` +
+                `將刪除 ${deleteCount} 份 PDF 快照，只保留：\n${keepLabel}\n\n` +
+                'published／manual／history 與目前月報內容都不會刪除。\n刪除後無法復原，確定繼續？'
+            );
+            if (!confirmed) return;
+
+            state.pruningReportId = normalizedReportId;
+            state.notice = '';
+            state.error = '';
+            v7RenderStorageStatsNode();
+            try {
+                const result = await window.MonthlyV7App.pruneReportPdfSnapshots(
+                    normalizedReportId,
+                    keepSnapshotId,
+                    snapshots.map(snapshot => String(snapshot.id || ''))
+                );
+                state.notice = `已刪除 ${Number(result.deletedCount || 0)} 份 PDF 快照，釋放 ${v7FormatBytes(result.deletedBytes)} 邏輯量；已保留所選版本。`;
+                await v7LoadStorageStats(true);
+            } catch (error) {
+                const code = String(error?.code || error?.message || error || 'PRUNE_REPORT_PDF_SNAPSHOTS_FAILED');
+                await v7LoadStorageStats(true);
+                state.error = code === 'SNAPSHOT_SET_CHANGED'
+                    ? '清理已取消：預覽後快照清單有變動，已刷新，請重新選擇。'
+                    : `快照清理失敗：${code}`;
+            } finally {
+                state.pruningReportId = '';
+                v7RenderStorageStatsNode();
+            }
         }
         async function v7LoadStorageStats(force = false) {
             const app = window.MonthlyV7App;
@@ -8970,6 +9047,8 @@
             if (V7_STORAGE_STATS_STATE.actorId !== actorId) {
                 V7_STORAGE_STATS_STATE.data = null;
                 V7_STORAGE_STATS_STATE.error = '';
+                V7_STORAGE_STATS_STATE.notice = '';
+                V7_STORAGE_STATS_STATE.pruningReportId = '';
             }
             V7_STORAGE_STATS_STATE.actorId = actorId;
             V7_STORAGE_STATS_STATE.loading = true;

@@ -345,6 +345,59 @@ test('數據管理 Owner 可重設所有登入密碼並顯示總量、月報雲�
   await expect(page.locator('#v5TopStatus')).toContainText('Operator B');
 });
 
+test('數據管理 Owner 可選定月報的一個 PDF 快照保留且不改正常資料', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(async () => {
+    for (let index = 0; index < 3; index += 1) await window.MonthlyV7App.createReportSnapshot('pdf');
+    await window.MonthlyV7App.createReportSnapshot('history');
+  });
+  const before = await (await request.get('/__fake_state')).json();
+  const reportId = before.report.id;
+  const pdfSnapshots = before.snapshots.filter((snapshot) => snapshot.reportId === reportId && snapshot.snapshotKind === 'pdf');
+  expect(pdfSnapshots).toHaveLength(3);
+
+  await page.locator('[data-v1-tab="cloud"]').click();
+  const storageRow = page.locator(`[data-v7-storage-report-id="${reportId}"]`);
+  await expect(storageRow).toBeVisible();
+  const keepSelect = storageRow.locator('[data-v7-pdf-snapshot-keep]');
+  const pruneButton = storageRow.locator('[data-v7-prune-pdf-snapshots]');
+  await expect(keepSelect.locator('option')).toHaveCount(3);
+  await expect(pruneButton).toHaveText('只保留選擇版本');
+  await expect(page.locator('#v7-storage-stats')).toContainText('published／manual／history 與正常資料不會刪除');
+
+  const keepId = pdfSnapshots[1].snapshotId;
+  await keepSelect.selectOption(keepId);
+  const confirmDialog = page.waitForEvent('dialog');
+  const clickPromise = pruneButton.click();
+  const dialog = await confirmDialog;
+  expect(dialog.message()).toContain('將刪除 2 份 PDF 快照');
+  expect(dialog.message()).toContain('published／manual／history 與目前月報內容都不會刪除');
+  await dialog.accept();
+  await clickPromise;
+
+  await expect(storageRow.locator('[data-v7-pdf-snapshot-keep]')).toHaveCount(0);
+  await expect(storageRow).toContainText('已是最小保留');
+  const after = await (await request.get('/__fake_state')).json();
+  expect(after.report).toEqual(before.report);
+  expect(after.modules).toEqual(before.modules);
+  expect(after.records).toEqual(before.records);
+  expect(after.snapshots.filter((snapshot) => snapshot.snapshotKind === 'pdf').map((snapshot) => snapshot.snapshotId)).toEqual([keepId]);
+  expect(after.snapshots.filter((snapshot) => snapshot.snapshotKind === 'history')).toHaveLength(1);
+  expect(after.rpcCounts.monthly_v7_prune_report_pdf_snapshots).toBe(1);
+});
+
+test('數據管理 Admin 可看快照統計但不能看到清理控制', async ({ page }) => {
+  await enterAndLogin(page, 'admin', 'admin-pass');
+  await page.evaluate(async () => {
+    await window.MonthlyV7App.createReportSnapshot('pdf');
+    await window.MonthlyV7App.createReportSnapshot('pdf');
+  });
+  await page.locator('[data-v1-tab="cloud"]').click();
+  await expect(page.locator('#v7-storage-stats')).toContainText('僅 Owner 可清理');
+  await expect(page.locator('[data-v7-pdf-snapshot-keep]')).toHaveCount(0);
+  await expect(page.locator('[data-v7-prune-pdf-snapshots]')).toHaveCount(0);
+});
+
 for (const mixedAsset of [
   { name: 'config', url: '**/supabase-config.js*', declaration: "config: 'stale-build'" },
   { name: 'core', url: '**/monthly-collaboration-core.js*', declaration: "core: 'stale-build'" },
@@ -377,7 +430,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.2.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.3.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -417,7 +470,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.2.0'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.3.0'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -620,7 +673,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.2.0', config: '7.2.0', core: '7.2.0', client: '7.2.0', v7: '7.2.0'
+      page: '7.3.0', config: '7.3.0', core: '7.3.0', client: '7.3.0', v7: '7.3.0'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',

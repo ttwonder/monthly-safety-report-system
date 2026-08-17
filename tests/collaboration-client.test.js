@@ -4144,6 +4144,56 @@ test('getStorageStats 以目前 user session 呼叫只讀統計 RPC', async () =
   });
 });
 
+test('PDF 快照清理 timeout 後即使預覽集合改變也先以原 operation 與原選擇對帳', async () => {
+  const drafts = memoryStorage();
+  const timeout = Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' });
+  const operationId = '00000000-0000-4000-8000-000000000933';
+  const oldIds = [
+    '10000000-0000-4000-8000-000000000001',
+    '10000000-0000-4000-8000-000000000002',
+    '10000000-0000-4000-8000-000000000003'
+  ];
+  const newId = '10000000-0000-4000-8000-000000000004';
+  let pruneAttempts = 0;
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-prune-pending' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-prune-pending', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_prune_report_pdf_snapshots: () => {
+      pruneAttempts += 1;
+      if (pruneAttempts <= 2) throw timeout;
+      return { ok: false, error: 'SNAPSHOT_SET_CHANGED', currentPdfSnapshotCount: 4 };
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport, sessionStorage: memoryStorage(), draftStorage: drafts,
+    idFactory: () => 'tab-prune-pending', operationIdFactory: () => operationId
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  await assert.rejects(
+    client.pruneReportPdfSnapshots('r1', oldIds[1], oldIds),
+    (error) => error === timeout
+  );
+  assert.notEqual(drafts.getItem('monthly_v7_pending:prune_report_pdf_snapshots:r1'), null);
+
+  await assert.rejects(
+    client.pruneReportPdfSnapshots('r1', newId, [...oldIds, newId]),
+    (error) => error?.code === 'SNAPSHOT_SET_CHANGED'
+  );
+  const calls = transport.calls.filter((entry) => entry.name === 'monthly_v7_prune_report_pdf_snapshots');
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].params.p_operation_id, operationId);
+  assert.equal(calls[2].params.p_keep_snapshot_id, oldIds[1]);
+  assert.deepEqual(calls[2].params.p_expected_snapshot_ids, oldIds);
+  assert.equal(calls[2].params.p_user_session_id, 'user-prune-pending');
+  assert.equal(calls[2].params.p_client_session_id, 'tab-prune-pending');
+  assert.equal(drafts.getItem('monthly_v7_pending:prune_report_pdf_snapshots:r1'), null);
+});
+
 test('site password rotation 未知結果在重新登入後沿用原 operation ID 對帳', async () => {
   const drafts = memoryStorage();
   const sessions = memoryStorage();

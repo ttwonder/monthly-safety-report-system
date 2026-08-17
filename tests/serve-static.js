@@ -198,6 +198,18 @@ function rpc(name, p) {
       users: state.users, snapshots: state.snapshots, topicReports: state.topicReports,
       topicSnapshots: state.topicSnapshots
     }));
+    const pdfSnapshots = state.snapshots
+      .filter((snapshot) => snapshot.reportId === state.report.id && snapshot.snapshotKind === 'pdf')
+      .slice()
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || b.snapshotId.localeCompare(a.snapshotId))
+      .map((snapshot) => ({
+        id: snapshot.snapshotId,
+        reportRevision: snapshot.reportRevision,
+        contentSha256: snapshot.contentSha256,
+        createdAt: snapshot.createdAt,
+        createdBy: snapshot.createdBy,
+        logicalBytes: byteSize(snapshot)
+      }));
     return {
       ok: true,
       generatedAt: new Date(now()).toISOString(),
@@ -215,6 +227,7 @@ function rpc(name, p) {
         contentBytes,
         snapshotBytes,
         logicalBytes: contentBytes + snapshotBytes,
+        pdfSnapshots,
         updatedAt: new Date(now()).toISOString()
       }]
     };
@@ -1043,6 +1056,52 @@ function rpc(name, p) {
     event('report_meta', state.report.id, state.report.revision, p.p_operation_id);
     return storeOperation(p.p_operation_id, user.id, requestHash, { ok: true, revision: state.report.revision });
   }
+  if (name === 'monthly_v7_prune_report_pdf_snapshots') {
+    const actor = topicActor(p);
+    if (!actor) return { ok: false, error: 'USER_SESSION_INVALID' };
+    if (actor.role !== 'owner') return { ok: false, error: 'OWNER_REQUIRED' };
+    const expectedIds = Array.isArray(p.p_expected_snapshot_ids)
+      ? p.p_expected_snapshot_ids.map(String).sort()
+      : [];
+    const requestHash = canonical({
+      command: 'prune_report_pdf_snapshots',
+      reportId: p.p_report_id,
+      keepSnapshotId: p.p_keep_snapshot_id,
+      expectedSnapshotIds: expectedIds
+    });
+    const replay = replayOperation(p.p_operation_id, actor.id, requestHash);
+    if (replay) return replay;
+    if (p.p_report_id !== state.report.id || !expectedIds.length || new Set(expectedIds).size !== expectedIds.length) {
+      return storeOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'INVALID_PAYLOAD' });
+    }
+    const currentIds = state.snapshots
+      .filter((snapshot) => snapshot.reportId === state.report.id && snapshot.snapshotKind === 'pdf')
+      .map((snapshot) => snapshot.snapshotId)
+      .sort();
+    if (canonical(currentIds) !== canonical(expectedIds)) {
+      return storeOperation(p.p_operation_id, actor.id, requestHash, {
+        ok: false, error: 'SNAPSHOT_SET_CHANGED', currentPdfSnapshotCount: currentIds.length
+      });
+    }
+    if (!currentIds.includes(p.p_keep_snapshot_id)) {
+      return storeOperation(p.p_operation_id, actor.id, requestHash, { ok: false, error: 'KEEP_SNAPSHOT_INVALID' });
+    }
+    const removed = state.snapshots.filter((snapshot) => snapshot.reportId === state.report.id
+      && snapshot.snapshotKind === 'pdf'
+      && snapshot.snapshotId !== p.p_keep_snapshot_id);
+    state.snapshots = state.snapshots.filter((snapshot) => !(snapshot.reportId === state.report.id
+      && snapshot.snapshotKind === 'pdf'
+      && snapshot.snapshotId !== p.p_keep_snapshot_id));
+    return storeOperation(p.p_operation_id, actor.id, requestHash, {
+      ok: true,
+      reportId: state.report.id,
+      keptSnapshotId: p.p_keep_snapshot_id,
+      deletedCount: removed.length,
+      deletedBytes: removed.reduce((total, snapshot) => total + byteSize(snapshot), 0),
+      remainingPdfSnapshotCount: 1,
+      operationId: p.p_operation_id
+    });
+  }
   if (name === 'monthly_v7_create_report_snapshot') {
     if (!Object.prototype.hasOwnProperty.call(p, 'p_snapshot_kind') || Object.prototype.hasOwnProperty.call(p, 'p_kind')) {
       const error = new Error('Could not find the function public.monthly_v7_create_report_snapshot with the supplied named arguments');
@@ -1059,8 +1118,22 @@ function rpc(name, p) {
     if (replay) return replay;
     const snapshotId = randomUUID();
     const snapshot = { report: clone(state.report), modules: clone(state.modules), records: clone(state.records), watermark: state.sequence };
-    const result = { ok: true, snapshotId, snapshotKind: p.p_snapshot_kind, contentSha256: 'fake-sha256', snapshot, operationId: p.p_operation_id };
-    state.snapshots.push({ snapshotId, operationId: p.p_operation_id, actorUserId: user.id, watermark: snapshot.watermark, reportRevision: snapshot.report.revision, modules: clone(snapshot.modules) });
+    const contentSha256 = sha256(canonical(snapshot));
+    const createdAt = new Date(now()).toISOString();
+    const result = { ok: true, snapshotId, snapshotKind: p.p_snapshot_kind, contentSha256, createdAt, snapshot, operationId: p.p_operation_id };
+    state.snapshots.push({
+      snapshotId,
+      reportId: state.report.id,
+      snapshotKind: p.p_snapshot_kind,
+      operationId: p.p_operation_id,
+      actorUserId: user.id,
+      createdBy: user.displayName,
+      createdAt,
+      contentSha256,
+      watermark: snapshot.watermark,
+      reportRevision: snapshot.report.revision,
+      modules: clone(snapshot.modules)
+    });
     return storeOperation(p.p_operation_id, user.id, requestHash, result);
   }
   return { ok: false, error: `FAKE_RPC_NOT_IMPLEMENTED:${name}` };
@@ -1175,7 +1248,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/supabase-config.js') {
     res.writeHead(200, { 'Content-Type': mime['.js'] });
-    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace',topicRequestTimeoutMs:800};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.2.0'});`);
+    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace',topicRequestTimeoutMs:800};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.3.0'});`);
   }
   if (url.pathname === '/vendor/supabase-2.112.2.js') { res.writeHead(200, { 'Content-Type': mime['.js'] }); return res.end(fakeSdk); }
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;

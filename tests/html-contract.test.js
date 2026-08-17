@@ -54,9 +54,9 @@ test('正式 HTML 對所有 startup-coupled 本機 script 使用同一 build cac
 });
 
 test('page、config、core、client 與 V7 宣告同一 build ID 並提供 mixed-build 安全重載', async () => {
-  const buildId = '7.2.0';
+  const buildId = '7.3.0';
   const html = await readFile(join(root, 'index.html'), 'utf8');
-  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.2\.0'/);
+  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.3\.0'/);
   for (const [file, asset] of [
     ['supabase-config.js', 'config'],
     ['monthly-collaboration-core.js', 'core'],
@@ -103,6 +103,11 @@ test('數據管理頁呈現密碼權限矩陣與分層空間統計，不把本�
   assert.match(html, /v5IsOwner\(\)[\s\S]{0,400}siteAccessUpdatePasswordFromForm|siteAccessUpdatePasswordFromForm[\s\S]{0,800}v5IsOwner\(\)/);
   assert.match(html, /data-v5-reset-password/);
   assert.match(html, /修改自己的登入密碼/);
+  assert.match(html, /data-v7-pdf-snapshot-keep/);
+  assert.match(html, /data-v7-prune-pdf-snapshots/);
+  assert.match(html, /function v7PruneReportPdfSnapshots\(/);
+  assert.match(html, /published／manual／history 與正常資料不會刪除/);
+  assert.match(html, /window\.MonthlyV7App\.pruneReportPdfSnapshots/);
 });
 
 test('進站與登入後共用使用者指定的本機 FPMC Logo，工具列控制具無障礙狀態', async () => {

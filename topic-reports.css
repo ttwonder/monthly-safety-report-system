@@ -309,8 +309,8 @@ body.topic-table-resizing,body.topic-table-resizing * { cursor:col-resize !impor
   }
   .topic-history-print table { width:100%; border-collapse:collapse; }
   .topic-history-print th,.topic-history-print td { border:1px solid #94a3b8; padding:7px; font-size:10pt; }
-  .topic-print-module { break-inside:avoid; margin:0 0 12px; }
-  .topic-print-module h2 { margin:0 0 6px; padding:6px 9px; color:#312e81; background:#eef2ff; font-size:15px; }
+  .topic-print-module { break-inside:auto; margin:0 0 12px; }
+  .topic-print-module h2 { break-after:avoid; margin:0 0 6px; padding:6px 9px; color:#312e81; background:#eef2ff; font-size:15px; }
   .topic-print-columns { display:grid; grid-template-columns:1fr; gap:8px; }
   .topic-print-columns[data-layout="1:1"] { grid-template-columns:1fr 1fr; }
   .topic-print-columns[data-layout="1:2"] { grid-template-columns:1fr 2fr; }
@@ -327,11 +327,19 @@ body.topic-table-resizing,body.topic-table-resizing * { cursor:col-resize !impor
   .topic-print-column .topic-kpi-card,
   .topic-print-column .topic-progress-card,
   .topic-print-column .topic-zone-card { min-width:0; padding:9px; }
-  .topic-print-column .topic-card-head { gap:5px; margin-bottom:5px; font-size:10px; }
-  .topic-print-column .topic-card-head > strong { min-width:56px; }
-  .topic-print-column .topic-card-values { gap:4px; flex-wrap:nowrap; font-size:9px; }
-  .topic-print-column .topic-kpi-card .topic-card-head { display:block; }
-  .topic-print-column .topic-kpi-card .topic-card-values { justify-content:space-between; margin-top:4px; }
+  .topic-print-column .topic-indicator-card th,
+  .topic-print-column .topic-indicator-card td {
+    min-width:0; padding:4px; overflow-wrap:anywhere; word-break:normal;
+  }
+  .topic-print-column .topic-card-head { gap:5px; margin-bottom:5px; font-size:10px; flex-wrap:wrap; }
+  .topic-print-column .topic-card-head > strong { flex:1 1 100%; min-width:0; white-space:normal; overflow-wrap:anywhere; }
+  .topic-print-column .topic-card-values { gap:4px; flex-wrap:wrap; font-size:9px; }
+  .topic-print-column .topic-kpi-card .topic-card-head,
+  .topic-print-column .topic-progress-card .topic-card-head,
+  .topic-print-column .topic-zone-card .topic-card-head { display:block; }
+  .topic-print-column .topic-kpi-card .topic-card-values { justify-content:flex-start; margin-top:4px; }
+  .topic-print-column .topic-progress-card .topic-card-head > span,
+  .topic-print-column .topic-zone-card .topic-card-head > span { display:block; margin-top:3px; }
   .topic-print-column .topic-card-values > span,
   .topic-print-column .topic-progress-card .topic-card-head > span,
   .topic-print-column .topic-zone-card .topic-card-head > span { white-space:nowrap; word-break:keep-all; }

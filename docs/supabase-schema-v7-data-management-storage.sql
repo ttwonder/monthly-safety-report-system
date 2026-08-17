@@ -1,5 +1,5 @@
 -- V7 數據管理增量：密碼權限矩陣與 Supabase 空間統計
--- Build: Monthly 7.2.0 / Topic Reports 1.2.0
+-- Build: Monthly 7.3.0 / Topic Reports 1.7.0
 -- 執行順序：V7 + trusted-device-resume + topic-reports + topic-reports-v2 之後。
 -- 本檔可重跑；不包含任何密碼、token 或 service-role credential。
 
@@ -394,7 +394,8 @@ begin
         'reportDate', r.report_date,
         'contentBytes', pg_column_size(r)::bigint + item_size.bytes,
         'snapshotBytes', snapshot_size.bytes,
-        'logicalBytes', pg_column_size(r)::bigint + item_size.bytes + snapshot_size.bytes
+        'logicalBytes', pg_column_size(r)::bigint + item_size.bytes + snapshot_size.bytes,
+        'pdfSnapshots', pdf_snapshot_rows.rows
       ) as row_json
     from public.monthly_v7_reports r
     cross join lateral (
@@ -407,6 +408,20 @@ begin
       from public.monthly_v7_report_snapshots s
       where s.report_id = r.id
     ) snapshot_size
+    cross join lateral (
+      select coalesce(jsonb_agg(jsonb_build_object(
+        'id', s.id,
+        'reportRevision', s.report_revision,
+        'contentSha256', s.content_sha256,
+        'createdAt', s.created_at,
+        'createdBy', creator.display_name,
+        'logicalBytes', pg_column_size(s)::bigint
+      ) order by s.created_at desc, s.id desc), '[]'::jsonb) as rows
+      from public.monthly_v7_report_snapshots s
+      left join public.monthly_v7_users creator on creator.id = s.created_by_user_id
+      where s.report_id = r.id
+        and s.snapshot_kind = 'pdf'
+    ) pdf_snapshot_rows
     where r.workspace_id = workspace_row.id
       and r.deleted_at is null
   ) sized;
@@ -423,6 +438,177 @@ begin
     'monthlyReports', monthly_rows,
     'logicalMetric', 'content_and_snapshots'
   );
+end;
+$$;
+
+-- Owner 對單一月報明確保留一筆 PDF 快照；其他種類與 authority 資料完全不碰。
+-- expected IDs 必須與 transaction 內的現況完全相同；先鎖 report row，再以短 SHARE ROW EXCLUSIVE barrier 阻止新快照被誤刪並序列化清理交易。
+create or replace function public.monthly_v7_prune_report_pdf_snapshots(
+  p_workspace_key text,
+  p_user_session_id uuid,
+  p_client_session_id text,
+  p_operation_id uuid,
+  p_report_id uuid,
+  p_keep_snapshot_id uuid,
+  p_expected_snapshot_ids jsonb
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, extensions, public
+as $$
+declare
+  workspace_row public.monthly_v7_workspaces%rowtype;
+  actor public.monthly_v7_users%rowtype;
+  operation_row public.monthly_v7_operations%rowtype;
+  request_hash text;
+  response jsonb;
+  expected_ids jsonb := '[]'::jsonb;
+  current_ids jsonb := '[]'::jsonb;
+  expected_count integer := 0;
+  distinct_count integer := 0;
+  current_count integer := 0;
+  deleted_count integer := 0;
+  deleted_bytes bigint := 0;
+begin
+  select * into workspace_row
+  from public.monthly_v7_workspaces
+  where legacy_workspace_key = p_workspace_key;
+  if not found then
+    raise exception using errcode = 'P0002', message = 'WORKSPACE_NOT_FOUND';
+  end if;
+
+  actor := public.monthly_v7_session_user(workspace_row.id, p_user_session_id, p_client_session_id);
+  if actor.role <> 'owner' then
+    return jsonb_build_object('ok', false, 'error', 'OWNER_REQUIRED');
+  end if;
+  if workspace_row.authority_state <> 'NORMALIZED_ACTIVE' then
+    return jsonb_build_object('ok', false, 'error', 'AUTHORITY_NOT_ACTIVE');
+  end if;
+  if p_operation_id is null or p_report_id is null or p_keep_snapshot_id is null
+     or jsonb_typeof(p_expected_snapshot_ids) <> 'array'
+     or jsonb_array_length(p_expected_snapshot_ids) < 1 then
+    return jsonb_build_object('ok', false, 'error', 'INVALID_PAYLOAD');
+  end if;
+
+  select coalesce(jsonb_agg(value order by value), '[]'::jsonb),
+         count(*)::integer,
+         count(distinct value)::integer
+  into expected_ids, expected_count, distinct_count
+  from jsonb_array_elements_text(p_expected_snapshot_ids) expected(value);
+  if expected_count <> distinct_count or exists(
+    select 1
+    from jsonb_array_elements_text(p_expected_snapshot_ids) expected(value)
+    where value !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  ) then
+    return jsonb_build_object('ok', false, 'error', 'INVALID_PAYLOAD');
+  end if;
+
+  request_hash := encode(digest(convert_to(jsonb_build_object(
+    'command', 'prune_report_pdf_snapshots',
+    'report_id', p_report_id,
+    'keep_snapshot_id', p_keep_snapshot_id,
+    'expected_snapshot_ids', expected_ids
+  )::text, 'UTF8'), 'sha256'), 'hex');
+
+  insert into public.monthly_v7_operations(
+    operation_id, workspace_id, actor_user_id, command_type,
+    entity_type, entity_id, request_hash, status
+  ) values (
+    p_operation_id, workspace_row.id, actor.id, 'prune_report_pdf_snapshots',
+    'report_snapshot_retention', p_report_id, request_hash, 'STARTED'
+  ) on conflict(operation_id) do nothing;
+
+  select * into operation_row
+  from public.monthly_v7_operations
+  where operation_id = p_operation_id
+  for update;
+  if operation_row.workspace_id <> workspace_row.id
+     or operation_row.actor_user_id <> actor.id
+     or operation_row.request_hash <> request_hash then
+    return jsonb_build_object('ok', false, 'error', 'IDEMPOTENCY_MISMATCH');
+  end if;
+  if operation_row.status in ('COMMITTED', 'REJECTED') then
+    return operation_row.result;
+  end if;
+
+  perform 1
+  from public.monthly_v7_reports
+  where id = p_report_id
+    and workspace_id = workspace_row.id
+    and deleted_at is null
+  for update;
+  if not found then
+    response := jsonb_build_object('ok', false, 'error', 'ENTITY_NOT_FOUND');
+    update public.monthly_v7_operations
+    set status = 'REJECTED', result = response, completed_at = now()
+    where operation_id = p_operation_id;
+    return response;
+  end if;
+
+  lock table public.monthly_v7_report_snapshots in share row exclusive mode;
+
+  select coalesce(jsonb_agg(s.id::text order by s.id::text), '[]'::jsonb), count(*)::integer
+  into current_ids, current_count
+  from public.monthly_v7_report_snapshots s
+  where s.workspace_id = workspace_row.id
+    and s.report_id = p_report_id
+    and s.snapshot_kind = 'pdf';
+
+  if current_ids <> expected_ids then
+    response := jsonb_build_object(
+      'ok', false,
+      'error', 'SNAPSHOT_SET_CHANGED',
+      'currentPdfSnapshotCount', current_count
+    );
+    update public.monthly_v7_operations
+    set status = 'REJECTED', result = response, completed_at = now()
+    where operation_id = p_operation_id;
+    return response;
+  end if;
+
+  if not exists(
+    select 1
+    from public.monthly_v7_report_snapshots s
+    where s.id = p_keep_snapshot_id
+      and s.workspace_id = workspace_row.id
+      and s.report_id = p_report_id
+      and s.snapshot_kind = 'pdf'
+  ) then
+    response := jsonb_build_object('ok', false, 'error', 'KEEP_SNAPSHOT_INVALID');
+    update public.monthly_v7_operations
+    set status = 'REJECTED', result = response, completed_at = now()
+    where operation_id = p_operation_id;
+    return response;
+  end if;
+
+  select count(*)::integer, coalesce(sum(pg_column_size(s)::bigint), 0)::bigint
+  into deleted_count, deleted_bytes
+  from public.monthly_v7_report_snapshots s
+  where s.workspace_id = workspace_row.id
+    and s.report_id = p_report_id
+    and s.snapshot_kind = 'pdf'
+    and s.id <> p_keep_snapshot_id;
+
+  delete from public.monthly_v7_report_snapshots s
+  where s.workspace_id = workspace_row.id
+    and s.report_id = p_report_id
+    and s.snapshot_kind = 'pdf'
+    and s.id <> p_keep_snapshot_id;
+
+  response := jsonb_build_object(
+    'ok', true,
+    'reportId', p_report_id,
+    'keptSnapshotId', p_keep_snapshot_id,
+    'deletedCount', deleted_count,
+    'deletedBytes', deleted_bytes,
+    'remainingPdfSnapshotCount', 1,
+    'operationId', p_operation_id
+  );
+  update public.monthly_v7_operations
+  set status = 'COMMITTED', result = response, completed_at = now()
+  where operation_id = p_operation_id;
+  return response;
 end;
 $$;
 
@@ -516,6 +702,9 @@ grant execute on function public.monthly_v7_update_site_password(text,uuid,text,
 
 revoke execute on function public.monthly_v7_get_storage_stats(text,uuid,text) from public, anon, authenticated;
 grant execute on function public.monthly_v7_get_storage_stats(text,uuid,text) to authenticated;
+
+revoke execute on function public.monthly_v7_prune_report_pdf_snapshots(text,uuid,text,uuid,uuid,uuid,jsonb) from public, anon, authenticated;
+grant execute on function public.monthly_v7_prune_report_pdf_snapshots(text,uuid,text,uuid,uuid,uuid,jsonb) to authenticated;
 
 revoke execute on function public.monthly_v7_topic_list_reports(text,uuid,text) from public, anon, authenticated;
 grant execute on function public.monthly_v7_topic_list_reports(text,uuid,text) to authenticated;

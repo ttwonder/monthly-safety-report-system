@@ -3,7 +3,7 @@
 
   const core = root.TopicReportsCore;
   const clientApi = root.TopicReportsClient;
-  const BUILD_ID = '1.6.0';
+  const BUILD_ID = '1.7.0';
   const CREATE_ATTEMPT_STORAGE_KEY = 'topic:v1:create-attempt';
   root.TOPIC_REPORT_ASSET_BUILDS = Object.assign({}, root.TOPIC_REPORT_ASSET_BUILDS, { page: BUILD_ID });
   const state = {

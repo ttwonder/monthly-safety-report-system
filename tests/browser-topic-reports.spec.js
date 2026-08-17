@@ -1358,6 +1358,157 @@ test('雙欄專題PDF維持欄內物件百分比、原色並產生可讀A4橫向
   await testInfo.attach('topic-layout-dual-column-color-portrait.pdf', { body: portraitPdf, contentType: 'application/pdf' });
 });
 
+test('專題PDF直式100%不讓窄欄表格覆蓋相鄰元件且項次可從第一頁開始分頁', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '直式100%真實排布專題');
+  await editor.locator('[data-module-layout]').first().selectOption('1:1');
+  const left = editor.locator('.topic-editable').nth(0);
+  const right = editor.locator('.topic-editable').nth(1);
+
+  await left.fill('左欄內容 ');
+  await left.click();
+  await left.press('End');
+  const answers = ['3', '3'];
+  const promptHandler = async (dialog) => dialog.accept(answers.shift());
+  editor.on('dialog', promptHandler);
+  await editor.locator('[data-insert="table"]').click();
+  await expect.poll(() => answers.length).toBe(0);
+  editor.off('dialog', promptHandler);
+  await left.evaluate((node) => {
+    const marker = document.createTextNode(' ');
+    node.appendChild(marker);
+    node.focus();
+    const range = document.createRange();
+    range.setStart(marker, marker.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  for (const type of ['highlight', 'indicator-orange', 'kpi']) {
+    await editor.locator(`[data-insert="${type}"]`).click();
+  }
+
+  await right.fill('右欄內容 ');
+  await right.click();
+  await right.press('End');
+  for (const type of ['indicator-orange', 'kpi', 'progress', 'zone', 'trend']) {
+    await editor.locator(`[data-insert="${type}"]`).click();
+  }
+  await editor.locator('#topicTrendHeight').selectOption('500');
+  await editor.locator('#topicPdfScale').selectOption('100');
+  await editor.locator('#topicPdfOrientation').selectOption('portrait');
+  await editor.evaluate(() => {
+    window.__topicPortraitPrintObserved = false;
+    window.print = () => { window.__topicPortraitPrintObserved = true; };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicPortraitPrintObserved)).toBe(true);
+
+  await editor.setViewportSize({ width: 718, height: 1100 });
+  await editor.emulateMedia({ media: 'print' });
+  const geometry = await editor.evaluate(() => {
+    document.body.classList.add('topic-printing-report');
+    const area = document.querySelector('#topicPrintArea');
+    const blockSelector = [
+      ':scope > .topic-resizable-table',
+      ':scope > .topic-highlight',
+      ':scope > .topic-indicator-card',
+      ':scope > .topic-kpi-card',
+      ':scope > .topic-progress-card',
+      ':scope > .topic-zone-card',
+      ':scope > .topic-trend-card'
+    ].join(',');
+    const columns = Array.from(area.querySelectorAll('.topic-print-column'));
+    const overflow = [];
+    const overlaps = [];
+    columns.forEach((column, columnIndex) => {
+      const columnRect = column.getBoundingClientRect();
+      const blocks = Array.from(column.querySelectorAll(blockSelector));
+      blocks.forEach((block, blockIndex) => {
+        const rect = block.getBoundingClientRect();
+        if (rect.left < columnRect.left - 1 || rect.right > columnRect.right + 1
+          || block.scrollWidth > block.clientWidth + 1) {
+          overflow.push({
+            columnIndex, blockIndex, type: block.dataset.topicBlock || block.tagName,
+            left: rect.left, right: rect.right, columnLeft: columnRect.left, columnRight: columnRect.right,
+            clientWidth: block.clientWidth, scrollWidth: block.scrollWidth
+          });
+        }
+      });
+      for (let first = 0; first < blocks.length; first += 1) {
+        const a = blocks[first].getBoundingClientRect();
+        for (let second = first + 1; second < blocks.length; second += 1) {
+          const b = blocks[second].getBoundingClientRect();
+          const overlapWidth = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+          const overlapHeight = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+          if (overlapWidth > 1 && overlapHeight > 1) {
+            overlaps.push({
+              columnIndex, first, second,
+              firstType: blocks[first].dataset.topicBlock || blocks[first].tagName,
+              secondType: blocks[second].dataset.topicBlock || blocks[second].tagName,
+              overlapWidth, overlapHeight
+            });
+          }
+        }
+      }
+    });
+    return {
+      overflow,
+      overlaps,
+      moduleBreakInside: getComputedStyle(area.querySelector('.topic-print-module')).breakInside,
+      indicatorCellMinWidths: Array.from(area.querySelectorAll('.topic-indicator-card td'))
+        .map((cell) => getComputedStyle(cell).minWidth)
+    };
+  });
+  expect(geometry.overflow, JSON.stringify(geometry, null, 2)).toEqual([]);
+  expect(geometry.overlaps, JSON.stringify(geometry, null, 2)).toEqual([]);
+  expect(geometry.moduleBreakInside).not.toBe('avoid');
+  expect(geometry.indicatorCellMinWidths.every((value) => value === '0px')).toBe(true);
+
+  await testInfo.attach('topic-user-shaped-portrait-100.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
+  const portraitPdf = await editor.pdf({ printBackground: false, preferCSSPageSize: true });
+  expect(portraitPdf.subarray(0, 5).toString()).toBe('%PDF-');
+  await testInfo.attach('topic-user-shaped-portrait-100.pdf', { body: portraitPdf, contentType: 'application/pdf' });
+
+  await editor.emulateMedia({ media: 'screen' });
+  await editor.evaluate(() => document.body.classList.remove('topic-printing-report'));
+  await editor.setViewportSize({ width: 1047, height: 900 });
+  await editor.locator('#topicPdfOrientation').selectOption('landscape');
+  await editor.evaluate(() => {
+    window.__topicLandscapePrintObserved = false;
+    window.print = () => { window.__topicLandscapePrintObserved = true; };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicLandscapePrintObserved)).toBe(true);
+  await editor.emulateMedia({ media: 'print' });
+  await editor.evaluate(() => document.body.classList.add('topic-printing-report'));
+  await testInfo.attach('topic-user-shaped-landscape-100.png', {
+    body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+  });
+  const landscapePdf = await editor.pdf({ printBackground: false, preferCSSPageSize: true });
+  expect(landscapePdf.subarray(0, 5).toString()).toBe('%PDF-');
+  await testInfo.attach('topic-user-shaped-landscape-100.pdf', { body: landscapePdf, contentType: 'application/pdf' });
+
+  await editor.emulateMedia({ media: 'screen' });
+  await editor.evaluate(() => document.body.classList.remove('topic-printing-report'));
+  await editor.locator('#topicPdfScale').selectOption('90');
+  await editor.evaluate(() => {
+    window.__topicLandscape90PrintObserved = false;
+    window.print = () => { window.__topicLandscape90PrintObserved = true; };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicLandscape90PrintObserved)).toBe(true);
+  await editor.emulateMedia({ media: 'print' });
+  await editor.evaluate(() => document.body.classList.add('topic-printing-report'));
+  const landscape90Pdf = await editor.pdf({ printBackground: false, preferCSSPageSize: true });
+  expect(landscape90Pdf.subarray(0, 5).toString()).toBe('%PDF-');
+  await testInfo.attach('topic-user-shaped-landscape-90.pdf', { body: landscape90Pdf, contentType: 'application/pdf' });
+});
+
 test('編輯區塊在標題操作下方，色塊、字級、自動編號及物件百分比與刪除可保存', async ({ page, request }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);

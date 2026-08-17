@@ -881,6 +881,140 @@ test('V7 空間統計區分資料庫物理量、月報／專題邏輯量並限�
   }
 });
 
+test('V7 Owner 可對指定月報只保留一個確認的 PDF 快照且不碰正常資料或非 PDF 歷史', async () => {
+  const db = await createLegacyDatabase();
+  try {
+    await applyDataManagement(db);
+    const migration = await readFile(join(ROOT, 'docs', 'supabase-schema-v7-data-management-storage.sql'), 'utf8');
+    await db.exec(migration);
+    await activateNormalizedAuthority(db);
+    const owner = await openAndLogin(db, '11111111-1111-4111-8111-111111111111', 'owner', 'owner-pass', 'tab-prune-owner');
+    const reportId = (await db.query('select id from public.monthly_v7_reports where deleted_at is null limit 1')).rows[0].id;
+    const otherReportId = (await db.query(`
+      insert into public.monthly_v7_reports(workspace_id,legacy_file_id,title,report_date)
+      select id,'other-month-report','其他月份報告','2026-07-01'::date
+      from public.monthly_v7_workspaces where legacy_workspace_key='workspace-test'
+      returning id
+    `)).rows[0].id;
+    const createSnapshot = async (kind, targetReportId = reportId) => rpcResult(await db.query(
+      'select public.monthly_v7_create_report_snapshot($1,$2,$3,$4,$5,$6) as result',
+      ['workspace-test', owner.site.site_session_id, owner.login.user_session_id, randomUUID(), targetReportId, kind]
+    ));
+    const pdfSnapshots = [];
+    for (let index = 0; index < 3; index += 1) pdfSnapshots.push(await createSnapshot('pdf'));
+    const historySnapshot = await createSnapshot('history');
+    const otherReportSnapshot = await createSnapshot('pdf', otherReportId);
+    assert.equal(historySnapshot.ok, true);
+    assert.equal(otherReportSnapshot.ok, true);
+
+    const authorityState = async () => (await db.query(`
+      select jsonb_build_object(
+        'reports', coalesce((select jsonb_agg(to_jsonb(r) order by r.id) from public.monthly_v7_reports r), '[]'::jsonb),
+        'items', coalesce((select jsonb_agg(to_jsonb(i) order by i.id) from public.monthly_v7_report_items i), '[]'::jsonb),
+        'records', coalesce((select jsonb_agg(to_jsonb(r) order by r.id) from public.monthly_v7_record_items r), '[]'::jsonb)
+      ) as state
+    `)).rows[0].state;
+    const beforeAuthority = await authorityState();
+    const statsBefore = rpcResult(await db.query(
+      'select public.monthly_v7_get_storage_stats($1,$2,$3) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId]
+    ));
+    const reportStats = statsBefore.monthlyReports.find((report) => report.id === reportId);
+    assert.equal(reportStats.pdfSnapshots.length, 3);
+    assert.deepEqual(
+      reportStats.pdfSnapshots.map((snapshot) => snapshot.id).sort(),
+      pdfSnapshots.map((snapshot) => snapshot.snapshotId).sort()
+    );
+
+    const adminCreated = rpcResult(await db.query(
+      'select public.monthly_v7_create_user($1,$2,$3,$4,$5,$6,$7,$8) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(), 'prune-admin', 'Prune Admin', 'admin', 'prune-admin-pass']
+    ));
+    assert.equal(adminCreated.ok, true);
+    const admin = await openAndLogin(db, '22222222-2222-4222-8222-222222222222', 'prune-admin', 'prune-admin-pass', 'tab-prune-admin');
+    const beforeEvents = Number((await db.query('select count(*)::int as count from public.monthly_v7_change_events')).rows[0].count);
+    const expectedIds = reportStats.pdfSnapshots.map((snapshot) => snapshot.id);
+    const forbidden = rpcResult(await db.query(
+      'select public.monthly_v7_prune_report_pdf_snapshots($1,$2,$3,$4,$5,$6,$7::jsonb) as result',
+      ['workspace-test', admin.login.user_session_id, admin.clientSessionId, randomUUID(), reportId, expectedIds[1], JSON.stringify(expectedIds)]
+    ));
+    assert.equal(forbidden.ok, false);
+    assert.equal(forbidden.error, 'OWNER_REQUIRED');
+
+    await setAuthUid(db, owner.uid);
+    const stale = rpcResult(await db.query(
+      'select public.monthly_v7_prune_report_pdf_snapshots($1,$2,$3,$4,$5,$6,$7::jsonb) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, randomUUID(), reportId, expectedIds[1], JSON.stringify(expectedIds.slice(0, 2))]
+    ));
+    assert.equal(stale.ok, false);
+    assert.equal(stale.error, 'SNAPSHOT_SET_CHANGED');
+    assert.equal(Number((await db.query('select count(*)::int as count from public.monthly_v7_report_snapshots where report_id=$1', [reportId])).rows[0].count), 4);
+
+    const operationId = randomUUID();
+    const pruned = rpcResult(await db.query(
+      'select public.monthly_v7_prune_report_pdf_snapshots($1,$2,$3,$4,$5,$6,$7::jsonb) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, operationId, reportId, expectedIds[1], JSON.stringify(expectedIds)]
+    ));
+    assert.equal(pruned.ok, true);
+    assert.equal(pruned.deletedCount, 2);
+    assert.equal(pruned.keptSnapshotId, expectedIds[1]);
+    assert.ok(Number(pruned.deletedBytes) > 0);
+
+    const remaining = (await db.query(`
+      select id,snapshot_kind from public.monthly_v7_report_snapshots
+      where report_id=$1 order by snapshot_kind,id
+    `, [reportId])).rows;
+    assert.deepEqual(remaining, [
+      { id: historySnapshot.snapshotId, snapshot_kind: 'history' },
+      { id: expectedIds[1], snapshot_kind: 'pdf' }
+    ]);
+    assert.deepEqual((await db.query(
+      'select id,snapshot_kind from public.monthly_v7_report_snapshots where report_id=$1',
+      [otherReportId]
+    )).rows, [{ id: otherReportSnapshot.snapshotId, snapshot_kind: 'pdf' }]);
+    assert.deepEqual(await authorityState(), beforeAuthority);
+    assert.equal(Number((await db.query('select count(*)::int as count from public.monthly_v7_change_events')).rows[0].count), beforeEvents);
+
+    const replay = rpcResult(await db.query(
+      'select public.monthly_v7_prune_report_pdf_snapshots($1,$2,$3,$4,$5,$6,$7::jsonb) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId, operationId, reportId, expectedIds[1], JSON.stringify(expectedIds)]
+    ));
+    assert.deepEqual(replay, pruned);
+    assert.equal(Number((await db.query('select count(*)::int as count from public.monthly_v7_report_snapshots where report_id=$1', [reportId])).rows[0].count), 2);
+
+    const statsAfter = rpcResult(await db.query(
+      'select public.monthly_v7_get_storage_stats($1,$2,$3) as result',
+      ['workspace-test', owner.login.user_session_id, owner.clientSessionId]
+    ));
+    const reportAfter = statsAfter.monthlyReports.find((report) => report.id === reportId);
+    assert.deepEqual(reportAfter.pdfSnapshots.map((snapshot) => snapshot.id), [expectedIds[1]]);
+    assert.ok(Number(reportAfter.snapshotBytes) < Number(reportStats.snapshotBytes));
+
+    const acl = (await db.query(`
+      select
+        not has_function_privilege('anon', 'public.monthly_v7_prune_report_pdf_snapshots(text,uuid,text,uuid,uuid,uuid,jsonb)', 'EXECUTE') as anon_blocked,
+        has_function_privilege('authenticated', 'public.monthly_v7_prune_report_pdf_snapshots(text,uuid,text,uuid,uuid,uuid,jsonb)', 'EXECUTE') as authenticated_allowed
+    `)).rows[0];
+    assert.deepEqual(acl, { anon_blocked: true, authenticated_allowed: true });
+    const pruneStart = migration.indexOf('create or replace function public.monthly_v7_prune_report_pdf_snapshots');
+    const pruneEnd = migration.indexOf('-- 專題清單逐項回傳', pruneStart);
+    assert.ok(pruneStart >= 0 && pruneEnd > pruneStart, '找不到完整 prune RPC migration 區塊');
+    const pruneMigration = migration.slice(pruneStart, pruneEnd);
+    assert.match(pruneMigration, /snapshot_kind\s*=\s*'pdf'/);
+    assert.match(pruneMigration, /lock table public\.monthly_v7_report_snapshots in share row exclusive mode/);
+    const reportRowLockIndex = pruneMigration.indexOf('from public.monthly_v7_reports');
+    const snapshotTableLockIndex = pruneMigration.indexOf('lock table public.monthly_v7_report_snapshots');
+    assert.ok(
+      reportRowLockIndex >= 0 && reportRowLockIndex < snapshotTableLockIndex,
+      'prune 必須先鎖 report row，再鎖 snapshot table，避免與 snapshot create 形成反向等待'
+    );
+    assert.match(pruneMigration, /SNAPSHOT_SET_CHANGED/);
+    assert.doesNotMatch(pruneMigration, /delete\s+from\s+public\.monthly_v7_(?:reports|report_items|record_items|operations)/i);
+  } finally {
+    await db.close();
+  }
+});
+
 test('V7 正式 PDF/history snapshot 在短 barrier 內建立且後續 live 寫入不改變舊內容', async () => {
   const db = await createLegacyDatabase();
   try {
