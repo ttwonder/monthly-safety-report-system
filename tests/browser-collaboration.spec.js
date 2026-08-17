@@ -466,6 +466,93 @@ test('數據管理分區列出雲端專題與此瀏覽器既有月報且不冒�
   expect(state.rpcCounts.monthly_v7_topic_list_reports).toBe(1);
 });
 
+test('保存目前月報建立獨立本機版本且切換會完整還原保存狀態', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.locator('[data-v1-tab="editor"]').click();
+  const currentId = await page.evaluate(() => window.currentFileId);
+  const beforeIds = await page.evaluate(async () => (await v1ListSavedReports())
+    .filter((row) => row.id !== 'v2_records' && row.v7Recovery !== true)
+    .map((row) => row.id));
+
+  await page.locator('#mainTitle').evaluate((node) => { node.innerText = '保存點月報標題'; });
+  await page.locator('#reportDate').fill('2026-08-17');
+  await page.locator('#startMonth').selectOption('8');
+  await page.locator('#startDay').selectOption('1');
+  await page.locator('#endMonth').selectOption('8');
+  await page.locator('#endDay').selectOption('31');
+  await page.locator('#globalFontEnSelector').selectOption({ index: 1 });
+  await page.locator('#globalFontZhSelector').selectOption({ index: 1 });
+  const editor = page.locator('#tableBody .editable-div[data-col-index="0"]').first();
+  await editor.click();
+  await expect(editor).toHaveAttribute('contenteditable', 'true');
+  await editor.fill('保存點內文標記');
+  await editor.blur();
+  await page.evaluate(() => changeGlobalFont({ persist: false }));
+  await page.locator('[data-v1-tab="pdf"]').click();
+  await page.locator('[data-v1-pdf-index="0"]').uncheck();
+
+  await page.locator('[data-v1-tab="history"]').click();
+  await page.evaluate(() => {
+    v7ClearCloudAutoSaveTimer();
+    V7_CLOUD_SAVED_GENERATION = V7_CLOUD_DIRTY_GENERATION;
+    window.__localVersionCloudPersistCalls = 0;
+    const original = window.MonthlyV7App.persistReportData.bind(window.MonthlyV7App);
+    window.MonthlyV7App.persistReportData = (...args) => {
+      window.__localVersionCloudPersistCalls += 1;
+      return original(...args);
+    };
+  });
+  await page.getByRole('button', { name: '保存目前月報' }).click();
+  await expect.poll(() => page.evaluate(async () => (await v1ListSavedReports())
+    .filter((row) => row.id !== 'v2_records' && row.v7Recovery !== true).length)).toBe(beforeIds.length + 1);
+  expect(await page.evaluate(() => window.currentFileId)).toBe(currentId);
+  expect(await page.evaluate(() => window.__localVersionCloudPersistCalls)).toBe(0);
+
+  const version = await page.evaluate(async (knownIds) => {
+    const rows = await v1ListSavedReports();
+    return rows.find((row) => !knownIds.includes(row.id) && row.id !== 'v2_records' && row.v7Recovery !== true);
+  }, beforeIds);
+  expect(version).toMatchObject({
+    localVersion: true,
+    sourceFileId: currentId,
+    title: '保存點月報標題',
+    date: '2026-08-17',
+    period: { startM: '8', startD: '1', endM: '8', endD: '31' }
+  });
+  expect(version.id).toMatch(/^report_version_/);
+  expect(version.data[0].columns[0]).toContain('保存點內文標記');
+  expect(version.data[0].selectedForPdf).toBe(false);
+  expect(version.globalFontEn).toBeTruthy();
+  expect(version.globalFontZh).toBeTruthy();
+  const historyRow = page.locator('#v1-history-list .v1-module-row').filter({ hasText: '保存版本' });
+  await expect(historyRow).toContainText('保存點月報標題');
+
+  await page.locator('[data-v1-tab="editor"]').click();
+  await page.locator('#mainTitle').evaluate((node) => { node.innerText = '保存後已改標題'; });
+  await editor.fill('保存後已改內文');
+  await editor.blur();
+  await page.locator('#reportDate').fill('2026-09-01');
+  await page.locator('[data-v1-tab="history"]').click();
+  const dialogPromise = page.waitForEvent('dialog');
+  const switchPromise = historyRow.getByRole('button', { name: '切換' }).click();
+  const dialog = await dialogPromise;
+  await dialog.accept();
+  await switchPromise;
+
+  await expect.poll(() => page.evaluate(() => window.currentFileId)).toBe(version.id);
+  await expect(page.locator('#mainTitle')).toHaveText('保存點月報標題');
+  await expect(page.locator('#reportDate')).toHaveValue('2026-08-17');
+  await expect(page.locator('#startMonth')).toHaveValue('8');
+  await expect(page.locator('#startDay')).toHaveValue('1');
+  await expect(page.locator('#endMonth')).toHaveValue('8');
+  await expect(page.locator('#endDay')).toHaveValue('31');
+  await expect(page.locator('#tableBody .editable-div[data-col-index="0"]').first()).toContainText('保存點內文標記');
+  expect(await page.evaluate(() => reportData[0].selectedForPdf)).toBe(false);
+  await expect(page.locator('#globalFontEnSelector')).toHaveValue(version.globalFontEn);
+  await expect(page.locator('#globalFontZhSelector')).toHaveValue(version.globalFontZh);
+  await expect(historyRow.getByRole('button', { name: '目前使用' })).toBeVisible();
+});
+
 test('專題統計暫時失敗時仍保留雲端月報與本機月報分區', async ({ page, request }) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   await page.evaluate(async () => {
@@ -527,7 +614,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.5.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -567,7 +654,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.5.0'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.0'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -770,7 +857,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.5.0', config: '7.5.0', assets: '7.5.0', core: '7.5.0', client: '7.5.0', v7: '7.5.0'
+      page: '7.6.0', config: '7.6.0', assets: '7.6.0', core: '7.6.0', client: '7.6.0', v7: '7.6.0'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',

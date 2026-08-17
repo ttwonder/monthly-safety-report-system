@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.5.0';
+  const buildId = '7.6.0';
   const api = factory(buildId);
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) {

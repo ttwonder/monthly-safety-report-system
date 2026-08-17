@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.5.0';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.0';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -5776,6 +5776,17 @@
             });
         }
 
+        async function v1PutSavedReport(row) {
+            const db = await initDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction([STORE_NAME], 'readwrite');
+                const request = tx.objectStore(STORE_NAME).put(row);
+                tx.oncomplete = () => resolve(row);
+                tx.onerror = () => reject(tx.error || request.error);
+                tx.onabort = () => reject(tx.error || request.error || new Error('LOCAL_HISTORY_WRITE_ABORTED'));
+            });
+        }
+
         async function v1DeleteReportById(fileId) {
             if (!fileId) return;
             if (fileId === window.currentFileId) {
@@ -5816,6 +5827,62 @@
             setTimeout(() => v1PrintWithExportTitle(), 80);
         }
 
+        let V1_LOCAL_VERSION_SAVE_ACTIVE = false;
+        function v1SyncAllReportEditorsToModel() {
+            document.querySelectorAll('#tableBody tr[data-index]').forEach(row => {
+                const index = Number(row.dataset.index);
+                if (!Number.isInteger(index) || !reportData[index]) return;
+                const title = row.querySelector('.module-title-editor');
+                if (title) reportData[index].title = sanitizeModuleTitleHtml(title.innerHTML);
+                row.querySelectorAll('[data-col-index]').forEach(editor => {
+                    const colIndex = Number(editor.dataset.colIndex);
+                    if (Number.isInteger(colIndex) && colIndex >= 0 && Array.isArray(reportData[index].columns)) {
+                        reportData[index].columns[colIndex] = sanitizeTrendChartHtml(editor.innerHTML);
+                    }
+                });
+            });
+        }
+        async function v1SaveCurrentReportVersion() {
+            if (V1_LOCAL_VERSION_SAVE_ACTIVE) return null;
+            const button = document.getElementById('v1SaveCurrentVersion');
+            V1_LOCAL_VERSION_SAVE_ACTIVE = true;
+            if (button) button.disabled = true;
+            try {
+                const focused = document.activeElement;
+                if (focused && typeof focused.blur === 'function' && focused.classList?.contains('editable-div')) focused.blur();
+                await new Promise(resolve => setTimeout(resolve, 80));
+                v1SyncAllReportEditorsToModel();
+                syncV1PdfSelectionFromDom();
+
+                const sourceFileId = String(window.currentFileId || 'latest_report');
+                const timestamp = Date.now();
+                const localSave = await saveToDB(reportData, timestamp, { deferCloud: true, markCloudDirty: false });
+                if (!localSave?.localSaved) throw new Error('CURRENT_LOCAL_SAVE_FAILED');
+                const current = await loadFromDB(sourceFileId);
+                if (!current) throw new Error('CURRENT_LOCAL_REPORT_NOT_FOUND');
+
+                const version = JSON.parse(JSON.stringify(current));
+                version.id = `report_version_${timestamp}_${Math.floor(Math.random() * 1000)}`;
+                version.timestamp = timestamp;
+                version.localVersion = true;
+                version.sourceFileId = sourceFileId;
+                version.savedVersionAt = new Date(timestamp).toISOString();
+                delete version.v7Recovery;
+                await v1PutSavedReport(version);
+
+                showToast('已新增一份獨立本機保存版本；目前月報未切換');
+                renderV1HistoryPane();
+                return version.id;
+            } catch (error) {
+                console.error(error);
+                showToast('保存獨立本機版本失敗：' + String(error?.message || error));
+                return null;
+            } finally {
+                V1_LOCAL_VERSION_SAVE_ACTIVE = false;
+                if (button && document.contains(button)) button.disabled = false;
+            }
+        }
+
         async function v1LoadReportById(fileId) {
             const saved = await loadFromDB(fileId);
             if (!saved) { showToast('找不到該月報'); return; }
@@ -5831,6 +5898,11 @@
                 document.getElementById('endMonth').value = saved.period.endM;
                 document.getElementById('endDay').value = saved.period.endD;
             }
+            const fontEn = document.getElementById('globalFontEnSelector');
+            const fontZh = document.getElementById('globalFontZhSelector');
+            if (fontEn && saved.globalFontEn && Array.from(fontEn.options).some(option => option.value === saved.globalFontEn)) fontEn.value = saved.globalFontEn;
+            if (fontZh && saved.globalFontZh && Array.from(fontZh.options).some(option => option.value === saved.globalFontZh)) fontZh.value = saved.globalFontZh;
+            changeGlobalFont({ persist: false });
             renderTable();
             v1EnsureModuleFields();
             renderV1HistoryPane();
@@ -5874,6 +5946,7 @@
                     const data = Array.isArray(row.reportData) ? row.reportData : (Array.isArray(row.data) ? row.data : []);
                     const selected = data.filter(x => x.selectedForPdf !== false).length;
                     const active = row.id === window.currentFileId;
+                    const localVersion = row.localVersion === true || /^report_version_/.test(String(row.id || ''));
                     const localBytes = v7JsonByteLength(row);
                     const cloudReport = v7FindCloudMonthlyReport(row.id);
                     const sizeText = [
@@ -5884,7 +5957,7 @@
                     return `
                         <div class="v1-module-row" style="grid-template-columns:1fr auto; border:1px solid #e2e8f0; border-radius:10px; padding:9px; margin-bottom:7px; background:${active ? '#eef2ff' : '#fff'};">
                             <div>
-                                <div class="v1-module-title">${active ? '✅ ' : ''}${v2RecordText(row.title || '未命名月報')}</div>
+                                <div class="v1-module-title">${active ? '✅ ' : ''}${v2RecordText(row.title || '未命名月報')}${localVersion ? ' <span class="text-xs text-indigo-600">（保存版本）</span>' : ''}</div>
                                 <div class="v1-module-meta">ID：${v2RecordText(row.id)}　｜　日期：${v2RecordText(row.date || '未填')}　｜　模塊：${data.length}　｜　PDF 已選：${selected}　｜　更新：${v2RecordText(v1FormatTime(row.timestamp))}</div>
                                 <div class="v1-module-meta">${sizeText}</div>
                             </div>
@@ -5908,7 +5981,7 @@
             root.innerHTML = `
                 <div class="v1-page-card">
                     <h2 class="v1-page-title"><i class="fas fa-clock-rotate-left mr-2"></i>歷史 / 備份</h2>
-                    <div class="v1-page-subtitle">本地歷史月報清單，可建立副本、切換舊月報；正式備份請優先使用完整 JSON / Excel，雲端協作請到「數據管理」。</div>
+                    <div class="v1-page-subtitle">可把目前狀態獨立保存到本地歷史、建立下一份工作副本，或切換至舊月報；正式備份請優先使用完整 JSON / Excel。</div>
                     <div class="v1-history-grid">
                         <div class="v1-category-card">
                             <div class="v1-category-title mb-2">目前月報</div>
@@ -5922,12 +5995,12 @@
                         <div class="v1-category-card">
                             <div class="v1-category-title mb-2">備份 / 版本操作</div>
                             <div class="v1-action-row">
-                                <button class="v1-small-btn v1-primary-btn" onmousedown="if (window.MonthlyV7App?.isActive?.()) event.preventDefault()" onclick="manualSave()"><i class="fas fa-save mr-1"></i>保存目前月報</button>
+                                <button id="v1SaveCurrentVersion" class="v1-small-btn v1-primary-btn" onclick="v1SaveCurrentReportVersion()" title="新增一份獨立本機保存版本，不切換目前月報"><i class="fas fa-save mr-1"></i>保存目前月報</button>
                                 <button class="v1-small-btn" onclick="v1CreateReportCopy()"><i class="fas fa-copy mr-1"></i>建立副本</button>
                                 <button class="v1-small-btn" onclick="v4ExportLocalBundleJson()"><i class="fas fa-file-export mr-1"></i>匯出完整 JSON</button>
                                 <button class="v1-small-btn" onclick="exportExcel()"><i class="fas fa-file-excel mr-1"></i>匯出 Excel</button>
                             </div>
-                            <div class="text-xs text-gray-500">提示：如果要做下個月報，建議先建立副本，再修改日期與內容。</div>
+                            <div class="text-xs text-gray-500">保存目前月報：新增獨立本機版本且不切換。建立副本：新增並立即切換到可繼續編輯的工作月報。</div>
                         </div>
                     </div>
                     <div class="v1-category-card mt-3">

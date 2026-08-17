@@ -10,7 +10,7 @@
   'use strict';
 
   const BUCKET_NAME = 'report-assets';
-  const MONTHLY_BUILD_ID = '7.5.0';
+  const MONTHLY_BUILD_ID = '7.6.0';
   const TOPIC_BUILD_ID = '1.11.0';
   const CACHE_CONTROL_SECONDS = '31536000';
   const DEFAULT_TIMEOUT_MS = 60000;
