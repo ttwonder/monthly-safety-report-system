@@ -93,6 +93,28 @@ test('Excel rows轉回topic內容時保留項次順序、版型與PDF設定', ()
   assert.equal(content.modules[1].pdfOrder, 7);
 });
 
+test('三欄與四欄在normalize及Excel往返時完整保留', () => {
+  const source = core.normalizeTopicContent({
+    title: '多欄專題', reportDate: '2026-08-17',
+    modules: [{
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', title: '四欄內容',
+      colLayout: '1:1:1:1', colCount: 4, columns: ['第一欄', '第二欄', '第三欄', '第四欄']
+    }]
+  });
+  assert.equal(source.modules[0].colCount, 4);
+  assert.deepEqual(source.modules[0].columns, ['第一欄', '第二欄', '第三欄', '第四欄']);
+  const rows = editor.contentToWorkbookRows(source);
+  assert.equal(rows[0].版型, '1:1:1:1');
+  assert.deepEqual(
+    [rows[0].欄1HTML, rows[0].欄2HTML, rows[0].欄3HTML, rows[0].欄4HTML],
+    ['第一欄', '第二欄', '第三欄', '第四欄']
+  );
+  const restored = editor.workbookRowsToContent(rows, core.createBlankTopicContent(), () => 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+  assert.equal(restored.modules[0].colLayout, '1:1:1:1');
+  assert.equal(restored.modules[0].colCount, 4);
+  assert.deepEqual(restored.modules[0].columns, ['第一欄', '第二欄', '第三欄', '第四欄']);
+});
+
 test('Excel export不把附件base64資料嵌入儲存格', () => {
   const content = core.createBlankTopicContent({ title: '附件專題', reportDate: '2026-08-16' });
   content.modules[0].attachments = [{

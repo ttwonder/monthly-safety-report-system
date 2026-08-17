@@ -1278,6 +1278,75 @@ test('專題PDF保留編輯頁雙欄內物件比例與同行分組', async ({ pa
   await testInfo.attach('topic-wysiwyg-portrait.pdf', { body: pdf, contentType: 'application/pdf' });
 });
 
+test('三欄與四欄版型可保存重開並完整進入PDF', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '三欄四欄專題');
+  await editor.setViewportSize({ width: 1700, height: 1100 });
+  const layout = editor.locator('[data-module-layout]').first();
+  await expect(layout.locator('option')).toHaveText([
+    '單欄', '雙欄 1:1', '雙欄 1:2', '雙欄 2:1', '三欄 1:1:1', '四欄 1:1:1:1'
+  ]);
+
+  await layout.selectOption('1:1:1');
+  await expect(editor.locator('.topic-module').first().locator('.topic-editable')).toHaveCount(3);
+  for (let index = 0; index < 3; index += 1) {
+    await editor.locator('.topic-module').first().locator('.topic-editable').nth(index).fill(`三欄內容${index + 1}`);
+  }
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 2);
+  await editor.reload();
+  await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+  await expect(editor.locator('[data-module-layout]').first()).toHaveValue('1:1:1');
+  await expect(editor.locator('.topic-module').first().locator('.topic-editable')).toHaveText([
+    '三欄內容1', '三欄內容2', '三欄內容3'
+  ]);
+
+  await editor.locator('[data-module-layout]').first().selectOption('1:1:1:1');
+  await expect(editor.locator('.topic-module').first().locator('.topic-editable')).toHaveCount(4);
+  await editor.locator('.topic-module').first().locator('.topic-editable').nth(3).fill('四欄新增內容4');
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 3);
+  await editor.reload();
+  await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
+  await expect(editor.locator('[data-module-layout]').first()).toHaveValue('1:1:1:1');
+  await expect(editor.locator('.topic-module').first().locator('.topic-editable')).toHaveText([
+    '三欄內容1', '三欄內容2', '三欄內容3', '四欄新增內容4'
+  ]);
+
+  await editor.locator('#topicPdfOrientation').selectOption('landscape');
+  await editor.evaluate(() => {
+    window.__topicFourColumnPrintObserved = false;
+    window.print = () => { window.__topicFourColumnPrintObserved = true; };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicFourColumnPrintObserved)).toBe(true);
+  const print = await editor.evaluate(() => {
+    const columns = Array.from(document.querySelectorAll('#topicPrintArea .topic-print-column'));
+    return {
+      layout: document.querySelector('#topicPrintArea .topic-print-columns').dataset.layout,
+      count: columns.length,
+      texts: columns.map((column) => column.textContent.trim())
+    };
+  });
+  expect(print).toEqual({
+    layout: '1:1:1:1', count: 4,
+    texts: ['三欄內容1', '三欄內容2', '三欄內容3', '四欄新增內容4']
+  });
+  await editor.emulateMedia({ media: 'print' });
+  await editor.evaluate(() => document.body.classList.add('topic-printing-report'));
+  const geometry = await editor.evaluate(() => {
+    const columns = Array.from(document.querySelectorAll('#topicPrintArea .topic-print-column'));
+    const widths = columns.map((column) => column.getBoundingClientRect().width);
+    return {
+      widths,
+      overflow: columns.map((column) => column.scrollWidth - column.clientWidth)
+    };
+  });
+  expect(Math.max(...geometry.widths) - Math.min(...geometry.widths)).toBeLessThanOrEqual(1);
+  expect(geometry.overflow.every((value) => value <= 1)).toBe(true);
+});
+
 test('專題PDF在100與80縮放下右欄100%卡片完整落在實體欄框內', async ({ page }, testInfo) => {
   await enterAndLogin(page, 'owner', 'owner-pass');
   const list = await openTopicList(page);

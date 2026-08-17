@@ -12,7 +12,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi, assetApi) {
   'use strict';
 
-  const BUILD_ID = '1.10.0';
+  const BUILD_ID = '1.11.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -261,7 +261,10 @@
   }
 
   function normalizeLayout(value) {
-    return ['1', '1:1', '1:2', '2:1'].includes(String(value || '')) ? String(value) : '1';
+    return core.normalizeLayout(value);
+  }
+  function layoutColumnCount(value) {
+    return core.layoutColumnCount(value);
   }
 
   function contentToWorkbookRows(content) {
@@ -273,6 +276,8 @@
       版型: module.colLayout,
       欄1HTML: module.columns[0] || '',
       欄2HTML: module.columns[1] || '',
+      欄3HTML: module.columns[2] || '',
+      欄4HTML: module.columns[3] || '',
       PDF勾選: module.selectedForPdf ? '是' : '否',
       PDF順序: Number(module.pdfOrder || index + 1),
       附件名稱: (module.attachments || []).map((attachment) => attachment.name).join('；')
@@ -286,15 +291,16 @@
       : () => (root.crypto && root.crypto.randomUUID ? root.crypto.randomUUID() : `module-${Date.now()}-${Math.random()}`);
     const baseById = new Map(base.modules.map((module) => [module.id, module]));
     const normalizedRows = (Array.isArray(rows) ? rows : [])
-      .filter((row) => row && (row.標題 || row['欄1HTML'] || row['欄2HTML']))
+      .filter((row) => row && (row.標題 || [1, 2, 3, 4].some((number) => row[`欄${number}HTML`])))
       .sort((a, b) => Number(a.項次 || 0) - Number(b.項次 || 0));
     const modules = normalizedRows.map((row, index) => {
       const id = String(row.模塊ID || '').trim() || makeId();
       const prior = baseById.get(id);
       const layout = normalizeLayout(row.版型);
-      const columnCount = layout === '1' ? 1 : 2;
-      const columns = [sanitizeStoredHtml(row.欄1HTML || '')];
-      if (columnCount === 2) columns.push(sanitizeStoredHtml(row.欄2HTML || ''));
+      const columnCount = layoutColumnCount(layout);
+      const columns = Array.from({ length: columnCount }, (_unused, columnIndex) => (
+        sanitizeStoredHtml(row[`欄${columnIndex + 1}HTML`] || '')
+      ));
       return {
         id,
         icon: prior && prior.icon || 'fas fa-file-lines',
@@ -610,7 +616,10 @@
       const layout = root.document.createElement('select');
       layout.className = 'topic-tool-select';
       layout.dataset.moduleLayout = module.id;
-      [['1', '單欄'], ['1:1', '雙欄 1:1'], ['1:2', '雙欄 1:2'], ['2:1', '雙欄 2:1']].forEach(([value, label]) => {
+      [
+        ['1', '單欄'], ['1:1', '雙欄 1:1'], ['1:2', '雙欄 1:2'], ['2:1', '雙欄 2:1'],
+        ['1:1:1', '三欄 1:1:1'], ['1:1:1:1', '四欄 1:1:1:1']
+      ].forEach(([value, label]) => {
         const option = root.document.createElement('option');
         option.value = value; option.textContent = label; option.selected = module.colLayout === value;
         layout.appendChild(option);
@@ -727,17 +736,18 @@
       const moduleId = article.dataset.moduleId;
       const prior = moduleById(moduleId) || {};
       const layout = normalizeLayout(article.querySelector('[data-module-layout]').value);
+      const columnCount = layoutColumnCount(layout);
       const columns = Array.from(article.querySelectorAll('.topic-editable'))
-        .slice(0, layout === '1' ? 1 : 2)
+        .slice(0, columnCount)
         .map((editor) => serializeEditorHtml(editor));
-      while (columns.length < (layout === '1' ? 1 : 2)) columns.push('');
+      while (columns.length < columnCount) columns.push('');
       return {
         id: moduleId,
         icon: prior.icon || 'fas fa-file-lines',
         iconColor: prior.iconColor || '#4f46e5',
         title: article.querySelector('.topic-module-title').value.trim() || `專題內容 ${index + 1}`,
         colLayout: layout,
-        colCount: layout === '1' ? 1 : 2,
+        colCount: columnCount,
         columns,
         attachments: clone(prior.attachments || []),
         selectedForPdf: article.querySelector('[data-module-pdf]').checked,
@@ -1443,17 +1453,30 @@
     return editor && editor.closest('.topic-module')?.dataset.moduleId || state.currentContent.modules[0]?.id || '';
   }
   function changeLayout(moduleId, layout) {
+    const article = Array.from($('topicModules').querySelectorAll('.topic-module'))
+      .find((candidate) => candidate.dataset.moduleId === moduleId);
+    const layoutControl = article && article.querySelector('[data-module-layout]');
+    const currentLayout = normalizeLayout(moduleById(moduleId)?.colLayout || '1');
+    if (layoutControl) layoutControl.value = currentLayout;
     const content = collectContent();
     const module = content.modules.find((item) => item.id === moduleId);
     if (!module) return;
     const next = normalizeLayout(layout);
-    if (module.columns.length > 1 && next === '1') {
-      if (!root.confirm('切換單欄會把右欄接到左欄下方，是否繼續？')) {
+    const nextCount = layoutColumnCount(next);
+    const currentColumns = module.columns.slice();
+    if (nextCount < currentColumns.length) {
+      if (!root.confirm(`切換${nextCount}欄會把右側欄內容接到最後保留欄下方，是否繼續？`)) {
         renderContent(content); return;
       }
-      module.columns = [`${module.columns[0]}<hr>${module.columns[1]}`];
-    } else if (module.columns.length === 1 && next !== '1') module.columns.push('');
-    module.colLayout = next; module.colCount = next === '1' ? 1 : 2;
+      const kept = currentColumns.slice(0, nextCount);
+      const removed = currentColumns.slice(nextCount).filter((value) => String(value || '').trim());
+      if (removed.length) kept[nextCount - 1] = [kept[nextCount - 1], ...removed].filter(Boolean).join('<hr>');
+      module.columns = kept;
+    } else {
+      while (currentColumns.length < nextCount) currentColumns.push('');
+      module.columns = currentColumns.slice(0, nextCount);
+    }
+    module.colLayout = next; module.colCount = nextCount;
     renderContent(content); markDirty();
   }
   function addModule() {

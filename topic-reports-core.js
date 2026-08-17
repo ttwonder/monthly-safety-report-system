@@ -9,10 +9,11 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, assetApi) {
   'use strict';
 
-  const BUILD_ID = '1.10.0';
+  const BUILD_ID = '1.11.0';
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
   const SYSTEM_NUMBER_PATTERN = /^SR-\d{8}-\d{3}$/;
+  const TOPIC_LAYOUTS = Object.freeze(['1', '1:1', '1:2', '2:1', '1:1:1', '1:1:1:1']);
   const DEFAULT_MODULE_HTML = '<p>請輸入專題內容...</p>';
 
   function clone(value) {
@@ -52,7 +53,11 @@
 
   function normalizeLayout(value) {
     const text = String(value || '1').trim();
-    return /^\d+(?::\d+){0,2}$/.test(text) ? text : '1';
+    return TOPIC_LAYOUTS.includes(text) ? text : '1';
+  }
+
+  function layoutColumnCount(value) {
+    return normalizeLayout(value).split(':').length;
   }
 
   function normalizeAttachment(value) {
@@ -96,8 +101,8 @@
   function normalizeModule(value, index) {
     const module = value && typeof value === 'object' ? value : {};
     const layout = normalizeLayout(module.colLayout);
-    const count = layout.split(':').length;
-    const columns = Array.isArray(module.columns) ? module.columns.slice(0, 3).map((entry) => String(entry || '')) : [''];
+    const count = layoutColumnCount(layout);
+    const columns = Array.isArray(module.columns) ? module.columns.slice(0, 4).map((entry) => String(entry || '')) : [''];
     while (columns.length < count) columns.push('');
     return {
       id: String(module.id || uuid()),
@@ -253,11 +258,14 @@
   return Object.freeze({
     BUILD_ID,
     DEFAULT_MODULE_HTML,
+    TOPIC_LAYOUTS,
     UUID_PATTERN,
     SYSTEM_NUMBER_PATTERN,
     clone,
     taipeiDate,
     formatTopicSystemNumber,
+    normalizeLayout,
+    layoutColumnCount,
     createBlankTopicContent,
     normalizeTopicContent,
     topicDraftKey,
