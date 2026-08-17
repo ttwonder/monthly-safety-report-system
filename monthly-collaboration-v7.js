@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.4.0';
+  const buildId = '7.5.0';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -15,7 +15,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, clientApi, buildId, browserBuildHandshakeRequired) {
   'use strict';
 
-  const REQUIRED_BUILD_ASSETS = Object.freeze(['page', 'config', 'core', 'client', 'v7']);
+  const REQUIRED_BUILD_ASSETS = Object.freeze(['page', 'config', 'assets', 'core', 'client', 'v7']);
 
   function startupBuildReceipt() {
     const pageBuild = String(root && root.MONTHLY_REPORT_PAGE_BUILD || '').trim();
@@ -324,6 +324,7 @@
         builds: Object.freeze({
           page: buildReceipt.pageBuild,
           config: buildReceipt.assets.config,
+          assets: buildReceipt.assets.assets,
           core: buildReceipt.assets.core,
           client: buildReceipt.assets.client,
           v7: buildReceipt.assets.v7

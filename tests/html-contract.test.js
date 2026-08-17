@@ -29,6 +29,7 @@ test('正式 HTML 對所有 startup-coupled 本機 script 使用同一 build cac
   for (const [name, src] of [
     ['config', './supabase-config.js'],
     ['vendor', './vendor/supabase-2.112.2.js'],
+    ['assets', './report-assets-storage.js'],
     ['core', './monthly-collaboration-core.js'],
     ['client', './monthly-collaboration-client.js'],
     ['v7', './monthly-collaboration-v7.js']
@@ -53,19 +54,20 @@ test('正式 HTML 對所有 startup-coupled 本機 script 使用同一 build cac
   assert.match(html, /帳號驗證已通過，但雲端資料載入失敗/);
 });
 
-test('page、config、core、client 與 V7 宣告同一 build ID 並提供 mixed-build 安全重載', async () => {
-  const buildId = '7.4.0';
+test('page、config、assets、core、client 與 V7 宣告同一 build ID 並提供 mixed-build 安全重載', async () => {
+  const buildId = '7.5.0';
   const html = await readFile(join(root, 'index.html'), 'utf8');
-  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.4\.0'/);
+  assert.match(html, /MONTHLY_REPORT_PAGE_BUILD = '7\.5\.0'/);
   for (const [file, asset] of [
     ['supabase-config.js', 'config'],
+    ['report-assets-storage.js', 'assets'],
     ['monthly-collaboration-core.js', 'core'],
     ['monthly-collaboration-client.js', 'client'],
     ['monthly-collaboration-v7.js', 'v7']
   ]) {
     const source = await readFile(join(root, file), 'utf8');
     assert.match(source, new RegExp(buildId.replace(/\./g, '\\.')), file);
-    assert.match(source, new RegExp(`${asset}: (?:buildId|'${buildId.replace(/\./g, '\\.')}')`), file);
+    assert.match(source, new RegExp(`${asset}: (?:buildId|api\\.MONTHLY_BUILD_ID|'${buildId.replace(/\./g, '\\.')}')`), file);
   }
   assert.match(html, /MIXED_ASSET_BLOCKED/);
   assert.match(html, /id="site-safe-reload"/);

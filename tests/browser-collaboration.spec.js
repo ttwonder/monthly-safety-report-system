@@ -496,6 +496,7 @@ test('專題統計暫時失敗時仍保留雲端月報與本機月報分區', as
 
 for (const mixedAsset of [
   { name: 'config', url: '**/supabase-config.js*', declaration: "config: 'stale-build'" },
+  { name: 'assets', url: '**/report-assets-storage.js*', declaration: "assets: 'stale-build'" },
   { name: 'core', url: '**/monthly-collaboration-core.js*', declaration: "core: 'stale-build'" },
   { name: 'client', url: '**/monthly-collaboration-client.js*', declaration: "client: 'stale-build'" },
   { name: 'V7', url: '**/monthly-collaboration-v7.js*', declaration: "v7: 'stale-build'" }
@@ -526,7 +527,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.4.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.5.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -566,7 +567,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.4.0'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.5.0'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -769,7 +770,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.4.0', config: '7.4.0', core: '7.4.0', client: '7.4.0', v7: '7.4.0'
+      page: '7.5.0', config: '7.5.0', assets: '7.5.0', core: '7.5.0', client: '7.5.0', v7: '7.5.0'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -6787,4 +6788,98 @@ test('其他workspace同entity ID的合法pending不阻擋目前同步且不會�
   await expect(page.locator('#v7-sync-discard')).toBeEnabled();
   await page.locator('#v7-sync-cancel').click();
   expect(await page.evaluate(({ storageKey }) => localStorage.getItem(storageKey), seeded)).toBe(seeded.raw);
+});
+
+test('月報新圖片與附件只寫入公開Storage且舊Base64仍可讀、移除引用不刪object', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+
+  const legacy = await page.evaluate(() => {
+    const data = 'data:text/plain;base64,QUJD';
+    const normalized = normalizeData([{
+      id: 'legacy-module', title: '舊附件', colLayout: '1', columns: [
+        '<img class="content-inline-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">'
+      ], attachments: [{ name: 'legacy.txt', data }]
+    }])[0];
+    return {
+      attachment: normalized.attachments[0],
+      href: monthlyAttachmentHref(normalized.attachments[0]),
+      imageHtml: normalized.columns[0]
+    };
+  });
+  expect(legacy.attachment).toEqual({ name: 'legacy.txt', data: 'data:text/plain;base64,QUJD' });
+  expect(legacy.href).toBe('data:text/plain;base64,QUJD');
+  expect(legacy.imageHtml).toContain('data:image/gif;base64');
+  await page.evaluate(() => {
+    reportData[0].attachments = [{ name: 'legacy.txt', data: 'data:text/plain;base64,QUJD' }];
+    renderTable();
+  });
+  await expect(page.locator('#tableBody tr').first().locator('.attachment-name').filter({ hasText: 'legacy.txt' })).toHaveCount(1);
+
+  const editable = page.locator('#tableBody .editable-div[data-col-index="0"]').first();
+  await editable.click();
+  const imageInput = page.locator('input[type="file"][onchange="insertImagesToEditor(event)"]');
+  await imageInput.setInputFiles({
+    name: 'future-monthly.png', mimeType: 'image/png',
+    buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2mAAAAABJRU5ErkJggg==', 'base64')
+  });
+  const image = editable.locator('img.content-inline-img');
+  await expect(image).toHaveCount(1);
+  await expect(image).toHaveAttribute('src', /\/storage\/v1\/object\/public\/report-assets\/monthly\/[^/]+\/images\/[0-9a-f-]+\.png$/);
+  await expect(image).toHaveAttribute('data-report-asset-bucket', 'report-assets');
+  await expect.poll(() => image.evaluate((node) => node.complete && node.naturalWidth > 0)).toBe(true);
+  await page.locator('#mainTitle').click();
+
+  const attachmentInput = page.locator('#tableBody tr').first().locator('.module-attach-btn input[type="file"]');
+  await attachmentInput.setInputFiles({
+    name: 'future-monthly.txt', mimeType: 'text/plain', buffer: Buffer.from('future monthly attachment', 'utf8')
+  });
+  await expect(page.locator('#tableBody tr').first().locator('.attachment-name').filter({ hasText: 'future-monthly.txt' })).toHaveCount(1);
+
+  const local = await page.evaluate(() => ({
+    column: reportData[0].columns[0],
+    attachment: reportData[0].attachments.find((item) => item.url),
+    legacy: reportData[0].attachments.find((item) => item.data)
+  }));
+  expect(local.column).toContain('/storage/v1/object/public/report-assets/monthly/');
+  expect(local.column).not.toContain('data:image/png;base64');
+  expect(local.attachment.bucket).toBe('report-assets');
+  expect(local.attachment.path).toMatch(/^monthly\/[^/]+\/attachments\/[0-9a-f-]+\.txt$/);
+  expect(local.attachment.url).toContain('/storage/v1/object/public/report-assets/monthly/');
+  expect(local.attachment.data).toBeUndefined();
+  expect(local.legacy.data).toBe('data:text/plain;base64,QUJD');
+
+  await expect.poll(async () => (await (await request.get('/__fake_state')).json()).storageObjects.length).toBe(2);
+  const cloud = await (await request.get('/__fake_state')).json();
+  expect(cloud.modules[0].payload.columns[0]).toContain('/storage/v1/object/public/report-assets/monthly/');
+  expect(cloud.modules[0].payload.attachments.find((item) => item.url).url).toContain('/storage/v1/object/public/report-assets/monthly/');
+  expect(cloud.modules[0].payload.attachments.find((item) => item.data).data).toBe('data:text/plain;base64,QUJD');
+  expect(cloud.storageObjects.every((object) => object.upsert === false)).toBe(true);
+
+  await page.reload();
+  const row = page.locator('#tableBody tr').first();
+  await expect(row.locator('.attachment-name').filter({ hasText: 'legacy.txt' })).toHaveCount(1, { timeout: 20000 });
+  await expect(row.locator('.attachment-name').filter({ hasText: 'future-monthly.txt' })).toHaveCount(1);
+  await expect(row.locator('img.content-inline-img')).toHaveAttribute('src', /\/storage\/v1\/object\/public\/report-assets\/monthly\//);
+  const storageAttachment = row.locator('.attachment-link').filter({ hasText: 'future-monthly.txt' }).locator('a');
+  await expect(storageAttachment).toHaveAttribute('href', /\?download=future-monthly\.txt$/);
+  const downloadPromise = page.waitForEvent('download');
+  await storageAttachment.click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('future-monthly.txt');
+
+  page.once('dialog', (dialog) => dialog.accept());
+  await row.locator('.attachment-link').filter({ hasText: 'future-monthly.txt' }).locator('.attachment-delete').click();
+  await expect(row.locator('.attachment-name').filter({ hasText: 'future-monthly.txt' })).toHaveCount(0);
+  await expect(row.locator('.attachment-name').filter({ hasText: 'legacy.txt' })).toHaveCount(1);
+  expect((await (await request.get('/__fake_state')).json()).storageObjects).toHaveLength(2);
+
+  await request.post('/__fake_fail_storage?count=1');
+  await editable.click();
+  await imageInput.setInputFiles({
+    name: 'must-not-fallback.png', mimeType: 'image/png',
+    buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2mAAAAABJRU5ErkJggg==', 'base64')
+  });
+  await expect(page.locator('#saveToastMsg')).toContainText('Storage 上傳失敗');
+  await expect(editable.locator('img.content-inline-img')).toHaveCount(1);
+  expect((await (await request.get('/__fake_state')).json()).storageObjects).toHaveLength(2);
 });

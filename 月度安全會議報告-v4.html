@@ -15,11 +15,12 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.4.0';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.5.0';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
             vendor: './vendor/supabase-2.112.2.js',
+            assets: './report-assets-storage.js',
             core: './monthly-collaboration-core.js',
             client: './monthly-collaboration-client.js',
             v7: './monthly-collaboration-v7.js'
@@ -388,6 +389,7 @@
                 if (!item) return;
                 item.title = sanitizeModuleTitleHtml(item.title || '');
                 if (Array.isArray(item.columns)) item.columns = item.columns.map(col => sanitizeTrendChartHtml(col || ''));
+                if (Array.isArray(item.attachments)) item.attachments = item.attachments.map(normalizeMonthlyAttachment).filter(Boolean);
             });
             return data;
         }
@@ -2381,6 +2383,7 @@
 
     <script>
         window.monthlyReportWriteStartupScript('vendor');
+        window.monthlyReportWriteStartupScript('assets');
         window.monthlyReportWriteStartupScript('core');
         window.monthlyReportWriteStartupScript('client');
         window.monthlyReportWriteStartupScript('v7');
@@ -2728,6 +2731,79 @@
             });
         }
 
+        function normalizeMonthlyAttachment(value) {
+            if (!value || typeof value !== 'object') return null;
+            const name = String(value.name || '').slice(0, 240);
+            if (!name) return null;
+            const assetApi = window.ReportAssetsStorage;
+            const reference = assetApi?.normalizePublicAssetReference?.(value, {
+                supabaseUrl: window.MONTHLY_REPORT_SUPABASE_CONFIG?.supabaseUrl,
+                expectedDomain: 'monthly',
+                expectedKind: 'attachments'
+            });
+            if (reference) {
+                return {
+                    name,
+                    type: String(value.type || 'application/octet-stream').slice(0, 160),
+                    size: Number.isFinite(Number(value.size)) && Number(value.size) >= 0 ? Number(value.size) : 0,
+                    bucket: reference.bucket,
+                    path: reference.path,
+                    url: reference.url
+                };
+            }
+            const data = String(value.data || value.dataUrl || '');
+            if (!/^data:[^;,]+;base64,[a-z0-9+/=\s]+$/i.test(data)) return null;
+            return { name, data };
+        }
+
+        function monthlyAttachmentHref(value) {
+            const normalized = normalizeMonthlyAttachment(value);
+            return normalized ? String(normalized.url || normalized.data || '') : '';
+        }
+
+        function monthlyAttachmentDownloadHref(value) {
+            const normalized = normalizeMonthlyAttachment(value);
+            if (!normalized) return '';
+            if (!normalized.url) return String(normalized.data || '');
+            return window.ReportAssetsStorage.publicAssetDownloadUrl(normalized, normalized.name, {
+                supabaseUrl: window.MONTHLY_REPORT_SUPABASE_CONFIG?.supabaseUrl,
+                expectedDomain: 'monthly',
+                expectedKind: 'attachments'
+            });
+        }
+
+        function currentMonthlyAssetReportId() {
+            return window.MonthlyV7App?.client?.snapshot?.report?.id
+                || window.MonthlyV7App?.client?.report?.id
+                || window.currentFileId
+                || 'report';
+        }
+
+        async function uploadReportAssetForMonthly(file, kind) {
+            const app = window.MonthlyV7App;
+            if (!app?.isWriteReady?.()) {
+                const error = new Error('REPORT_ASSET_CLIENT_NOT_READY');
+                error.code = 'REPORT_ASSET_CLIENT_NOT_READY';
+                throw error;
+            }
+            return window.ReportAssetsStorage.uploadReportAsset({
+                client: app.transport?.client,
+                supabaseUrl: window.MONTHLY_REPORT_SUPABASE_CONFIG?.supabaseUrl,
+                domain: 'monthly',
+                reportId: currentMonthlyAssetReportId(),
+                kind,
+                file
+            });
+        }
+
+        function monthlyAssetErrorLabel(error) {
+            const code = String(error?.code || error?.message || 'REPORT_ASSET_UPLOAD_FAILED');
+            if (code === 'REPORT_ASSET_CLIENT_NOT_READY') return '請先登入身份；Storage 尚未就緒，未插入檔案。';
+            if (code === 'REPORT_ASSET_UPLOAD_TIMEOUT') return 'Storage 上傳逾時，未插入檔案；請稍後重試。';
+            if (code === 'REPORT_ASSET_PUBLIC_URL_INVALID') return 'Storage public URL 驗證失敗，未插入檔案。';
+            return 'Storage 上傳失敗，未插入檔案；原報告內容未變更。';
+        }
+
         function normalizeData(dataArray) {
             return dataArray.map(item => {
                 item.title = sanitizeModuleTitleHtml(item.title || '');
@@ -2737,6 +2813,7 @@
                     typeof column === 'string' ? normalizeInsertedHalfWidthHtml(column) : column
                 ));
                 if (!item.colLayout) item.colLayout = item.colCount ? Array(item.colCount).fill('1').join(':') : '1';
+                if (Array.isArray(item.attachments)) item.attachments = item.attachments.map(normalizeMonthlyAttachment).filter(Boolean);
                 if (typeof item.selectedForPdf === 'undefined') item.selectedForPdf = true;
                 if (typeof item.pdfOrder === 'undefined') item.pdfOrder = 0;
                 return item;
@@ -3019,6 +3096,7 @@
         window.deleteAttachment = function(btn, fileIndex, rowIndex) {
             if(confirm("確定要刪除這個附件嗎？")) {
                 if(reportData[rowIndex] && reportData[rowIndex].attachments) {
+                    // 第一版只移除報告引用，不刪除 immutable Storage object。
                     reportData[rowIndex].attachments.splice(fileIndex, 1);
                     saveToDB(reportData);
                     renderTable();
@@ -3041,15 +3119,20 @@
                 let attachmentsHtml = '<div class="mt-1 flex flex-wrap gap-1">';
                 if (item.attachments) {
                     item.attachments.forEach((att, attIdx) => {
+                        const href = monthlyAttachmentDownloadHref(att);
+                        if (!href) return;
+                        const safeNameText = escapeHtmlText(att.name || '附件');
+                        const safeNameAttr = v1EscapeAttr(att.name || '附件');
+                        const storageLinkAttrs = att.url ? ' rel="noopener noreferrer"' : '';
                         attachmentsHtml += `
-                            <div class="attachment-link no-print" title="下載: ${att.name}">
-                                <a href="${att.data}" download="${att.name}" class="flex items-center text-pink-500 hover:text-pink-700">
+                            <div class="attachment-link no-print" title="下載: ${safeNameAttr}">
+                                <a href="${v1EscapeAttr(href)}" download="${safeNameAttr}"${storageLinkAttrs} class="flex items-center text-pink-500 hover:text-pink-700">
                                     <i class="fas fa-paperclip mr-1"></i>
-                                    <span class="attachment-name">${att.name}</span>
+                                    <span class="attachment-name">${safeNameText}</span>
                                 </a>
                                 <button onclick="window.deleteAttachment(this, ${attIdx}, ${index})" class="attachment-delete" title="刪除附件"><i class="fas fa-times"></i></button>
                             </div>
-                            <span class="attachment-link no-print" style="display:none;" print-display="inline-block">📎附件: ${att.name}</span>
+                            <span class="attachment-link no-print" style="display:none;" print-display="inline-block">📎附件: ${safeNameText}</span>
                         `;
                     });
                 }
@@ -3692,31 +3775,28 @@
         let activeBlock = null; 
         let activeHighlight = null; 
 
-        function insertImagesToEditor(event) {
+        async function insertImagesToEditor(event) {
             const files = event.target.files;
             if (!files || files.length === 0) return;
             showLoader();
             restoreSelection();
-            
-            const promises = Array.from(files).map(file => {
-                return new Promise((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = (e) => resolve(e.target.result);
-                    reader.readAsDataURL(file);
-                });
-            });
 
-            Promise.all(promises).then(bases => {
+            try {
+                const uploads = await Promise.all(Array.from(files).map(file => uploadReportAssetForMonthly(file, 'images')));
                 let html = '';
                 const layout = layoutStyle({ inlineWidth: '45%' });
-                bases.forEach(base64 => {
-                    html += `<img src="${base64}" class="content-inline-img ${layout.extraClass}" data-layout="${layout.dataLayout}" style="${layout.style}; cursor: pointer; border-radius: 4px;">`;
+                uploads.forEach(uploaded => {
+                    html += `<img src="${v1EscapeAttr(uploaded.url)}" class="content-inline-img ${layout.extraClass}" data-layout="${layout.dataLayout}" data-report-asset-bucket="${v1EscapeAttr(uploaded.bucket)}" data-report-asset-path="${v1EscapeAttr(uploaded.path)}" style="${layout.style}; cursor: pointer; border-radius: 4px;">`;
                 });
                 insertHtmlAtSelection(wrapInsertedHtmlForLayout(html));
-                hideLoader();
-                event.target.value = ''; 
+                showToast('圖片已上傳 Storage；離開編輯欄位後會保存報告引用。');
                 setTimeout(() => { document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div)); }, 10);
-            });
+            } catch (error) {
+                showToast(monthlyAssetErrorLabel(error));
+            } finally {
+                hideLoader();
+                event.target.value = '';
+            }
         }
 
         document.addEventListener('click', (e) => {
@@ -4137,24 +4217,23 @@
 
         // 舊版離線分享機制已移除；V5 正式備份請使用「數據管理 → 匯出完整 JSON」。
 
-        function handleFileUpload(event, index) {
+        async function handleFileUpload(event, index) {
             const files = event.target.files;
             if (!files || files.length === 0) return;
             showLoader();
             if (!reportData[index].attachments) reportData[index].attachments = [];
-            const promises = Array.from(files).map(file => {
-                return new Promise((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = (e) => resolve({ name: file.name, data: e.target.result });
-                    reader.readAsDataURL(file);
-                });
-            });
-            Promise.all(promises).then(async (newAtts) => {
+            try {
+                const newAtts = await Promise.all(Array.from(files).map(file => uploadReportAssetForMonthly(file, 'attachments')));
                 reportData[index].attachments = reportData[index].attachments.concat(newAtts);
                 await saveToDB(reportData);
                 renderTable();
+                showToast('附件已上傳 Storage 並保存報告引用。');
+            } catch (error) {
+                showToast(monthlyAssetErrorLabel(error));
+            } finally {
                 hideLoader();
-            });
+                event.target.value = '';
+            }
         }
 
         // 終極安全純文字萃取 (防止 undefined 報錯)
@@ -4461,7 +4540,7 @@
                 <button class="v1-tab-btn" data-v1-tab="history" onclick="switchV1Tab('history')"><i class="fas fa-clock-rotate-left mr-1"></i>歷史 / 備份</button>
                 <button class="v1-tab-btn" data-v1-tab="records" onclick="switchV1Tab('records')"><i class="fas fa-database mr-1"></i>資料記錄</button>
                 <button class="v1-tab-btn" data-v1-tab="cloud" onclick="switchV1Tab('cloud')"><i class="fas fa-shield-halved mr-1"></i>數據管理</button>
-                <a id="topicReportsEntry" class="v1-tab-btn v1-topic-entry" href="./topic-reports.html?v=1.8.0" target="topic-reports" aria-label="在獨立窗口開啟專題報告"><i class="fas fa-file-circle-plus mr-1"></i>專題報告</a>
+                <a id="topicReportsEntry" class="v1-tab-btn v1-topic-entry" href="./topic-reports.html?v=1.9.0" target="topic-reports" aria-label="在獨立窗口開啟專題報告"><i class="fas fa-file-circle-plus mr-1"></i>專題報告</a>
                 <span class="v1-mode-indicator ml-auto text-indigo-700 font-bold px-2">${window.MonthlyV7App?.isActive?.() ? 'V7：逐項 lease / CAS / Realtime' : 'V6：切換前相容模式'}</span>
             `;
 
@@ -6473,7 +6552,7 @@
         const V4_CLOUD_TABLE = 'monthly_report_cloud_data';
         const V4_LEGACY_LOCAL_SCOPE_KEY = 'monthly_report_legacy_local_authority_scope';
         const V4_LEGACY_SESSION_SCOPE_KEY = 'monthly_report_legacy_session_authority_scope';
-        const V7_REQUIRED_BUILD_ASSETS = Object.freeze(['page', 'config', 'core', 'client', 'v7']);
+        const V7_REQUIRED_BUILD_ASSETS = Object.freeze(['page', 'config', 'assets', 'core', 'client', 'v7']);
         const V7_SAFE_RELOAD_CONFIRM_MS = 30000;
         let V4_CLOUD_APPLYING = false;
         let V4_CLOUD_SAVING = false;

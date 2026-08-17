@@ -3,7 +3,8 @@
 
   const core = root.TopicReportsCore;
   const clientApi = root.TopicReportsClient;
-  const BUILD_ID = '1.8.0';
+  const assetApi = root.ReportAssetsStorage;
+  const BUILD_ID = '1.9.0';
   const CREATE_ATTEMPT_STORAGE_KEY = 'topic:v1:create-attempt';
   root.TOPIC_REPORT_ASSET_BUILDS = Object.assign({}, root.TOPIC_REPORT_ASSET_BUILDS, { page: BUILD_ID });
   const state = {
@@ -25,8 +26,8 @@
 
   function assertTopicAssetBuilds() {
     const builds = root.TOPIC_REPORT_ASSET_BUILDS || {};
-    const required = ['core', 'client', 'page'];
-    if (!core || !clientApi || required.some((key) => builds[key] !== BUILD_ID)) {
+    const required = ['assets', 'core', 'client', 'page'];
+    if (!assetApi || !core || !clientApi || required.some((key) => builds[key] !== BUILD_ID)) {
       throw new Error(`TOPIC_ASSET_BUILD_MISMATCH:${required.map((key) => `${key}=${builds[key] || 'missing'}`).join(',')}`);
     }
   }

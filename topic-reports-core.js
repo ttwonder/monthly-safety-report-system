@@ -1,14 +1,15 @@
 (function (root, factory) {
-  const api = factory();
+  const commonJs = typeof module === 'object' && module.exports;
+  const api = factory(root, commonJs ? require('./report-assets-storage.js') : root.ReportAssetsStorage);
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) {
     root.TopicReportsCore = api;
     root.TOPIC_REPORT_ASSET_BUILDS = Object.assign({}, root.TOPIC_REPORT_ASSET_BUILDS, { core: api.BUILD_ID });
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (root, assetApi) {
   'use strict';
 
-  const BUILD_ID = '1.8.0';
+  const BUILD_ID = '1.9.0';
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
   const SYSTEM_NUMBER_PATTERN = /^SR-\d{8}-\d{3}$/;
@@ -58,11 +59,31 @@
     if (!value || typeof value !== 'object') return null;
     const name = String(value.name || '').slice(0, 240);
     const dataUrl = String(value.dataUrl || value.data || '');
-    if (!name || !/^data:[^;,]+;base64,[a-z0-9+/=\s]+$/i.test(dataUrl)) return null;
+    const storageReference = assetApi && typeof assetApi.normalizePublicAssetReference === 'function'
+      ? assetApi.normalizePublicAssetReference(value, {
+        supabaseUrl: root && root.MONTHLY_REPORT_SUPABASE_CONFIG && root.MONTHLY_REPORT_SUPABASE_CONFIG.supabaseUrl,
+        expectedDomain: 'topic',
+        expectedKind: 'attachments'
+      })
+      : null;
+    if (!name || (!storageReference && !/^data:[^;,]+;base64,[a-z0-9+/=\s]+$/i.test(dataUrl))) return null;
+    const providedId = String(value.id || '');
+    const type = String(value.type || 'application/octet-stream').slice(0, 160);
+    const providedSize = Number.isFinite(Number(value.size)) && Number(value.size) >= 0 ? Number(value.size) : 0;
+    if (storageReference) {
+      return {
+        id: UUID_PATTERN.test(providedId) ? providedId.toLowerCase() : uuid(),
+        name,
+        type,
+        size: providedSize,
+        bucket: storageReference.bucket,
+        path: storageReference.path,
+        url: storageReference.url
+      };
+    }
     const mimeMatch = dataUrl.match(/^data:([^;,]+);base64,/i);
     const encoded = dataUrl.slice(dataUrl.indexOf(',') + 1).replace(/\s+/g, '');
     const calculatedSize = Math.max(0, Math.floor((encoded.length * 3) / 4) - ((encoded.match(/=+$/) || [''])[0].length));
-    const providedId = String(value.id || '');
     return {
       id: UUID_PATTERN.test(providedId) ? providedId.toLowerCase() : uuid(),
       name,

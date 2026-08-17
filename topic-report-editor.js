@@ -1,17 +1,18 @@
 (function (root, factory) {
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(root, commonJs ? require('./topic-reports-core.js') : root.TopicReportsCore,
-    commonJs ? require('./topic-reports-client.js') : root.TopicReportsClient);
+    commonJs ? require('./topic-reports-client.js') : root.TopicReportsClient,
+    commonJs ? require('./report-assets-storage.js') : root.ReportAssetsStorage);
   if (commonJs) module.exports = api;
   if (root) {
     root.TopicReportEditor = api;
     root.TOPIC_REPORT_ASSET_BUILDS = Object.assign({}, root.TOPIC_REPORT_ASSET_BUILDS, { editor: api.BUILD_ID });
   }
   if (root && root.document) root.document.addEventListener('DOMContentLoaded', () => api.mount());
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi, assetApi) {
   'use strict';
 
-  const BUILD_ID = '1.8.0';
+  const BUILD_ID = '1.9.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -79,6 +80,19 @@
     return /^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(String(value || ''));
   }
 
+  function storageReference(value, expectedKind) {
+    if (!assetApi || typeof assetApi.normalizePublicAssetReference !== 'function') return null;
+    return assetApi.normalizePublicAssetReference(value, {
+      supabaseUrl: root.MONTHLY_REPORT_SUPABASE_CONFIG && root.MONTHLY_REPORT_SUPABASE_CONFIG.supabaseUrl,
+      expectedDomain: 'topic',
+      expectedKind
+    });
+  }
+
+  function isSafeImageSource(value) {
+    return isSafeImageDataUrl(value) || Boolean(storageReference({ url: value }, 'images'));
+  }
+
   function sanitizeTemplate(value) {
     const source = String(value == null ? '' : value);
     const template = root.document.createElement('template');
@@ -110,7 +124,7 @@
           const style = safeStyle(valueText);
           if (style) element.setAttribute('style', style); else element.removeAttribute('style');
         } else if (name === 'src') {
-          if (element.tagName !== 'IMG' || !isSafeImageDataUrl(valueText)) element.removeAttribute('src');
+          if (element.tagName !== 'IMG' || !isSafeImageSource(valueText)) element.removeAttribute('src');
         } else if (name === 'href') {
           let safe = false;
           try {
@@ -134,6 +148,18 @@
         element.classList.add('topic-inline-image');
         element.setAttribute('alt', element.getAttribute('alt') || '專題報告圖片');
         element.dataset.topicAlign = normalizeImageAlignment(element.dataset.topicAlign);
+        const reference = storageReference({
+          url: element.getAttribute('src'),
+          bucket: element.dataset.topicAssetBucket,
+          path: element.dataset.topicAssetPath
+        }, 'images');
+        if (reference) {
+          element.dataset.topicAssetBucket = reference.bucket;
+          element.dataset.topicAssetPath = reference.path;
+        } else {
+          delete element.dataset.topicAssetBucket;
+          delete element.dataset.topicAssetPath;
+        }
       }
     });
     template.content.querySelectorAll('table.topic-indicator-card').forEach((table) => normalizeIndicatorCardStructure(table));
@@ -217,6 +243,10 @@
     return decodedBytes === Number(attachment.size) && decodedBytes <= ATTACHMENT_MAX_BYTES;
   }
 
+  function isSafeStorageAttachment(attachment) {
+    return isAllowedAttachment(attachment) && Boolean(storageReference(attachment, 'attachments'));
+  }
+
   function buildBlockHtml(type) {
     const templates = {
       highlight: '<span class="topic-inline-block topic-highlight" data-topic-block="highlight" data-topic-editable="true" contenteditable="true">  重要數值 100  </span>',
@@ -296,6 +326,7 @@
     editGeneration: 0,
     printing: false,
     saving: false,
+    assetUploads: 0,
     uncertain: false,
     releaseUncertain: false,
     bootGeneration: 0,
@@ -324,8 +355,8 @@
   }
   function assertTopicAssetBuilds() {
     const builds = root.TOPIC_REPORT_ASSET_BUILDS || {};
-    const required = ['core', 'client', 'editor'];
-    if (!core || !clientApi || required.some((key) => builds[key] !== BUILD_ID)) {
+    const required = ['assets', 'core', 'client', 'editor'];
+    if (!assetApi || !core || !clientApi || required.some((key) => builds[key] !== BUILD_ID)) {
       throw new Error(`TOPIC_ASSET_BUILD_MISMATCH:${required.map((key) => `${key}=${builds[key] || 'missing'}`).join(',')}`);
     }
   }
@@ -376,7 +407,11 @@
       TOPIC_SAVE_SCOPE_INVALID: '保存範圍不完整，已停止寫入。',
       TOPIC_PRINT_CONTENT_CHANGED: '列印等待期間內容已變更；未輸出混合版本，請保存後重新輸出 PDF。',
       TOPIC_PRINT_IMAGE_NOT_READY: '列印圖片尚未完成解碼；已停止輸出，請稍後重試。',
-      TOPIC_CHART_PRINT_NOT_READY: '趨勢圖尚未完成繪製；已停止輸出，請稍後重試。'
+      TOPIC_CHART_PRINT_NOT_READY: '趨勢圖尚未完成繪製；已停止輸出，請稍後重試。',
+      REPORT_ASSET_CLIENT_NOT_READY: 'Storage 尚未就緒，未插入檔案；請確認已登入後重試。',
+      REPORT_ASSET_UPLOAD_FAILED: 'Storage 上傳失敗，未插入檔案；原報告內容未變更。',
+      REPORT_ASSET_UPLOAD_TIMEOUT: 'Storage 上傳逾時，未插入檔案；請稍後重試。',
+      REPORT_ASSET_PUBLIC_URL_INVALID: 'Storage public URL 無法驗證，未插入檔案。'
     };
     if (/Could not find the function|PGRST202|schema cache/i.test(String(error && error.message || ''))) {
       return '專題報告雲端migration尚未安裝；本窗口不會改動月報資料。';
@@ -629,7 +664,7 @@
     badge.textContent = state.mode === 'edit' ? '可編輯' : '唯讀';
   }
   function updateControls() {
-    const editable = state.mode === 'edit' && !state.saving && !state.printing
+    const editable = state.mode === 'edit' && !state.saving && !state.printing && state.assetUploads === 0
       && !state.uncertain && !state.releaseUncertain;
     const releaseRecord = state.releaseUncertain ? readReleaseCheck() : null;
     const releaseAction = releaseRecord && releaseRecord.action || 'complete';
@@ -639,22 +674,22 @@
       '[data-module-action],[data-module-layout],[data-module-pdf],[data-module-pdf-order]'
     );
     mutations.forEach((control) => { control.disabled = !editable; });
-    $('topicSave').disabled = state.saving || state.printing || state.releaseUncertain || (!state.uncertain && state.mode !== 'edit');
-    $('topicComplete').disabled = state.saving || state.printing || state.uncertain
+    $('topicSave').disabled = state.saving || state.printing || state.assetUploads > 0 || state.releaseUncertain || (!state.uncertain && state.mode !== 'edit');
+    $('topicComplete').disabled = state.saving || state.printing || state.assetUploads > 0 || state.uncertain
       || (state.releaseUncertain ? releaseAction !== 'complete' : state.mode !== 'edit');
-    $('topicDiscardExit').disabled = state.saving || state.printing || state.uncertain
+    $('topicDiscardExit').disabled = state.saving || state.printing || state.assetUploads > 0 || state.uncertain
       || (state.releaseUncertain ? releaseAction !== 'discard' : state.mode !== 'edit');
-    $('topicSync').disabled = state.saving || state.printing || state.releaseUncertain;
-    $('topicPrint').disabled = state.saving || state.printing;
-    $('topicExcelExport').disabled = state.saving || state.printing;
+    $('topicSync').disabled = state.saving || state.printing || state.assetUploads > 0 || state.releaseUncertain;
+    $('topicPrint').disabled = state.saving || state.printing || state.assetUploads > 0;
+    $('topicExcelExport').disabled = state.saving || state.printing || state.assetUploads > 0;
     root.document.querySelectorAll('[data-footer-action]').forEach((control) => {
       const action = control.dataset.footerAction;
-      if (action === 'save') control.disabled = state.saving || state.printing || state.uncertain || state.releaseUncertain || state.mode !== 'edit';
+      if (action === 'save') control.disabled = state.saving || state.printing || state.assetUploads > 0 || state.uncertain || state.releaseUncertain || state.mode !== 'edit';
       else if (action === 'discard') {
-        control.disabled = state.saving || state.printing || state.uncertain
+        control.disabled = state.saving || state.printing || state.assetUploads > 0 || state.uncertain
           || (state.releaseUncertain ? releaseAction !== 'discard' : state.mode !== 'edit');
       } else {
-        control.disabled = state.saving || state.printing || state.uncertain
+        control.disabled = state.saving || state.printing || state.assetUploads > 0 || state.uncertain
           || (state.releaseUncertain ? releaseAction !== 'complete' : state.mode !== 'edit');
       }
     });
@@ -1452,19 +1487,35 @@
     renderContent(content); markDirty();
   }
 
-  function fileDataUrl(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ''));
-      reader.onerror = () => reject(reader.error || new Error('FILE_READ_FAILED'));
-      reader.readAsDataURL(file);
-    });
+  async function uploadReportAssetForTopic(file, kind) {
+    const client = state.client && state.client.transport && state.client.transport.client;
+    const config = root.MONTHLY_REPORT_SUPABASE_CONFIG || {};
+    state.assetUploads += 1;
+    updateControls();
+    setLeaseNotice(`正在上傳${kind === 'images' ? '圖片' : '附件'}至 Storage…`, 'warning');
+    try {
+      return await assetApi.uploadReportAsset({
+        client,
+        supabaseUrl: config.supabaseUrl,
+        domain: 'topic',
+        reportId: state.reportId,
+        kind,
+        file
+      });
+    } catch (error) {
+      setLeaseNotice(errorLabel(error), 'danger');
+      throw error;
+    } finally {
+      state.assetUploads = Math.max(0, state.assetUploads - 1);
+      updateControls();
+    }
   }
   async function insertImageFile(file) {
     if (!isAllowedImage(file)) throw new Error('圖片僅支援PNG/JPEG/WebP/GIF，且不得超過5MB。');
-    const dataUrl = await fileDataUrl(file);
-    if (!isSafeImageDataUrl(dataUrl)) throw new Error('圖片資料格式不安全。');
-    insertHtml(`<img class="topic-inline-image" data-topic-align="center" style="width:45%" src="${dataUrl}" alt="${escapeHtml(file.name || '專題報告圖片')}">`);
+    const uploaded = await uploadReportAssetForTopic(file, 'images');
+    insertHtml(`<img class="topic-inline-image" data-topic-align="center" data-topic-asset-bucket="${escapeHtml(uploaded.bucket)}" data-topic-asset-path="${escapeHtml(uploaded.path)}" style="width:45%" src="${escapeHtml(uploaded.url)}" alt="${escapeHtml(file.name || '專題報告圖片')}">`);
+    setLeaseNotice('圖片已上傳 Storage，尚未保存報告引用。', 'warning');
+    toast('圖片已上傳 Storage；保存後即寫入報告。', 'success');
   }
   function totalAttachmentBytes(content) {
     return content.modules.reduce((total, module) => total + (module.attachments || []).reduce((sum, item) => sum + Number(item.size || 0), 0), 0);
@@ -1474,10 +1525,11 @@
     const content = collectContent();
     if (totalAttachmentBytes(content) + Number(file.size) > ATTACHMENT_TOTAL_MAX_BYTES) throw new Error('本報告附件總量不得超過16MB。');
     const module = content.modules.find((item) => item.id === state.pendingFileModuleId) || content.modules[0];
-    const dataUrl = await fileDataUrl(file);
-    if (!/^data:[^;,]+;base64,[a-z0-9+/=\s]+$/i.test(dataUrl)) throw new Error('附件資料格式不安全。');
-    module.attachments.push({ id: randomUuid(), name: String(file.name).slice(0, 240), type: String(file.type || 'application/octet-stream'), size: Number(file.size), dataUrl });
+    const uploaded = await uploadReportAssetForTopic(file, 'attachments');
+    module.attachments.push({ id: randomUuid(), ...uploaded });
     renderContent(content); markDirty();
+    setLeaseNotice('附件已上傳 Storage，尚未保存報告引用。', 'warning');
+    toast('附件已上傳 Storage；保存後即寫入報告。', 'success');
   }
   function attachmentAction(action, moduleId, attachmentId) {
     const content = collectContent();
@@ -1485,13 +1537,20 @@
     const attachment = module && module.attachments.find((item) => item.id === attachmentId);
     if (!attachment) return;
     if (action === 'download') {
-      if (!isSafeAttachmentDataUrl(attachment)) throw new Error('附件資料與允許的類型或大小不一致，已阻止下載。');
+      const storage = isSafeStorageAttachment(attachment) ? storageReference(attachment, 'attachments') : null;
+      if (!storage && !isSafeAttachmentDataUrl(attachment)) throw new Error('附件資料與允許的類型或大小不一致，已阻止下載。');
       const anchor = root.document.createElement('a');
-      anchor.href = attachment.dataUrl; anchor.download = core.sanitizeExportName(attachment.name, 'attachment');
-      anchor.rel = 'noopener'; anchor.click();
+      anchor.href = storage ? assetApi.publicAssetDownloadUrl(storage, attachment.name, {
+        supabaseUrl: root.MONTHLY_REPORT_SUPABASE_CONFIG && root.MONTHLY_REPORT_SUPABASE_CONFIG.supabaseUrl,
+        expectedDomain: 'topic', expectedKind: 'attachments'
+      }) : attachment.dataUrl;
+      anchor.download = core.sanitizeExportName(attachment.name, 'attachment');
+      anchor.rel = 'noopener noreferrer';
+      anchor.click();
       return;
     }
     if (state.mode !== 'edit') return;
+    // 第一版只移除報告引用，不刪除 immutable Storage object。
     module.attachments = module.attachments.filter((item) => item.id !== attachmentId);
     renderContent(content); markDirty();
   }

@@ -329,9 +329,23 @@ test('完整內容模塊、圖片附件、雙欄、Excel與正式snapshot PDF都
   const state = await (await request.get('/__fake_state')).json();
   const module = state.topicReports[0].content.modules[0];
   expect(module.colLayout).toBe('1:1');
-  expect(module.columns.join('')).toContain('data:image/png;base64');
+  expect(module.columns.join('')).toMatch(/\/storage\/v1\/object\/public\/report-assets\/topic\/[^/]+\/images\/[^"']+\.png/);
+  expect(module.columns.join('')).not.toContain('data:image/png;base64');
   expect(module.attachments[0].name).toBe('anonymous.txt');
-  expect(module.attachments[0].dataUrl).toMatch(/^data:text\/plain;base64,/);
+  expect(module.attachments[0].bucket).toBe('report-assets');
+  expect(module.attachments[0].path).toMatch(/^topic\/[^/]+\/attachments\/[0-9a-f-]+\.txt$/);
+  expect(module.attachments[0].url).toContain('/storage/v1/object/public/report-assets/topic/');
+  expect(module.attachments[0].dataUrl).toBeUndefined();
+  expect(state.storageObjects).toHaveLength(2);
+  expect(state.storageObjects.map((object) => object.path).sort()).toEqual([
+    expect.stringMatching(/^topic\/[^/]+\/attachments\/[0-9a-f-]+\.txt$/),
+    expect.stringMatching(/^topic\/[^/]+\/images\/[0-9a-f-]+\.png$/)
+  ]);
+
+  const attachmentDownloadPromise = editor.waitForEvent('download');
+  await editor.locator('[data-attachment-action="download"]').click();
+  const attachmentDownload = await attachmentDownloadPromise;
+  expect(attachmentDownload.suggestedFilename()).toBe('anonymous.txt');
 
   const downloadPromise = editor.waitForEvent('download');
   await editor.locator('#topicExcelExport').click();
@@ -1064,6 +1078,9 @@ test('圖片可左中右對齊並在保存重開與PDF保留右對齊', async ({
   });
   const image = editor.locator('img.topic-inline-image');
   await expect(image).toHaveCount(1);
+  await expect(image).toHaveAttribute('src', /\/storage\/v1\/object\/public\/report-assets\/topic\/[^/]+\/images\/[0-9a-f-]+\.png$/);
+  await expect(image).toHaveAttribute('data-topic-asset-bucket', 'report-assets');
+  await expect(image).toHaveAttribute('data-topic-asset-path', /^topic\/[^/]+\/images\/[0-9a-f-]+\.png$/);
   await image.click();
   await expect(editor.locator('#topicImageControls')).toBeVisible();
   await expect(image).toHaveAttribute('data-topic-align', 'center');
@@ -1098,6 +1115,8 @@ test('圖片可左中右對齊並在保存重開與PDF保留右對齊', async ({
   await expectEditorRevision(editor, 2);
   const saved = await (await request.get('/__fake_state')).json();
   expect(saved.topicReports[0].content.modules[0].columns[0]).toContain('data-topic-align="right"');
+  expect(saved.topicReports[0].content.modules[0].columns[0]).toContain('/storage/v1/object/public/report-assets/topic/');
+  expect(saved.storageObjects).toHaveLength(1);
 
   await editor.reload();
   await expect(editor.locator('#topicEditorPage')).toBeVisible({ timeout: 20000 });
@@ -1115,6 +1134,7 @@ test('圖片可左中右對齊並在保存重開與PDF保留右對齊', async ({
       const columnRect = column.getBoundingClientRect();
       window.__topicImagePrintObserved = {
         align: image.dataset.topicAlign,
+        src: image.src,
         rightDelta: Math.abs(columnRect.right - imageRect.right)
       };
     };
@@ -1123,7 +1143,27 @@ test('圖片可左中右對齊並在保存重開與PDF保留右對齊', async ({
   await expect.poll(() => editor.evaluate(() => window.__topicImagePrintObserved)).not.toBeNull();
   const printGeometry = await editor.evaluate(() => window.__topicImagePrintObserved);
   expect(printGeometry.align).toBe('right');
+  expect(printGeometry.src).toContain('/storage/v1/object/public/report-assets/topic/');
   expect(printGeometry.rightDelta).toBeLessThanOrEqual(2);
+});
+
+test('專題Storage上傳失敗不回退Base64且狀態列結束上傳中', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, 'Storage失敗專題');
+  await request.post('/__fake_fail_storage?count=1');
+  await editor.locator('.topic-editable').first().click();
+  await editor.locator('#topicImageFile').setInputFiles({
+    name: 'must-not-fallback.png', mimeType: 'image/png',
+    buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2mAAAAABJRU5ErkJggg==', 'base64')
+  });
+
+  await expect(editor.locator('#topicLeaseNotice')).toContainText('Storage 上傳失敗');
+  await expect(editor.locator('#topicLeaseNotice')).not.toContainText('正在上傳');
+  await expect(editor.locator('img.topic-inline-image')).toHaveCount(0);
+  await expect(editor.locator('#topicSave')).toBeEnabled();
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.storageObjects).toHaveLength(0);
 });
 
 test('專題PDF縮放與直橫方向會套用到列印區且不修改報告Revision', async ({ page, request }) => {

@@ -32,6 +32,7 @@ function freshState() {
     leases: new Map(), operations: new Map(), deletedModules: [], snapshots: [],
     topicReports: [], topicLeases: new Map(), topicOperations: new Map(), topicSnapshots: [], topicSequence: 0,
     hangRpcCounts: new Map(), hangAfterCommitCounts: new Map(), failRpcCounts: new Map(),
+    storageObjects: new Map(), failStorageUploads: 0,
     sequence: 0, events: []
   };
 }
@@ -157,6 +158,14 @@ function resultState() {
       actorUserId: operation.actorUserId,
       requestHash: operation.requestHash,
       result: clone(operation.result)
+    })),
+    storageObjects: Array.from(state.storageObjects.values()).map((object) => ({
+      bucket: object.bucket,
+      path: object.path,
+      size: object.body.length,
+      type: object.type,
+      cacheControl: object.cacheControl,
+      upsert: object.upsert
     })),
     trustedDeviceCount: state.trustedDevices.size,
     activeTrustedDeviceCount: Array.from(state.trustedDevices.values())
@@ -1149,6 +1158,10 @@ const server = http.createServer((req, res) => {
     state.failRpcCounts.set(name, count);
     res.writeHead(204); return res.end();
   }
+  if (url.pathname === '/__fake_fail_storage' && req.method === 'POST') {
+    state.failStorageUploads = Math.max(0, Number(url.searchParams.get('count') || 1));
+    res.writeHead(204); return res.end();
+  }
   if (url.pathname === '/__fake_status' && req.method === 'POST') {
     const kind = String(url.searchParams.get('kind') || 'normalized');
     state.statusFailure = null;
@@ -1211,6 +1224,60 @@ const server = http.createServer((req, res) => {
     res.writeHead(204); return res.end();
   }
   if (url.pathname === '/__fake_state') { res.writeHead(200, { 'Content-Type': mime['.json'] }); return res.end(JSON.stringify(resultState())); }
+  if (url.pathname === '/__fake_storage_upload' && req.method === 'POST') {
+    const bucket = String(url.searchParams.get('bucket') || '');
+    const path = String(url.searchParams.get('path') || '');
+    const upsert = url.searchParams.get('upsert') === 'true';
+    const key = `${bucket}/${path}`;
+    if (state.failStorageUploads > 0) {
+      state.failStorageUploads -= 1;
+      res.writeHead(503, { 'Content-Type': mime['.json'] });
+      return res.end(JSON.stringify({ message: 'FORCED_STORAGE_FAILURE', statusCode: '503' }));
+    }
+    if (bucket !== 'report-assets' || !/^(monthly|topic)\/[a-z0-9_-]{1,96}\/(images|attachments)\/[0-9a-f-]+\.[a-z0-9]{1,10}$/i.test(path)) {
+      res.writeHead(400, { 'Content-Type': mime['.json'] });
+      return res.end(JSON.stringify({ message: 'INVALID_STORAGE_PATH', statusCode: '400' }));
+    }
+    if (!upsert && state.storageObjects.has(key)) {
+      res.writeHead(409, { 'Content-Type': mime['.json'] });
+      return res.end(JSON.stringify({ message: 'OBJECT_ALREADY_EXISTS', statusCode: '409' }));
+    }
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      state.storageObjects.set(key, {
+        bucket, path, body,
+        type: String(req.headers['content-type'] || 'application/octet-stream'),
+        cacheControl: String(req.headers['x-cache-control'] || ''),
+        upsert
+      });
+      res.writeHead(200, { 'Content-Type': mime['.json'] });
+      res.end(JSON.stringify({ path }));
+    });
+    return;
+  }
+  if (url.pathname.startsWith('/storage/v1/object/public/') && req.method === 'GET') {
+    const encoded = url.pathname.slice('/storage/v1/object/public/'.length);
+    let decoded = '';
+    try { decoded = encoded.split('/').map((part) => decodeURIComponent(part)).join('/'); }
+    catch (_error) { decoded = ''; }
+    const object = state.storageObjects.get(decoded);
+    if (!object) { res.writeHead(404); return res.end('not found'); }
+    const headers = {
+      'Content-Type': object.type,
+      'Content-Length': object.body.length,
+      'Cache-Control': object.cacheControl ? `public, max-age=${object.cacheControl}` : 'no-store'
+    };
+    if (url.searchParams.has('download')) {
+      const requestedName = String(url.searchParams.get('download') || object.path.split('/').pop() || 'download')
+        .replaceAll(String.fromCharCode(13), '').replaceAll(String.fromCharCode(10), '').slice(0, 240);
+      const fallbackName = requestedName.replace(/[^a-z0-9._-]+/gi, '_') || 'download';
+      headers['Content-Disposition'] = `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodeURIComponent(requestedName)}`;
+    }
+    res.writeHead(200, headers);
+    return res.end(object.body);
+  }
   if (url.pathname.startsWith('/rest/v1/rpc/') && req.method === 'POST') {
     const name = url.pathname.slice('/rest/v1/rpc/'.length);
     state.rpcCounts.set(name, Number(state.rpcCounts.get(name) || 0) + 1);
@@ -1248,7 +1315,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/supabase-config.js') {
     res.writeHead(200, { 'Content-Type': mime['.js'] });
-    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace',topicRequestTimeoutMs:800};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.4.0'});`);
+    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace',topicRequestTimeoutMs:800};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.5.0'});`);
   }
   if (url.pathname === '/vendor/supabase-2.112.2.js') { res.writeHead(200, { 'Content-Type': mime['.js'] }); return res.end(fakeSdk); }
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;

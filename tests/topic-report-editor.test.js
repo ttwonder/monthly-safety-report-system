@@ -105,6 +105,40 @@ test('Excel export不把附件base64資料嵌入儲存格', () => {
   assert.doesNotMatch(text, /base64|QUJDREVGRw/);
 });
 
+test('專題附件normalize同時保留舊Base64與新Storage public URL', () => {
+  const reportId = '11111111-1111-4111-8111-111111111111';
+  const objectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const content = core.normalizeTopicContent({
+    title: '新舊附件並存',
+    reportDate: '2026-08-17',
+    modules: [{
+      id: '22222222-2222-4222-8222-222222222222',
+      title: '附件', colLayout: '1', columns: [''],
+      attachments: [
+        {
+          id: '33333333-3333-4333-8333-333333333333',
+          name: 'legacy.txt', type: 'text/plain', size: 3,
+          dataUrl: 'data:text/plain;base64,QUJD'
+        },
+        {
+          id: '44444444-4444-4444-8444-444444444444',
+          name: 'future.pdf', type: 'application/pdf', size: 456,
+          bucket: 'report-assets',
+          path: `topic/${reportId}/attachments/${objectId}.pdf`,
+          url: `https://project-ref.supabase.co/storage/v1/object/public/report-assets/topic/${reportId}/attachments/${objectId}.pdf`
+        }
+      ]
+    }]
+  });
+  assert.equal(content.modules[0].attachments.length, 2);
+  assert.match(content.modules[0].attachments[0].dataUrl, /^data:text\/plain;base64,/);
+  assert.equal(content.modules[0].attachments[1].bucket, 'report-assets');
+  assert.equal(content.modules[0].attachments[1].path, `topic/${reportId}/attachments/${objectId}.pdf`);
+  assert.equal(content.modules[0].attachments[1].url,
+    `https://project-ref.supabase.co/storage/v1/object/public/report-assets/topic/${reportId}/attachments/${objectId}.pdf`);
+  assert.equal(Object.hasOwn(content.modules[0].attachments[1], 'dataUrl'), false);
+});
+
 test('PDF保留物件相對所屬欄位的百分比以維持編輯頁排布', () => {
   assert.equal(editor.normalizePrintObjectWidth('30%', '1', 0), '30%');
   assert.equal(editor.normalizePrintObjectWidth('30%', '1:1', 0), '30%');
