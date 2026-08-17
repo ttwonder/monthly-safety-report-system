@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.3.0';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.4.0';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -5801,16 +5801,17 @@
                         `本機 JSON：${v7FormatBytes(localBytes)}`,
                         cloudReport ? `Supabase 內容與快照邏輯量：${v7FormatBytes(cloudReport.logicalBytes)}` : ''
                     ].filter(Boolean).join('　｜　');
+                    const safeId = v1EscapeAttr(row.id);
                     return `
                         <div class="v1-module-row" style="grid-template-columns:1fr auto; border:1px solid #e2e8f0; border-radius:10px; padding:9px; margin-bottom:7px; background:${active ? '#eef2ff' : '#fff'};">
                             <div>
-                                <div class="v1-module-title">${active ? '✅ ' : ''}${row.title || '未命名月報'}</div>
-                                <div class="v1-module-meta">ID：${row.id}　｜　日期：${row.date || '未填'}　｜　模塊：${data.length}　｜　PDF 已選：${selected}　｜　更新：${v1FormatTime(row.timestamp)}</div>
+                                <div class="v1-module-title">${active ? '✅ ' : ''}${v2RecordText(row.title || '未命名月報')}</div>
+                                <div class="v1-module-meta">ID：${v2RecordText(row.id)}　｜　日期：${v2RecordText(row.date || '未填')}　｜　模塊：${data.length}　｜　PDF 已選：${selected}　｜　更新：${v2RecordText(v1FormatTime(row.timestamp))}</div>
                                 <div class="v1-module-meta">${sizeText}</div>
                             </div>
                             <div class="flex flex-col sm:flex-row gap-1 justify-end">
-                                <button class="v1-small-btn ${active ? '' : 'v1-primary-btn'}" onclick="v1LoadReportById(${JSON.stringify(row.id)})">${active ? '目前使用' : '切換'}</button>
-                                <button class="v1-small-btn !border-red-200 !text-red-600 hover:!bg-red-50 ${active ? 'opacity-50 cursor-not-allowed' : ''}" onclick="v1DeleteReportById(${JSON.stringify(row.id)})" title="刪除此本地歷史月報" ${active ? 'disabled' : ''}><i class="fas fa-trash mr-1"></i>刪除</button>
+                                <button data-report-id="${safeId}" class="v1-small-btn ${active ? '' : 'v1-primary-btn'}" onclick="v1LoadReportById(this.dataset.reportId)">${active ? '目前使用' : '切換'}</button>
+                                <button data-report-id="${safeId}" class="v1-small-btn !border-red-200 !text-red-600 hover:!bg-red-50 ${active ? 'opacity-50 cursor-not-allowed' : ''}" onclick="v1DeleteReportById(this.dataset.reportId)" title="刪除此本地歷史月報" ${active ? 'disabled' : ''}><i class="fas fa-trash mr-1"></i>刪除</button>
                             </div>
                         </div>
                     `;
@@ -8895,6 +8896,36 @@
             const id = String(legacyFileId || '');
             return reports.find(report => String(report?.legacyFileId || report?.legacy_file_id || '') === id) || null;
         }
+        function v7LocalReportStats(rows, monthlyReports) {
+            const cloudByLegacyId = new Map((Array.isArray(monthlyReports) ? monthlyReports : []).map(report => [
+                String(report?.legacyFileId || report?.legacy_file_id || ''),
+                report
+            ]).filter(([id]) => id));
+            return (Array.isArray(rows) ? rows : [])
+                .filter(row => row?.id !== V2_RECORD_STORE_ID
+                    && row?.v7Recovery !== true
+                    && (Array.isArray(row?.reportData) || Array.isArray(row?.data)))
+                .map(row => {
+                    const modules = Array.isArray(row.reportData) ? row.reportData : row.data;
+                    const id = String(row.id || '');
+                    const cloudReport = cloudByLegacyId.get(id) || null;
+                    return {
+                        id,
+                        title: String(row.title || '未命名月報'),
+                        reportDate: String(row.date || ''),
+                        updatedAt: Number(row.timestamp || 0),
+                        moduleCount: modules.length,
+                        selectedCount: modules.filter(item => item?.selectedForPdf !== false).length,
+                        localBytes: v7JsonByteLength(row),
+                        current: id === String(window.currentFileId || ''),
+                        cloudReportId: String(cloudReport?.id || '')
+                    };
+                });
+        }
+        function v7TopicStatusLabel(status) {
+            const labels = { draft: '草稿', completed: '已完成', published: '已發布' };
+            return labels[String(status || '')] || String(status || '未標示');
+        }
         function v7ReportPdfSnapshotControlHtml(report) {
             if (!Array.isArray(report?.pdfSnapshots)) {
                 return '<span class="text-[11px] text-amber-700">快照管理尚未啟用；請先更新 SQL</span>';
@@ -8941,6 +8972,35 @@
                     <td class="font-bold">${v7FormatBytes(report.logicalBytes)}</td>
                     <td>${v7ReportPdfSnapshotControlHtml(report)}</td>
                 </tr>`).join('') || '<tr><td colspan="6" class="text-center text-slate-500">目前沒有可計量的雲端月報。</td></tr>';
+            const topics = Array.isArray(data.topicReports) ? data.topicReports : [];
+            const topicRows = data.topicReportsError
+                ? `<tr><td colspan="7" class="text-center text-amber-700">專題統計讀取失敗：${v2RecordText(data.topicReportsError)}</td></tr>`
+                : topics.map(report => `
+                    <tr data-v7-storage-topic-id="${v1EscapeAttr(report.id)}">
+                        <td>${v2RecordText(report.systemNumber || '未編號')}</td>
+                        <td>${v2RecordText(report.title || '未命名專題')}</td>
+                        <td>${v2RecordText(report.reportDate || '未填')}</td>
+                        <td>${v7FormatBytes(report.contentBytes)}</td>
+                        <td>${v7FormatBytes(report.snapshotBytes)}</td>
+                        <td class="font-bold">${v7FormatBytes(report.logicalBytes)}</td>
+                        <td>${v2RecordText(v7TopicStatusLabel(report.status))}</td>
+                    </tr>`).join('') || '<tr><td colspan="7" class="text-center text-slate-500">目前沒有可計量的雲端專題報告。</td></tr>';
+            const localReports = Array.isArray(data.localReports) ? data.localReports : [];
+            const localRows = data.localReportsError
+                ? `<tr><td colspan="6" class="text-center text-amber-700">本機月報讀取失敗：${v2RecordText(data.localReportsError)}</td></tr>`
+                : localReports.map(report => {
+                    const locationText = report.cloudReportId ? '已連結上方 V7 雲端月報' : '僅此瀏覽器';
+                    const stateText = report.current ? `目前使用｜${locationText}` : locationText;
+                    return `
+                        <tr data-v7-storage-local-report-id="${v1EscapeAttr(report.id)}">
+                            <td>${v2RecordText(report.title || '未命名月報')}</td>
+                            <td>${v2RecordText(report.reportDate || '未填')}</td>
+                            <td>${v7FormatBytes(report.localBytes)}</td>
+                            <td>${Number(report.moduleCount || 0)}</td>
+                            <td>${Number(report.selectedCount || 0)}</td>
+                            <td>${v2RecordText(stateText)}</td>
+                        </tr>`;
+                }).join('') || '<tr><td colspan="6" class="text-center text-slate-500">此瀏覽器目前沒有已保存的本機月報。</td></tr>';
             return `
                 <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
                     <div class="rounded-lg border border-indigo-100 bg-indigo-50 p-3">
@@ -8969,8 +9029,17 @@
                     <table style="table-layout:auto; min-width:1080px;"><thead><tr><th>月報</th><th>日期</th><th>目前內容</th><th>歷史快照</th><th>單項合計</th><th>PDF 快照管理</th></tr></thead><tbody>${monthlyRows}</tbody></table>
                 </div>
                 <div class="text-[11px] text-rose-700 mt-2">安全範圍：只刪除所選月報其他 PDF 快照；published／manual／history 與正常資料不會刪除。刪除後無法復原，且資料庫物理總量不一定立即縮小。</div>
+                <div class="mt-3 text-xs font-bold text-slate-700">專題報告內容與快照邏輯量（Supabase）</div>
+                <div class="overflow-auto border border-slate-200 rounded-lg mt-1">
+                    <table style="table-layout:auto; min-width:900px;"><thead><tr><th>系統編號</th><th>專題報告</th><th>日期</th><th>目前內容</th><th>歷史快照</th><th>單項合計</th><th>狀態</th></tr></thead><tbody>${topicRows}</tbody></table>
+                </div>
+                <div class="mt-3 text-xs font-bold text-slate-700">本機歷史月報（IndexedDB，不計入 Supabase）</div>
+                <div class="text-[11px] text-slate-500 mt-1">這裡列出目前瀏覽器曾保存的月報；未連結 V7 的列不在 Supabase，換裝置或清除網站資料後也不會出現。</div>
+                <div class="overflow-auto border border-slate-200 rounded-lg mt-1">
+                    <table style="table-layout:auto; min-width:820px;"><thead><tr><th>月報</th><th>日期</th><th>本機 JSON</th><th>模塊</th><th>PDF 已選</th><th>資料位置</th></tr></thead><tbody>${localRows}</tbody></table>
+                </div>
                 ${state.notice ? `<div class="text-xs text-emerald-700 font-bold mt-1">${v2RecordText(state.notice)}</div>` : ''}
-                <div class="text-[11px] text-slate-500 mt-2">單項是可歸屬的資料列邏輯量（內容＋快照），不是共享 PostgreSQL 磁碟頁面；共用記錄與操作日誌只計入本系統資料表總量，Supabase 平台備份、WAL 及保留空間不在此 RPC 可讀範圍。更新：${v4FmtTime(data.generatedAt)}</div>
+                <div class="text-[11px] text-slate-500 mt-2">單項是可歸屬的資料列邏輯量（內容＋快照），不是共享 PostgreSQL 磁碟頁面；共用記錄、帳號、session、lease、change events 與操作日誌只計入本系統資料表總量，Supabase 平台備份、WAL 及保留空間不在此 RPC 可讀範圍。更新：${v4FmtTime(data.generatedAt)}</div>
                 ${state.error ? `<div class="text-xs text-amber-700 mt-1">最近刷新失敗，仍顯示上次結果：${v2RecordText(state.error)}</div>` : ''}`;
         }
         function v7StorageStatsPanelHtml() {
@@ -8979,7 +9048,7 @@
                     <div class="v1-category-head">
                         <div>
                             <div class="v1-category-title">Supabase 空間使用</div>
-                            <div class="text-xs text-slate-500">物理總量與單項邏輯量分開顯示，避免把瀏覽器估算冒充Supabase磁碟量。</div>
+                            <div class="text-xs text-slate-500">雲端月報、雲端專題與本機歷史分區顯示；物理總量與單項邏輯量分開計算。</div>
                         </div>
                         <button class="v1-small-btn" onclick="v7LoadStorageStats(true)" ${V7_STORAGE_STATS_STATE.loading ? 'disabled' : ''}><i class="fas fa-rotate mr-1"></i>刷新空間</button>
                     </div>
@@ -9055,12 +9124,28 @@
             const requestId = ++V7_STORAGE_STATS_STATE.requestId;
             v7RenderStorageStatsNode();
             try {
-                const data = await app.getStorageStats();
+                const capture = promise => promise.then(
+                    value => ({ value, error: '' }),
+                    error => ({ value: null, error: String(error?.code || error?.message || error || 'UNKNOWN_ERROR') })
+                );
+                const [data, topicResult, localResult] = await Promise.all([
+                    app.getStorageStats(),
+                    capture(app.listTopicReportsForStorage()),
+                    capture(v1ListSavedReports())
+                ]);
                 if (requestId !== V7_STORAGE_STATS_STATE.requestId || actorId !== v7StorageActorId()) return null;
-                V7_STORAGE_STATS_STATE.data = data;
+                const topicReports = Array.isArray(topicResult.value?.reports) ? topicResult.value.reports : [];
+                const localReports = v7LocalReportStats(localResult.value, data?.monthlyReports);
+                const combined = Object.assign({}, data, {
+                    topicReports,
+                    topicReportsError: topicResult.error,
+                    localReports,
+                    localReportsError: localResult.error
+                });
+                V7_STORAGE_STATS_STATE.data = combined;
                 V7_STORAGE_STATS_STATE.error = '';
                 if (document.getElementById('v1-history-list')) refreshV1HistoryList();
-                return data;
+                return combined;
             } catch (error) {
                 if (requestId === V7_STORAGE_STATS_STATE.requestId) {
                     V7_STORAGE_STATS_STATE.error = String(error?.code || error?.message || error || 'GET_STORAGE_STATS_FAILED');

@@ -1,5 +1,5 @@
 -- V7 數據管理增量：密碼權限矩陣與 Supabase 空間統計
--- Build: Monthly 7.3.0 / Topic Reports 1.7.0
+-- Build: Monthly 7.4.0 / Topic Reports 1.7.0
 -- 執行順序：V7 + trusted-device-resume + topic-reports + topic-reports-v2 之後。
 -- 本檔可重跑；不包含任何密碼、token 或 service-role credential。
 

@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.3.0';
+  const buildId = '7.4.0';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -1645,6 +1645,7 @@
     async deleteUser(id) { return this.client.deleteUser(id); }
     async updateSitePassword(password) { return this.client.updateSitePassword(password); }
     async getStorageStats() { return this.client.getStorageStats(); }
+    async listTopicReportsForStorage() { return this.client.listTopicReportsForStorage(); }
     async pruneReportPdfSnapshots(reportId, keepSnapshotId, expectedSnapshotIds) {
       return this.client.pruneReportPdfSnapshots(reportId, keepSnapshotId, expectedSnapshotIds);
     }

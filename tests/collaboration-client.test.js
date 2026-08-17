@@ -4144,6 +4144,35 @@ test('getStorageStats 以目前 user session 呼叫只讀統計 RPC', async () =
   });
 });
 
+test('listTopicReportsForStorage 以目前 user session 讀取完整專題統計清單', async () => {
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-topic-storage' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-topic-storage', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: { ok: true, watermark: 0, report: { id: 'r1', revision: 1 }, modules: [], records: [], users: [] },
+    monthly_v7_topic_list_reports: {
+      ok: true,
+      reports: [{
+        id: 'topic-1', systemNumber: 'SR-20260817-001', title: '雲端專題',
+        contentBytes: 1024, snapshotBytes: 2048, logicalBytes: 3072
+      }]
+    }
+  });
+  const client = new MonthlyV7Client({ transport, sessionStorage: memoryStorage(), draftStorage: memoryStorage(), idFactory: () => 'tab-topic-storage' });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  const result = await client.listTopicReportsForStorage();
+  assert.equal(result.reports[0].logicalBytes, 3072);
+  const call = transport.calls.find((entry) => entry.name === 'monthly_v7_topic_list_reports');
+  assert.deepEqual(call.params, {
+    p_workspace_key: 'workspace-test',
+    p_user_session_id: 'user-topic-storage',
+    p_client_session_id: 'tab-topic-storage'
+  });
+});
+
 test('PDF 快照清理 timeout 後即使預覽集合改變也先以原 operation 與原選擇對帳', async () => {
   const drafts = memoryStorage();
   const timeout = Object.assign(new Error('RPC_TIMEOUT'), { code: 'RPC_TIMEOUT' });

@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.3.0';
+  const buildId = '7.4.0';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
@@ -2781,6 +2781,16 @@
         p_client_session_id: this.clientSessionId
       });
       return this.commandResult(result, 'GET_STORAGE_STATS_FAILED');
+    }
+
+    async listTopicReportsForStorage() {
+      this.requireUserSession();
+      const result = await this.rpc('monthly_v7_topic_list_reports', {
+        p_workspace_key: this.config.workspaceKey,
+        p_user_session_id: this.userSession.id,
+        p_client_session_id: this.clientSessionId
+      });
+      return this.commandResult(result, 'LIST_TOPIC_REPORTS_FOR_STORAGE_FAILED');
     }
 
     async pruneReportPdfSnapshots(reportId, keepSnapshotId, expectedSnapshotIds) {

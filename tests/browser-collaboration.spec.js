@@ -398,6 +398,102 @@ test('數據管理 Admin 可看快照統計但不能看到清理控制', async (
   await expect(page.locator('[data-v7-prune-pdf-snapshots]')).toHaveCount(0);
 });
 
+test('數據管理分區列出雲端專題與此瀏覽器既有月報且不冒充 Supabase 用量', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const topicId = await page.evaluate(async () => {
+    window.__storageStatsXss = 0;
+    const client = window.MonthlyV7App.client;
+    const topicTitle = '空間統計專題報告 <img id="topic-storage-xss" src=x onerror="window.__storageStatsXss+=1">';
+    const result = await client.rpc('monthly_v7_topic_create_report', {
+      p_workspace_key: client.config.workspaceKey,
+      p_user_session_id: client.userSession.id,
+      p_client_session_id: client.clientSessionId,
+      p_editor_window_id: 'storage-topic-seed-window',
+      p_operation_id: crypto.randomUUID(),
+      p_title: topicTitle,
+      p_report_date: '2026-08-17',
+      p_content: {
+        schemaVersion: 1,
+        domain: 'topic',
+        title: topicTitle,
+        reportDate: '2026-08-17',
+        modules: [{ title: '專題項次', columns: ['專題內容'] }]
+      }
+    });
+    if (!result?.ok) throw new Error(result?.error || 'TOPIC_SEED_FAILED');
+
+    const db = await initDB();
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_NAME], 'readwrite');
+      transaction.objectStore(STORE_NAME).put({
+        id: 'local-history-report-2025',
+        title: '2025 年已保存月報 <img id="local-storage-xss" src=x onerror="window.__storageStatsXss+=1">',
+        date: '2025-12-31',
+        period: { startM: '12', startD: '1', endM: '12', endD: '31' },
+        data: [{ id: 901, title: '本機歷史內容', columns: ['只存在此瀏覽器'] }],
+        timestamp: Date.parse('2025-12-31T12:00:00.000Z')
+      });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    return result.report.id;
+  });
+
+  await page.locator('[data-v1-tab="cloud"]').click();
+  await expect(page.locator('[data-v7-storage-report-id]')).toHaveCount(1);
+
+  const topicRow = page.locator(`[data-v7-storage-topic-id="${topicId}"]`);
+  await expect(topicRow).toBeVisible();
+  await expect(topicRow).toContainText('空間統計專題報告');
+  await expect(topicRow).toContainText('SR-');
+
+  const localRow = page.locator('[data-v7-storage-local-report-id="local-history-report-2025"]');
+  await expect(localRow).toBeVisible();
+  await expect(localRow).toContainText('2025 年已保存月報');
+  await expect(localRow).toContainText('僅此瀏覽器');
+  await expect(page.locator('#v7-storage-stats')).toContainText('本機歷史月報（IndexedDB，不計入 Supabase）');
+  await expect(page.locator('#topic-storage-xss, #local-storage-xss')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__storageStatsXss)).toBe(0);
+
+  await page.locator('[data-v1-tab="history"]').click();
+  const historyRow = page.locator('#v1-history-list .v1-module-row').filter({ hasText: '2025 年已保存月報' });
+  await expect(historyRow).toBeVisible();
+  await expect(historyRow.getByRole('button', { name: '切換' })).toHaveAttribute('data-report-id', 'local-history-report-2025');
+  await expect(historyRow.getByRole('button', { name: '刪除' })).toHaveAttribute('data-report-id', 'local-history-report-2025');
+
+  const state = await (await request.get('/__fake_state')).json();
+  expect(state.rpcCounts.monthly_v7_get_storage_stats).toBe(1);
+  expect(state.rpcCounts.monthly_v7_topic_list_reports).toBe(1);
+});
+
+test('專題統計暫時失敗時仍保留雲端月報與本機月報分區', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(async () => {
+    const db = await initDB();
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_NAME], 'readwrite');
+      transaction.objectStore(STORE_NAME).put({
+        id: 'local-report-during-topic-failure',
+        title: '專題統計失敗時仍顯示的本機月報',
+        date: '2026-01-31',
+        data: [{ id: 902, title: '本機資料', columns: ['不得跟著消失'] }],
+        timestamp: Date.parse('2026-01-31T12:00:00.000Z')
+      });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+  });
+  await page.locator('[data-v1-tab="cloud"]').click();
+  await expect(page.locator('[data-v7-storage-report-id]')).toHaveCount(1);
+
+  await request.post('/__fake_fail_rpc?name=monthly_v7_topic_list_reports&count=1');
+  await page.evaluate(() => v7LoadStorageStats(true));
+
+  await expect(page.locator('[data-v7-storage-report-id]')).toHaveCount(1);
+  await expect(page.locator('[data-v7-storage-local-report-id="local-report-during-topic-failure"]')).toBeVisible();
+  await expect(page.locator('#v7-storage-stats')).toContainText('專題統計讀取失敗：FORCED_RPC_FAILURE');
+});
+
 for (const mixedAsset of [
   { name: 'config', url: '**/supabase-config.js*', declaration: "config: 'stale-build'" },
   { name: 'core', url: '**/monthly-collaboration-core.js*', declaration: "core: 'stale-build'" },
@@ -430,7 +526,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.3.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.4.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -470,7 +566,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.3.0'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.4.0'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -673,7 +769,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.3.0', config: '7.3.0', core: '7.3.0', client: '7.3.0', v7: '7.3.0'
+      page: '7.4.0', config: '7.4.0', core: '7.4.0', client: '7.4.0', v7: '7.4.0'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
