@@ -182,12 +182,16 @@ button,a { -webkit-tap-highlight-color:transparent; }
 .topic-attachment-name { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .topic-inline-block { display:inline-block; max-width:100%; vertical-align:top; margin:7px; }
 .topic-inline-image { display:block; max-width:100%; height:auto; margin:8px auto; border-radius:8px; }
-.topic-inline-image[data-topic-align="left"] { margin-left:0; margin-right:auto; }
+.topic-inline-image[data-topic-align="left"] { float:left; margin:0 8px 8px 0; }
 .topic-inline-image[data-topic-align="center"] { margin-left:auto; margin-right:auto; }
-.topic-inline-image[data-topic-align="right"] { margin-left:auto; margin-right:0; }
+.topic-inline-image[data-topic-align="right"] { float:right; margin:0 0 8px 8px; }
+.topic-editable::after,.topic-print-column::after { content:""; display:block; clear:both; }
 .topic-data-table { width:100%; border-collapse:collapse; margin:8px 0; }
 .topic-data-table th,.topic-data-table td { border:1px solid #94a3b8; padding:6px; min-width:70px; }
-.topic-resizable-table { table-layout:fixed; }
+.topic-resizable-table {
+  display:inline-table; max-width:calc(100% - 6px); margin:0 6px 6px 0;
+  vertical-align:top; table-layout:fixed;
+}
 .topic-resizable-table tr:first-child > th { position:relative; }
 .topic-table-resize-handle {
   position:absolute; z-index:3; top:-1px; right:-6px; width:12px; height:calc(100% + 2px);
@@ -210,7 +214,7 @@ body.topic-table-resizing,body.topic-table-resizing * { cursor:col-resize !impor
 }
 .topic-highlight:focus { background-color:#fce7f3 !important; border-color:#f472b6 !important; outline:1px solid #ec4899; }
 .topic-highlight[data-topic-width-user="true"] { display:inline-block; box-sizing:border-box; vertical-align:top; margin:0 6px 6px 0; }
-.topic-indicator-card,.topic-kpi-card,.topic-progress-card,.topic-zone-card,.topic-trend-card { display:inline-block; max-width:100%; vertical-align:top; margin:0 6px 6px 0; padding:12px 14px; border:2px solid #cbd5e1; border-radius:6px; background:#fff; box-shadow:none; }
+.topic-indicator-card,.topic-kpi-card,.topic-progress-card,.topic-zone-card,.topic-trend-card { display:inline-block; max-width:calc(100% - 6px); vertical-align:top; margin:0 6px 6px 0; padding:12px 14px; border:2px solid #cbd5e1; border-radius:6px; background:#fff; box-shadow:none; }
 .topic-indicator-card { display:inline-table; padding:0; border:2px solid var(--card-color,#f97316); border-collapse:collapse; table-layout:fixed; }
 .topic-indicator-card th,.topic-indicator-card td { min-width:0; border-color:var(--card-color,#f97316); padding:5px 7px; }
 .topic-indicator-card .topic-indicator-title { color:#0f172a; text-align:center; font-size:14px; }
@@ -320,9 +324,12 @@ body.topic-table-resizing,body.topic-table-resizing * { cursor:col-resize !impor
   .topic-print-columns[data-layout="2:1"] { grid-template-columns:2fr 1fr; }
   .topic-print-column { min-width:0; overflow-wrap:normal; line-height:1.45; }
   .topic-print-column .topic-inline-block {
-    box-sizing:border-box; max-width:100%; margin:4px; vertical-align:top;
+    box-sizing:border-box; max-width:calc(100% - 8px); margin:4px; vertical-align:top;
     overflow-wrap:normal; word-break:normal; break-inside:avoid;
   }
+  .topic-print-column .topic-trend-card,
+  .topic-print-column .topic-resizable-table { max-width:calc(100% - 6px); }
+  .topic-print-column > .topic-inline-image { max-width:calc(100% - 8px); }
   .topic-print-column .topic-highlight {
     display:inline; max-width:none; margin:0; vertical-align:baseline;
     box-sizing:content-box; overflow-wrap:normal; word-break:normal;

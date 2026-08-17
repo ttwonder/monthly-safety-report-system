@@ -12,7 +12,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, core, clientApi, assetApi) {
   'use strict';
 
-  const BUILD_ID = '1.9.0';
+  const BUILD_ID = '1.10.0';
   const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_MAX_BYTES = 6 * 1024 * 1024;
   const ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
@@ -2034,7 +2034,7 @@
     printArea.dataset.pdfScale = String(scale);
     printArea.dataset.pdfOrientation = orientation;
     printArea.style.setProperty('--topic-pdf-scale', String(scale / 100));
-    printArea.style.setProperty('--topic-pdf-width', `${10000 / scale}%`);
+    printArea.style.setProperty('--topic-pdf-width', '100%');
     $('topicPrintTitle').textContent = content.title;
     $('topicPrintMeta').textContent = `${reportProjection.systemNumber}　報告日期：${content.reportDate}　Revision：R${reportProjection.revision}`;
     const rootNode = $('topicPrintModules');

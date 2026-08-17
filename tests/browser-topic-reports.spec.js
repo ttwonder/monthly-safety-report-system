@@ -1196,7 +1196,7 @@ test('專題PDF縮放與直橫方向會套用到列印區且不修改報告Revis
   await expect.poll(() => editor.evaluate(() => window.__topicScalePrintObserved)).not.toBeNull();
   expect(await editor.evaluate(() => window.__topicScalePrintObserved)).toEqual({
     selected: '80', selectedOrientation: 'landscape', dataScale: '80', dataOrientation: 'landscape',
-    zoom: '0.8', width: '125%', pageRule: '@page { size: A4 landscape; margin: 10mm; }'
+    zoom: '0.8', width: '100%', pageRule: '@page { size: A4 landscape; margin: 10mm; }'
   });
   expect(await editor.evaluate(() => localStorage.getItem('topic:v1:pdf-orientation'))).toBe('landscape');
   const state = await (await request.get('/__fake_state')).json();
@@ -1276,6 +1276,184 @@ test('專題PDF保留編輯頁雙欄內物件比例與同行分組', async ({ pa
   expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
   expect(pdf.length).toBeGreaterThan(5000);
   await testInfo.attach('topic-wysiwyg-portrait.pdf', { body: pdf, contentType: 'application/pdf' });
+});
+
+test('專題PDF在100與80縮放下右欄100%卡片完整落在實體欄框內', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, 'PDF右欄完整專題');
+  await editor.locator('[data-module-layout]').first().selectOption('1:1');
+  const left = editor.locator('.topic-editable').nth(0);
+  const right = editor.locator('.topic-editable').nth(1);
+  await left.fill('左欄保留內容');
+  await right.fill('右欄 ');
+  await right.click();
+  await right.press('End');
+  for (const type of ['indicator-blue', 'indicator-orange']) {
+    await editor.locator(`[data-insert="${type}"]`).click();
+  }
+  for (const type of ['zone', 'progress', 'trend']) {
+    await editor.locator(`[data-insert="${type}"]`).click();
+    await editor.locator('[data-topic-object-width="100"]').click();
+  }
+  await expect(right.locator('[data-topic-block]')).toHaveCount(5);
+  await editor.locator('#topicPdfOrientation').selectOption('portrait');
+  await editor.evaluate(() => {
+    window.__topicEdgePrintCount = 0;
+    window.print = () => { window.__topicEdgePrintCount += 1; };
+  });
+
+  const pdfPages = [];
+  for (const scale of ['100', '80']) {
+    await editor.locator('#topicPdfScale').selectOption(scale);
+    const expectedPrintCount = pdfPages.length + 1;
+    await editor.locator('#topicPrint').click();
+    await expect.poll(() => editor.evaluate(() => window.__topicEdgePrintCount)).toBe(expectedPrintCount);
+    await editor.setViewportSize({ width: 718, height: 1100 });
+    await editor.emulateMedia({ media: 'print' });
+    const geometry = await editor.evaluate(() => {
+      document.body.classList.add('topic-printing-report');
+      const area = document.querySelector('#topicPrintArea');
+      const columns = Array.from(area.querySelectorAll('.topic-print-column'));
+      const column = columns[1];
+      const columnRect = column.getBoundingClientRect();
+      const areaRect = area.getBoundingClientRect();
+      const widgets = Array.from(column.querySelectorAll(
+        '.topic-indicator-card,.topic-zone-card,.topic-progress-card,.topic-trend-card'
+      ));
+      return {
+        cssWidth: area.style.getPropertyValue('--topic-pdf-width'),
+        cssScale: area.style.getPropertyValue('--topic-pdf-scale'),
+        areaRight: areaRect.right,
+        viewportWidth: window.innerWidth,
+        columnScrollWidth: column.scrollWidth,
+        columnClientWidth: column.clientWidth,
+        widgets: widgets.map((widget) => {
+          const rect = widget.getBoundingClientRect();
+          return {
+            type: widget.dataset.topicBlock,
+            width: widget.style.width,
+            leftOverflow: columnRect.left - rect.left,
+            rightOverflow: rect.right - columnRect.right,
+            internalOverflow: widget.scrollWidth - widget.clientWidth
+          };
+        })
+      };
+    });
+    expect(geometry.cssWidth).toBe('100%');
+    expect(geometry.cssScale).toBe(String(Number(scale) / 100));
+    expect(geometry.widgets).toHaveLength(5);
+    expect(
+      geometry.widgets.every((widget) => widget.leftOverflow <= 1
+        && widget.rightOverflow <= 1 && widget.internalOverflow <= 1),
+      JSON.stringify(geometry, null, 2)
+    ).toBe(true);
+    expect(geometry.columnScrollWidth).toBeLessThanOrEqual(geometry.columnClientWidth + 1);
+    expect(geometry.areaRight).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+    await testInfo.attach(`topic-right-column-${scale}.png`, {
+      body: await editor.screenshot({ fullPage: true }), contentType: 'image/png'
+    });
+    const pdf = await editor.pdf({ printBackground: false, preferCSSPageSize: true });
+    expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
+    pdfPages.push((pdf.toString('latin1').match(/\/Type\s*\/Page\b/g) || []).length);
+    await testInfo.attach(`topic-right-column-${scale}.pdf`, { body: pdf, contentType: 'application/pdf' });
+    await editor.emulateMedia({ media: 'screen' });
+    await editor.evaluate(() => document.body.classList.remove('topic-printing-report'));
+    await editor.waitForTimeout(1250);
+  }
+  expect(pdfPages[1]).toBeLessThanOrEqual(pdfPages[0]);
+});
+
+test('45%一般表格與左右對齊圖片可和文字同行並保留到PDF', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const list = await openTopicList(page);
+  const editor = await createTopic(list, '文字與插入內容同行專題');
+  await editor.locator('[data-module-layout]').first().selectOption('1:1');
+  const left = editor.locator('.topic-editable').nth(0);
+  const right = editor.locator('.topic-editable').nth(1);
+
+  await left.fill('表格前 ');
+  await left.click();
+  await left.press('End');
+  const answers = ['2', '2'];
+  const promptHandler = async (dialog) => dialog.accept(answers.shift());
+  editor.on('dialog', promptHandler);
+  await editor.locator('[data-insert="table"]').click();
+  await expect.poll(() => answers.length).toBe(0);
+  editor.off('dialog', promptHandler);
+  await editor.locator('[data-topic-object-width="45"]').click();
+
+  await right.fill('圖片前 ');
+  await right.click();
+  await right.press('End');
+  await editor.locator('#topicImageFile').setInputFiles({
+    name: 'inline-flow.png', mimeType: 'image/png',
+    buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2mAAAAABJRU5ErkJggg==', 'base64')
+  });
+  await editor.locator('[data-topic-image-align="left"]').click();
+  await editor.locator('[data-topic-object-width="45"]').click();
+
+  await editor.evaluate(() => {
+    const installProbe = (column, object, beforeValue, afterValue) => {
+      Array.from(column.childNodes).forEach((node) => {
+        if (node.nodeType === Node.TEXT_NODE) node.remove();
+      });
+      const before = document.createElement('span');
+      before.dataset.topicProbe = `before-${beforeValue}`;
+      before.textContent = `${beforeValue} `;
+      const after = document.createElement('span');
+      after.dataset.topicProbe = `after-${afterValue}`;
+      after.textContent = ` ${afterValue}`;
+      object.before(before);
+      object.after(after);
+      column.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+    };
+    const columns = document.querySelectorAll('.topic-editable');
+    installProbe(columns[0], columns[0].querySelector('.topic-resizable-table'), '表格前', '表格後');
+    installProbe(columns[1], columns[1].querySelector('.topic-inline-image'), '圖片前', '圖片後');
+  });
+
+  const measure = (scope) => editor.evaluate((selector) => {
+    const rootNode = document.querySelector(selector);
+    const columns = rootNode.matches('.topic-editable')
+      ? [rootNode, rootNode.parentElement.querySelectorAll('.topic-editable')[1]]
+      : Array.from(rootNode.querySelectorAll('.topic-print-column'));
+    const rangeRect = (node) => {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      return range.getBoundingClientRect();
+    };
+    const table = columns[0].querySelector('.topic-resizable-table');
+    const tableBefore = rangeRect(columns[0].querySelector('[data-topic-probe="before-表格前"]'));
+    const tableAfter = rangeRect(columns[0].querySelector('[data-topic-probe="after-表格後"]'));
+    const tableRect = table.getBoundingClientRect();
+    const image = columns[1].querySelector('.topic-inline-image');
+    const imageAfter = rangeRect(columns[1].querySelector('[data-topic-probe="after-圖片後"]'));
+    const imageRect = image.getBoundingClientRect();
+    return {
+      tableDisplay: getComputedStyle(table).display,
+      tableSharesBand: tableBefore.top < tableRect.bottom - 1 && tableAfter.top < tableRect.bottom - 1,
+      imageFloat: getComputedStyle(image).float,
+      imageSharesBand: imageAfter.top < imageRect.bottom - 1
+    };
+  }, scope);
+
+  expect(await measure('.topic-editable')).toEqual({
+    tableDisplay: 'inline-table', tableSharesBand: true, imageFloat: 'left', imageSharesBand: true
+  });
+  await editor.locator('#topicSave').click();
+  await expectEditorRevision(editor, 2);
+  await editor.evaluate(() => {
+    window.__topicInlinePrintObserved = false;
+    window.print = () => { window.__topicInlinePrintObserved = true; };
+  });
+  await editor.locator('#topicPrint').click();
+  await expect.poll(() => editor.evaluate(() => window.__topicInlinePrintObserved)).toBe(true);
+  await editor.emulateMedia({ media: 'print' });
+  await editor.evaluate(() => document.body.classList.add('topic-printing-report'));
+  expect(await measure('#topicPrintArea')).toEqual({
+    tableDisplay: 'inline-table', tableSharesBand: true, imageFloat: 'left', imageSharesBand: true
+  });
 });
 
 test('專題PDF等待snapshot期間內容變更會fail closed且不混用新圖表與舊資料表', async ({ page, request }) => {
