@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.0';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.1';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -273,8 +273,28 @@
             }
         };
 
-        // 防止 highlight-val 內按 Enter 換行破壞版面
+        // 卡片／圖表的明確內層欄位是獨立輸入邊界；Ctrl/Cmd+A 只全選該欄，
+        // 不可讓瀏覽器沿巢狀 contenteditable 擴大到整個月報內容。
         document.addEventListener('keydown', (e) => {
+            const isSelectAll = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a';
+            if (isSelectAll) {
+                const selection = window.getSelection();
+                const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+                let node = range?.startContainer || document.activeElement;
+                if (node?.nodeType === Node.TEXT_NODE) node = node.parentElement;
+                const explicitNested = node?.closest?.('[contenteditable="true"]');
+                const tableCell = node?.closest?.('.data-card-table th, .data-card-table td, .chart-data-table th, .chart-data-table td');
+                const field = explicitNested?.classList?.contains('editable-div') ? tableCell : (explicitNested || tableCell);
+                const outerEditor = field?.closest?.('.editable-div[contenteditable="true"]');
+                if (field && outerEditor && field !== outerEditor && selection) {
+                    e.preventDefault();
+                    const fieldRange = document.createRange();
+                    fieldRange.selectNodeContents(field);
+                    selection.removeAllRanges();
+                    selection.addRange(fieldRange);
+                    return;
+                }
+            }
             const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z';
             const isRedo = (e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'));
             if (isUndo || isRedo) {
@@ -7004,8 +7024,23 @@
             V4_AUTO_SAVE_TIMER = null;
         }
 
+        function v7HasClaimDeniedDrafts() {
+            return window.MonthlyV7App?.hasClaimDeniedDrafts?.() === true;
+        }
+
+        function v7PublishClaimDeniedDraftBlocked() {
+            if (!v7HasClaimDeniedDrafts()) return false;
+            v7ClearCloudAutoSaveTimer();
+            v4SetCloudRuntimeStatus(
+                '項目編輯權未取得；修改只保存在本機，背景上傳已暫停。請再次點該項或按「保存修改」重試。',
+                'warn'
+            );
+            return true;
+        }
+
         function v7ScheduleCloudAutoSave(delayMs = v7CloudAutoSaveIntervalMs(), saveOrigin = 'autosave') {
             if (V4_CLOUD_APPLYING || V4_AUTO_SAVE_TIMER || !v7HasUnsyncedCloudChanges()) return;
+            if (v7PublishClaimDeniedDraftBlocked()) return;
             if (!window.MonthlyV7App?.isActive?.() || !window.MonthlyV7App?.isWriteReady?.()) return;
             if (window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery) return;
             if (v7PublishPendingRecoveryBlocked()) return;
@@ -7014,6 +7049,7 @@
             V4_AUTO_SAVE_TIMER = setTimeout(async () => {
                 V4_AUTO_SAVE_TIMER = null;
                 if (!v7HasUnsyncedCloudChanges() || !window.MonthlyV7App?.isWriteReady?.()) return;
+                if (v7PublishClaimDeniedDraftBlocked()) return;
                 if (v7PublishPendingRecoveryBlocked()) return;
                 if (v7PublishWriteFailureBlocked()) return;
                 if (v7PublishRevisionConflictBlocked()) return;
@@ -7041,6 +7077,7 @@
             if (v7PublishPendingRecoveryBlocked()) return V7_CLOUD_DIRTY_GENERATION;
             if (v7PublishWriteFailureBlocked()) return V7_CLOUD_DIRTY_GENERATION;
             if (v7PublishRevisionConflictBlocked()) return V7_CLOUD_DIRTY_GENERATION;
+            if (v7PublishClaimDeniedDraftBlocked()) return V7_CLOUD_DIRTY_GENERATION;
             if (!v5CurrentUser()) {
                 v4SetCloudRuntimeStatus(`${reason}已保存為本機草稿；請登入後提交。`, 'warn');
                 return V7_CLOUD_DIRTY_GENERATION;
@@ -7387,6 +7424,7 @@
                         const cloud = await window.MonthlyV7App.persistReportData(reportData, {
                             resolveRevisionConflict: !silent,
                             confirmLegacyRecovery: !silent,
+                            allowClaimDeniedRetry: options.allowClaimDeniedRetry === true,
                             saveOrigin
                         });
                         if (cloud?.conflictBlocked === true) {
@@ -8971,7 +9009,8 @@
                     silent: false,
                     reason: '手動保存',
                     flushLatest: true,
-                    saveOrigin: 'manual'
+                    saveOrigin: 'manual',
+                    allowClaimDeniedRetry: true
                 });
                 renderV5SessionBar();
                 return saved;
@@ -9668,6 +9707,13 @@
             },
             onRemoteChangeWhileEditing: () => v4SetCloudRuntimeStatus('正在編輯的項目有遠端新版本；目前草稿未被覆蓋。', 'warn'),
             onLeaseLost: () => v4SetCloudRuntimeStatus('編輯權已失效；內容保留為本機草稿，禁止直接覆蓋。', 'error'),
+            onClaimDenied: () => {
+                v7ClearCloudAutoSaveTimer();
+                v7PublishClaimDeniedDraftBlocked();
+            },
+            onClaimRetry: () => {
+                if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
+            },
             onTransportError: (error) => console.warn('V7 collaboration error', error),
             onSessionStateChanged: (event) => {
                 const code = String(event?.code || '');

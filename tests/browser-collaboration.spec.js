@@ -614,7 +614,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.0';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.1';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -654,7 +654,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.0'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.1'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -857,7 +857,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.6.0', config: '7.6.0', assets: '7.6.0', core: '7.6.0', client: '7.6.0', v7: '7.6.0'
+      page: '7.6.1', config: '7.6.1', assets: '7.6.1', core: '7.6.1', client: '7.6.1', v7: '7.6.1'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -3521,6 +3521,7 @@ test('兩個瀏覽器同項排他、不同 module 並行保存且不互相覆蓋
   await expect(titleB1).toHaveAttribute('contenteditable', 'false');
   await expect(pageB.locator('#v4-cloud-runtime-status')).toContainText('此項目目前由「Owner A」編輯，請稍後再試。');
   await expect(pageB.locator('#v4-cloud-runtime-status')).not.toContainText('LEASE_HELD');
+  expect(await pageB.evaluate(() => window.MonthlyV7App.hasClaimDeniedDrafts())).toBe(false);
 
   const rowB2 = pageB.locator('#tableBody tr').nth(1);
   const titleB2 = rowB2.locator('td').nth(1).locator('.editable-div');
@@ -3542,6 +3543,94 @@ test('兩個瀏覽器同項排他、不同 module 並行保存且不互相覆蓋
   expect(state.modules.map((module) => module.payload.title.replace(/<br>$/i, ''))).toEqual(['A 已由 Owner 保存', 'B 已由 Operator 保存']);
   expect(state.modules.map((module) => module.revision)).toEqual([2, 2]);
   expect(errors).toEqual([]);
+
+  await contextA.close();
+  await contextB.close();
+});
+
+test('他人持有 lease 時等待期間輸入只保留本機草稿且拒絕後凍結', async ({ browser, request }) => {
+  const contextA = await browser.newContext();
+  const contextB = await browser.newContext();
+  const pageA = await contextA.newPage();
+  const pageB = await contextB.newPage();
+  await pageB.addInitScript(() => {
+    window.MONTHLY_V7_AUTO_SAVE_INTERVAL_MS = 500;
+  });
+  await enterAndLogin(pageA, 'owner', 'owner-pass');
+  await enterAndLogin(pageB, 'operator', 'operator-pass');
+
+  const rowA = pageA.locator('#tableBody tr').first();
+  await rowA.locator('td').nth(1).locator('.editable-div').click();
+  await expect(rowA.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+
+  let releaseClaim;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  let claimCalls = 0;
+  await pageB.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_claim_lease' && payload?.params?.p_entity_type === 'module') {
+      claimCalls += 1;
+      await claimGate;
+    }
+    await route.continue();
+  });
+
+  const rowB = pageB.locator('#tableBody tr').first();
+  const titleB = rowB.locator('td').nth(1).locator('.editable-div');
+  const moduleId = await rowB.getAttribute('data-v7-entity-id');
+  await titleB.click();
+  await expect.poll(() => claimCalls).toBe(1);
+  await expect(rowB.locator('.v7-item-lock-badge')).toHaveText('取得編輯權中…');
+  await expect(titleB).toHaveAttribute('contenteditable', 'true');
+  await titleB.fill('B 等待期間的本機草稿');
+  await expect(titleB).toHaveText('B 等待期間的本機草稿');
+
+  releaseClaim();
+  await expect(pageB.locator('#v4-cloud-runtime-status')).toContainText('此項目目前由「Owner A」編輯，請稍後再試。');
+  await expect(titleB).toHaveAttribute('contenteditable', 'false');
+  await expect(rowB.locator('.v7-item-lock-badge')).toHaveText('點一下取得編輯權');
+  expect(await pageB.evaluate(() => {
+    window.MonthlyV7App.restoreClaimDeniedDraftMarkers();
+    return window.MonthlyV7App.hasClaimDeniedDrafts();
+  })).toBe(true);
+  await expect.poll(() => pageB.evaluate((id) => {
+    const raw = localStorage.getItem(`monthly_v7_draft:module:${id}`);
+    if (!raw) return '';
+    try { return String(JSON.parse(raw)?.payload?.title || '').replace(/<br>$/i, ''); }
+    catch { return ''; }
+  }, moduleId), { timeout: 5000 }).toBe('B 等待期間的本機草稿');
+  expect(await pageB.evaluate((id) => localStorage.getItem(
+    `monthly_v7_claim_denied_draft:module:${id}`
+  ), moduleId)).not.toBeNull();
+
+  await pageB.reload();
+  await expect.poll(() => pageB.evaluate(() => Boolean(
+    window.MonthlyV7App?.isActive?.() && window.MonthlyV7App?.client?.snapshot
+  ))).toBe(true);
+  expect(await pageB.evaluate(() => window.MonthlyV7App.hasClaimDeniedDrafts())).toBe(true);
+
+  let state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.modules[0].payload.title).toBe('A 原始項目');
+  expect(state.modules[0].revision).toBe(1);
+
+  await pageA.evaluate((id) => window.MonthlyV7App.client.releaseLease('module', id), moduleId);
+  await pageB.waitForTimeout(1800);
+  state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.modules[0].payload.title).toBe('A 原始項目');
+  expect(state.modules[0].revision).toBe(1);
+  expect(claimCalls).toBe(1);
+
+  await pageB.getByRole('button', { name: '保存修改' }).click();
+  await expect.poll(async () => request.get('/__fake_state').then((response) => response.json())
+    .then((current) => String(current.modules[0].payload.title || '').replace(/<br>$/i, '')))
+    .toBe('B 等待期間的本機草稿');
+  state = await request.get('/__fake_state').then((response) => response.json());
+  expect(state.modules[0].revision).toBe(2);
+  expect(claimCalls).toBe(2);
+  expect(await pageB.evaluate((id) => ({
+    blocked: window.MonthlyV7App.hasClaimDeniedDrafts(),
+    marker: localStorage.getItem(`monthly_v7_claim_denied_draft:module:${id}`)
+  }), moduleId)).toEqual({ blocked: false, marker: null });
 
   await contextA.close();
   await contextB.close();
@@ -3659,6 +3748,286 @@ test('主標題 blur 自動保存不會搶回下方內容焦點', async ({ page 
   await page.waitForTimeout(300);
   await expect(lowerEditor).toBeFocused();
   await expect(mainTitle).not.toBeFocused();
+});
+
+test('延遲取得編輯權後單次點擊趨勢圖數值即可聚焦輸入且不跳頁', async ({ page }) => {
+  let releaseClaim;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  let claimCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_claim_lease' && payload?.params?.p_entity_type === 'module') {
+      claimCalls += 1;
+      await claimGate;
+    }
+    await route.continue();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    reportData[0].columns = [`
+      <div style="height:1600px">前置內容，確保正在頁面下方編輯。</div>
+      <div class="trend-chart-container" data-trend-chart="1" contenteditable="false" style="width:100%;border:2px solid #cbd5e1;padding:8px;">
+        <div class="chart-layout-wrapper" style="display:flex;gap:8px;width:100%;">
+          <div class="chart-table-area">
+            <table class="chart-data-table" contenteditable="false">
+              <thead><tr><th contenteditable="true">週期</th><th contenteditable="true">指標</th></tr></thead>
+              <tbody><tr><td contenteditable="true">05</td><td class="chart-val" data-regression-target="trend-value" contenteditable="true">1.55</td></tr></tbody>
+            </table>
+          </div>
+          <div class="chart-canvas-area" style="height:200px;min-width:240px;position:relative;"><canvas class="trend-canvas"></canvas></div>
+        </div>
+      </div>`];
+    reportData[0].colLayout = '1';
+    reportData[0].colCount = 1;
+    renderTable();
+    window.MonthlyV7App.decorateEditorRows();
+  });
+
+  const row = page.locator('#tableBody tr').first();
+  const value = row.locator('[data-regression-target="trend-value"]');
+  await value.scrollIntoViewIfNeeded();
+  await value.click();
+  await expect.poll(() => claimCalls).toBe(1);
+  const scrollBeforeClaim = await page.evaluate(() => window.scrollY);
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('1.72');
+  await expect(value).toHaveText('1.72');
+  releaseClaim();
+
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(value).toBeFocused();
+  expect(Math.abs((await page.evaluate(() => window.scrollY)) - scrollBeforeClaim)).toBeLessThanOrEqual(2);
+  await expect(value).toHaveText('1.72');
+});
+
+test('KPI 與進度卡數值在取得編輯權期間可用 Ctrl+A 只取代目前欄位', async ({ page }) => {
+  let releaseClaim;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  let claimCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_claim_lease' && payload?.params?.p_entity_type === 'module') {
+      claimCalls += 1;
+      await claimGate;
+    }
+    await route.continue();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    reportData[0].columns = [`
+      <div style="height:1600px" data-regression-sentinel="before-card">前置內容</div>
+      <div class="kpi-card-container" style="width:30%;border:2px solid #cbd5e1;padding:12px;">
+        <span>現值</span>
+        <span class="kpi-val current-val" contenteditable="true" data-regression-target="kpi-value">50</span>
+      </div>
+      <div class="progress-card-container" style="width:30%;border:2px solid #cbd5e1;padding:12px;">
+        <span>完成度</span>
+        <span class="kpi-val progress-val" contenteditable="true" data-regression-target="progress-value">50</span><span contenteditable="false">%</span>
+      </div>`];
+    reportData[0].colLayout = '1';
+    reportData[0].colCount = 1;
+    renderTable();
+    window.MonthlyV7App.decorateEditorRows();
+  });
+
+  const row = page.locator('#tableBody tr').first();
+  const value = row.locator('[data-regression-target="kpi-value"]');
+  const progressValue = row.locator('[data-regression-target="progress-value"]');
+  await value.scrollIntoViewIfNeeded();
+  await value.click();
+  await expect.poll(() => claimCalls).toBe(1);
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('72');
+  await expect(value).toHaveText('72');
+  await progressValue.click();
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('80');
+  await expect(progressValue).toHaveText('80');
+  await expect(row.locator('[data-regression-sentinel="before-card"]')).toHaveCount(1);
+  releaseClaim();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(value).toHaveText('72');
+  await expect(progressValue).toHaveText('80');
+});
+
+test('一般內容在首次輸入、取得編輯權與本機保存期間不閃跳或回頂端', async ({ page }) => {
+  let releaseClaim;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  let claimCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_claim_lease' && payload?.params?.p_entity_type === 'module') {
+      claimCalls += 1;
+      await claimGate;
+    }
+    await route.continue();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    reportData[0].columns = [`
+      <div style="height:1600px">前置內容，確保正在頁面下方編輯。</div>
+      <p data-regression-target="plain-editor">一般可編輯文字</p>`];
+    reportData[0].colLayout = '1';
+    reportData[0].colCount = 1;
+    renderTable();
+    window.MonthlyV7App.decorateEditorRows();
+  });
+
+  const row = page.locator('#tableBody tr').first();
+  const target = row.locator('[data-regression-target="plain-editor"]');
+  await target.scrollIntoViewIfNeeded();
+  await target.click();
+  await expect.poll(() => claimCalls).toBe(1);
+  await page.evaluate(() => {
+    window.__editorJumpSamples = [];
+    const startedAt = performance.now();
+    const sample = () => {
+      const target = document.querySelector('[data-regression-target="plain-editor"]');
+      if (target) {
+        window.__editorJumpSamples.push({
+          scrollY: window.scrollY,
+          targetTop: target.getBoundingClientRect().top
+        });
+      }
+      if (performance.now() - startedAt < 1600) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+  await page.keyboard.press('End');
+  await page.keyboard.type('甲');
+  await expect(target).toContainText('甲');
+  releaseClaim();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await page.waitForTimeout(1700);
+
+  const state = await target.evaluate((element) => {
+    const samples = window.__editorJumpSamples || [];
+    const scrollValues = samples.map((sample) => sample.scrollY);
+    const topValues = samples.map((sample) => sample.targetTop);
+    const selection = window.getSelection();
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    return {
+      sampleCount: samples.length,
+      scrollRange: Math.max(...scrollValues) - Math.min(...scrollValues),
+      targetTopRange: Math.max(...topValues) - Math.min(...topValues),
+      activeInEditor: element.closest('.editable-div') === document.activeElement,
+      selectionInTarget: Boolean(range && element.contains(range.startContainer))
+    };
+  });
+  expect(state.sampleCount).toBeGreaterThan(20);
+  expect(state.scrollRange).toBeLessThanOrEqual(2);
+  expect(state.targetTopRange).toBeLessThanOrEqual(2);
+  expect(state.activeInEditor).toBe(true);
+  expect(state.selectionInTarget).toBe(true);
+});
+
+test('較晚的 module claim 不搶走同列獨立控制的焦點', async ({ page }) => {
+  let releaseClaim;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  let claimCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_claim_lease' && payload?.params?.p_entity_type === 'module') {
+      claimCalls += 1;
+      await claimGate;
+    }
+    await route.continue();
+  });
+
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const row = page.locator('#tableBody tr').first();
+  const title = row.locator('.module-title-editor');
+  const indexInput = row.locator('.module-index-input');
+  await title.click();
+  await expect.poll(() => claimCalls).toBe(1);
+  await indexInput.click();
+  await expect(indexInput).toBeFocused();
+  releaseClaim();
+
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(indexInput).toBeFocused();
+});
+
+test('較早的 module claim 完成後不搶回使用者已移到另一項的焦點', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const firstRow = page.locator('#tableBody tr').nth(0);
+  const secondRow = page.locator('#tableBody tr').nth(1);
+  const firstTitle = firstRow.locator('td').nth(1).locator('.editable-div');
+  const secondTitle = secondRow.locator('td').nth(1).locator('.editable-div');
+  const firstId = await firstRow.getAttribute('data-v7-entity-id');
+
+  let releaseClaim;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  let delayedClaimCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_claim_lease'
+      && payload?.params?.p_entity_type === 'module'
+      && payload?.params?.p_entity_id === firstId) {
+      delayedClaimCalls += 1;
+      await claimGate;
+    }
+    await route.continue();
+  });
+
+  await firstTitle.click();
+  await expect.poll(() => delayedClaimCalls).toBe(1);
+  await secondTitle.click();
+  await expect(secondRow.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await secondTitle.fill('第二項仍在編輯');
+  await expect(secondTitle).toBeFocused();
+  const scrollBeforeRelease = await page.evaluate(() => window.scrollY);
+
+  releaseClaim();
+  await expect(firstRow.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(secondTitle).toBeFocused();
+  await expect(secondTitle).toHaveText('第二項仍在編輯');
+  expect(Math.abs((await page.evaluate(() => window.scrollY)) - scrollBeforeRelease)).toBeLessThanOrEqual(2);
+});
+
+test('延遲取得編輯權後指標卡第一次點擊仍在原數值格輸入且不跳頁', async ({ page }) => {
+  let releaseClaim;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  let claimCalls = 0;
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_claim_lease' && payload?.params?.p_entity_type === 'module') {
+      claimCalls += 1;
+      await claimGate;
+    }
+    await route.continue();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    reportData[0].columns = [`
+      <div style="height:1600px">前置內容，確保正在頁面下方編輯。</div>
+      <table class="custom-data-table data-card-table" style="width:30%;border:2px solid #3b82f6;border-collapse:collapse;">
+        <thead><tr><th colspan="2">指標名稱</th></tr></thead>
+        <tbody><tr><td>檢查次數</td><td data-regression-target="indicator-value">0</td></tr></tbody>
+      </table>`];
+    reportData[0].colLayout = '1';
+    reportData[0].colCount = 1;
+    renderTable();
+    window.MonthlyV7App.decorateEditorRows();
+  });
+
+  const row = page.locator('#tableBody tr').first();
+  const value = row.locator('[data-regression-target="indicator-value"]');
+  await value.scrollIntoViewIfNeeded();
+  await value.click();
+  await expect.poll(() => claimCalls).toBe(1);
+  const scrollBeforeClaim = await page.evaluate(() => window.scrollY);
+  releaseClaim();
+
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  expect(await value.evaluate((element) => {
+    const selection = window.getSelection();
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    return Boolean(range && element.contains(range.startContainer));
+  })).toBe(true);
+  expect(Math.abs((await page.evaluate(() => window.scrollY)) - scrollBeforeClaim)).toBeLessThanOrEqual(2);
+  await page.keyboard.type('9');
+  await expect(value).toContainText('9');
 });
 
 test('手動保存保留目前格子的焦點、caret 與 module lease', async ({ page, request }) => {

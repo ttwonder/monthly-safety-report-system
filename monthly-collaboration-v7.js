@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.6.0';
+  const buildId = '7.6.1';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -162,6 +162,11 @@
       this.status = { mode: 'unknown' };
       this.persistChain = Promise.resolve();
       this.claimPromises = new Map();
+      this.pendingModuleEditTargets = new Map();
+      this.claimDeniedModules = new Set();
+      this.leaseDeniedDraftModules = new Set();
+      this.provisionalDirtyModules = new Set();
+      this.retryingDeniedModules = new Set();
       this.moduleReleaseTimers = new Map();
       this.revisionConflictBlocks = new Map();
       this.pendingRecoveryBlock = null;
@@ -191,6 +196,7 @@
         applyBundle: async (bundle, snapshot) => {
           if (typeof this.host.applyBundle === 'function') await this.host.applyBundle(bundle, snapshot);
           this.rebuildRevisionConflictBlocks(snapshot);
+          this.restoreClaimDeniedDraftMarkers(snapshot);
           if (this.isRevisionConflictBlocked()) this.publishRevisionConflictStatus();
         },
         applyEntity: async (entity, event) => {
@@ -238,6 +244,7 @@
         onTransportError: (error) => this.reportError(error),
         onSessionStateChanged: (event) => {
           if (typeof this.host.onSessionStateChanged === 'function') this.host.onSessionStateChanged(event);
+          this.restoreClaimDeniedDraftMarkers();
           this.decorateEditorRows();
         },
         onItemSaved: (info) => {
@@ -270,6 +277,7 @@
         throw error;
       }
       this.initialized = true;
+      this.restoreClaimDeniedDraftMarkers();
       if (this.isActive()) this.installEditGuards();
       return this.status;
     }
@@ -894,10 +902,113 @@
       delete row._serverPayload;
       delete row._serverRevision;
       this.clearRevisionConflict('module', item._v7Id);
+      this.allowClaimDeniedRetry(item._v7Id);
+      this.retryingDeniedModules.delete(String(item._v7Id || ''));
     }
 
     hasModuleDraft(entityId) {
       return !!(this.client && entityId && this.client.readDraft('module', entityId));
+    }
+
+    claimDeniedDraftMarkerKey(entityId) {
+      const id = String(entityId || '');
+      return id ? `monthly_v7_claim_denied_draft:module:${id}` : '';
+    }
+
+    persistClaimDeniedDraftMarker(entityId) {
+      const storage = this.client?.draftStorage;
+      const key = this.claimDeniedDraftMarkerKey(entityId);
+      if (!storage || !key) return false;
+      try {
+        storage.setItem(key, JSON.stringify({
+          entityType: 'module',
+          entityId: String(entityId),
+          reportId: String(this.client?.snapshot?.report?.id || ''),
+          blockedAt: new Date().toISOString()
+        }));
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    }
+
+    clearClaimDeniedDraftMarker(entityId) {
+      const storage = this.client?.draftStorage;
+      const key = this.claimDeniedDraftMarkerKey(entityId);
+      if (!storage || !key) return;
+      try { storage.removeItem(key); } catch (_error) { /* best effort */ }
+    }
+
+    restoreClaimDeniedDraftMarkers(snapshot = this.client?.snapshot) {
+      const storage = this.client?.draftStorage;
+      if (!storage || !snapshot) return 0;
+      const reportId = String(snapshot?.report?.id || '');
+      this.leaseDeniedDraftModules.clear();
+      for (const row of (snapshot.modules || [])) {
+        const id = String(row?.id || '');
+        const key = this.claimDeniedDraftMarkerKey(id);
+        if (!id || !key) continue;
+        let marker = null;
+        try { marker = JSON.parse(storage.getItem(key) || 'null'); }
+        catch (_error) { marker = null; }
+        const valid = marker
+          && String(marker.entityType || '') === 'module'
+          && String(marker.entityId || '') === id
+          && (!marker.reportId || !reportId || String(marker.reportId) === reportId)
+          && (this.provisionalDirtyModules.has(id) || this.hasModuleDraft(id));
+        if (!valid) {
+          if (marker) this.clearClaimDeniedDraftMarker(id);
+          continue;
+        }
+        this.claimDeniedModules.add(id);
+        this.leaseDeniedDraftModules.add(id);
+      }
+      return this.leaseDeniedDraftModules.size;
+    }
+
+    hasClaimDeniedDrafts() {
+      const activeIds = new Set(((this.client?.snapshot?.modules) || []).map((row) => String(row?.id || '')));
+      return Array.from(this.leaseDeniedDraftModules).some((id) => activeIds.has(String(id))
+        && (this.provisionalDirtyModules.has(id) || this.hasModuleDraft(id)));
+    }
+
+    allowClaimDeniedRetry(entityId = '') {
+      const id = String(entityId || '');
+      if (id) {
+        this.claimDeniedModules.delete(id);
+        this.provisionalDirtyModules.delete(id);
+        this.clearClaimDeniedDraftMarker(id);
+        return this.leaseDeniedDraftModules.delete(id);
+      }
+      const ids = new Set([...this.claimDeniedModules, ...this.leaseDeniedDraftModules]);
+      const hadBlockedDraft = this.leaseDeniedDraftModules.size > 0;
+      ids.forEach((blockedId) => this.clearClaimDeniedDraftMarker(blockedId));
+      this.claimDeniedModules.clear();
+      this.leaseDeniedDraftModules.clear();
+      this.provisionalDirtyModules.clear();
+      return hadBlockedDraft;
+    }
+
+    markClaimDenied(entityIds, error, options = {}) {
+      const ids = (Array.isArray(entityIds) ? entityIds : [entityIds])
+        .map((entityId) => String(entityId || ''))
+        .filter(Boolean);
+      ids.forEach((id) => this.claimDeniedModules.add(id));
+      const isLeaseHeld = String(error?.code || '') === 'LEASE_HELD';
+      const blockedIds = isLeaseHeld
+        ? ids.filter((id) => options.forceLeaseBlock === true
+          || this.provisionalDirtyModules.has(id)
+          || this.hasModuleDraft(id))
+        : [];
+      const blockedSet = new Set(blockedIds);
+      ids.filter((id) => !blockedSet.has(id)).forEach((id) => this.provisionalDirtyModules.delete(id));
+      if (!blockedIds.length) return false;
+      blockedIds.forEach((id) => {
+        this.leaseDeniedDraftModules.add(id);
+        this.persistClaimDeniedDraftMarker(id);
+      });
+      if (typeof this.host.onClaimDenied === 'function') this.host.onClaimDenied(error);
+      return true;
     }
 
     async rebaseModulesForConfirmedRetry(items, conflictError, operationContext = this.captureOperationContext()) {
@@ -995,6 +1106,11 @@
       try {
         await commit();
       } catch (error) {
+        this.markClaimDenied(
+          changed.map((item) => item?._v7Id).filter(Boolean),
+          error,
+          { forceLeaseBlock: true }
+        );
         if (error && error.code === 'REVISION_CONFLICT' && options.resolveRevisionConflict === true) {
           await this.rebaseModulesForConfirmedRetry(changed, error, operationContext);
           this.assertOperationContext(operationContext, 'save_changed_modules');
@@ -1054,6 +1170,12 @@
         return { mode: 'v7', localOnly: true };
       }
       const liveItems = Array.isArray(items) ? items : [];
+      if (options.allowClaimDeniedRetry === true) {
+        this.allowClaimDeniedRetry();
+      } else if (this.hasClaimDeniedDrafts()) {
+        this.setStatus('項目編輯權未取得；修改只保存在本機，背景上傳已暫停。請再次點該項或按「保存修改」重試。', 'warn');
+        return { mode: 'v7', saved: false, localOnly: true, leaseBlocked: true };
+      }
       const writeBlockedModule = liveItems.find((item) => (
         item && item._v7Id && this.isWriteFailureBlocked('module', item._v7Id)
       ));
@@ -1394,10 +1516,11 @@
       root.document.querySelectorAll('#tableBody tr[data-v7-entity-id]').forEach((row) => {
         const id = row.dataset.v7EntityId;
         const owned = !!this.client.getLease('module', id);
-        row.dataset.v7LeaseState = owned ? 'owned' : 'idle';
+        const claiming = this.claimPromises.has(`module:${id}`);
+        row.dataset.v7LeaseState = owned ? 'owned' : (claiming ? 'claiming' : 'idle');
         row.querySelectorAll('.editable-div').forEach((element) => {
           element.dataset.v7Editable = '1';
-          const editable = owned && !formalPrintLocked ? 'true' : 'false';
+          const editable = (owned || claiming) && !formalPrintLocked ? 'true' : 'false';
           if (element.getAttribute('contenteditable') !== editable) {
             element.setAttribute('contenteditable', editable);
           }
@@ -1408,8 +1531,19 @@
           badge.className = 'v7-item-lock-badge no-print text-[10px] font-bold';
           (row.querySelector('.module-actions-cell') || row.lastElementChild || row.querySelector('td'))?.appendChild(badge);
         }
-        badge.textContent = owned ? '你正在編輯' : '點一下取得編輯權';
-        badge.className = `v7-item-lock-badge no-print text-[10px] font-bold ${owned ? 'text-emerald-700' : 'text-slate-400'}`;
+        if (owned) {
+          this.claimDeniedModules.delete(id);
+          this.leaseDeniedDraftModules.delete(id);
+          this.provisionalDirtyModules.delete(id);
+          this.clearClaimDeniedDraftMarker(id);
+          row.removeAttribute('data-v7-claim-denied');
+        } else if (this.claimDeniedModules.has(id)) {
+          row.dataset.v7ClaimDenied = 'true';
+        } else {
+          row.removeAttribute('data-v7-claim-denied');
+        }
+        badge.textContent = owned ? '你正在編輯' : (claiming ? '取得編輯權中…' : '點一下取得編輯權');
+        badge.className = `v7-item-lock-badge no-print text-[10px] font-bold ${owned ? 'text-emerald-700' : (claiming ? 'text-amber-600' : 'text-slate-400')}`;
       });
     }
 
@@ -1479,14 +1613,68 @@
       if (this.guardsInstalled || !root.document) return;
       this.guardsInstalled = true;
       const rowFor = (target) => target && target.closest ? target.closest('#tableBody tr[data-v7-entity-id]') : null;
-      const request = (row, focusTarget) => {
-        if (!row || !this.currentUser()) return;
+      const request = (row, sourceTarget) => {
+        if (!row || !this.currentUser()) return null;
         const id = row.dataset.v7EntityId;
-        this.claimModule(id).then(() => {
+        const key = `module:${id}`;
+        if (sourceTarget && row.contains(sourceTarget)) this.pendingModuleEditTargets.set(id, sourceTarget);
+        const existingClaim = this.claimPromises.get(key);
+        if (existingClaim) {
           this.decorateEditorRows();
-          if (focusTarget && focusTarget.dataset.v7Editable === '1') focusTarget.focus({ preventScroll: true });
+          return existingClaim;
+        }
+        const claimPromise = this.claimModule(id);
+        this.decorateEditorRows();
+        claimPromise.then(() => {
+          this.decorateEditorRows();
+          const intendedTarget = this.pendingModuleEditTargets.get(id) || sourceTarget;
+          const focusTarget = intendedTarget && intendedTarget.closest
+            ? intendedTarget.closest('[contenteditable="true"], [data-v7-editable="1"]')
+            : null;
+          const selection = root.getSelection ? root.getSelection() : null;
+          const activeRange = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+          const activeElement = root.document?.activeElement || null;
+          const activeBelongsToRow = Boolean(activeElement && row.contains(activeElement));
+          const rangeBelongsToRow = Boolean(
+            activeRange
+            && row.contains(activeRange.startContainer)
+            && row.contains(activeRange.endContainer)
+          );
+          const activeIsNeutral = !activeElement
+            || activeElement === root.document.body
+            || activeElement === root.document.documentElement;
+          const activeIsIndependent = Boolean(
+            activeElement
+            && activeElement.closest
+            && activeElement.closest('[data-v7-independent-action="1"],button,select,input,label')
+          );
+          const shouldRestoreFocus = !activeIsIndependent && (activeBelongsToRow
+            ? (!activeRange || rangeBelongsToRow)
+            : (activeIsNeutral && rangeBelongsToRow));
+          const rangeBelongsToTarget = Boolean(
+            activeRange
+            && focusTarget
+            && focusTarget.contains(activeRange.startContainer)
+            && focusTarget.contains(activeRange.endContainer)
+          );
+          const preservedRange = rangeBelongsToTarget ? activeRange.cloneRange() : null;
+          if (shouldRestoreFocus && focusTarget && row.contains(focusTarget) && typeof focusTarget.focus === 'function') {
+            focusTarget.focus({ preventScroll: true });
+            if (preservedRange && selection) {
+              selection.removeAllRanges();
+              selection.addRange(preservedRange);
+            }
+          }
+          this.provisionalDirtyModules.delete(id);
+          if (this.retryingDeniedModules.delete(id) && typeof this.host.onClaimRetry === 'function') {
+            this.host.onClaimRetry(id);
+          }
           this.toast('已取得此項目編輯權，可開始修改。');
         }).catch((error) => {
+          this.retryingDeniedModules.delete(id);
+          this.markClaimDenied(id, error);
+          row.dataset.v7ClaimDenied = 'true';
+          this.decorateEditorRows();
           if (error.code === 'LEASE_HELD') {
             this.setStatus(error.message, 'warn', { protectForMs: 10000 });
             this.toast(error.message);
@@ -1494,7 +1682,10 @@
             this.reportError(error);
             this.toast(`無法取得編輯權：${error.message}`);
           }
+        }).finally(() => {
+          this.pendingModuleEditTargets.delete(id);
         });
+        return claimPromise;
       };
       root.document.addEventListener('pointerdown', (event) => {
         const row = rowFor(event.target);
@@ -1507,7 +1698,12 @@
           else if (this.client.getLease('module', id)) this.scheduleUnchangedModuleRelease(candidate);
         });
         if (independentAction) return;
-        if (row && !this.client.getLease('module', row.dataset.v7EntityId)) request(row, event.target);
+        if (row && !this.client.getLease('module', row.dataset.v7EntityId)) {
+          const id = row.dataset.v7EntityId;
+          if (this.allowClaimDeniedRetry(id)) this.retryingDeniedModules.add(id);
+          row.removeAttribute('data-v7-claim-denied');
+          request(row, event.target);
+        }
       }, true);
       root.document.addEventListener('focusout', (event) => {
         const row = rowFor(event.target);
@@ -1517,10 +1713,20 @@
       ['beforeinput', 'paste', 'drop'].forEach((type) => root.document.addEventListener(type, (event) => {
         const row = rowFor(event.target);
         if (!row || !this.currentUser()) return;
-        if (!this.client.getLease('module', row.dataset.v7EntityId)) {
+        const id = row.dataset.v7EntityId;
+        if (!this.client.getLease('module', id)) {
+          if (row.dataset.v7ClaimDenied === 'true') {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+          request(row, event.target);
+          if (this.claimPromises.has(`module:${id}`)) {
+            this.provisionalDirtyModules.add(id);
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
-          request(row, event.target);
         }
       }, true));
       root.document.addEventListener('click', (event) => {
