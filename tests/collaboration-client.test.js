@@ -433,7 +433,7 @@ test('救援待確認期間的後續既有項目編輯在 full snapshot 後仍�
     monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
     monthly_v7_get_snapshot: () => JSON.parse(JSON.stringify(snapshot))
   });
-  const app = new MonthlyV7BrowserApp({ transport });
+  const app = new MonthlyV7BrowserApp({ transport, draftStorage: drafts });
   await app.initialize({ workspaceKey: 'workspace-test' }, {
     getLegacyLocalState: async () => ({
       fileId: 'legacy-report', recoverySourceId: 'legacy-report',
@@ -5066,6 +5066,7 @@ test('adapter 遇到部分 batch pending 時不把未變更 module 納入重試'
     hasPendingOperation: () => false,
     readDraft: () => null,
     clearDraft: () => {},
+    flushDraftStorage: async () => {},
     async saveModuleBatch(items) { submittedIds = items.map((item) => item._v7Id); },
     async saveModule() { throw new Error('single save should not be used'); }
   };

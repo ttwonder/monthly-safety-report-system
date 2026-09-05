@@ -921,19 +921,28 @@ function rpc(name, p) {
   if (name === 'monthly_v7_save_module_batch') {
     const user = userForSession(p.p_user_session_id);
     if (!user) return { ok: false, error: 'USER_SESSION_INVALID' };
+    // Match the SQL's actor/request-bound replay BEFORE current lease/revision
+    // checks; losing an ACK must not manufacture a second save or conflict.
+    const requestHash = canonical({
+      command: 'save_module_batch', reportId: p.p_report_id,
+      leaseId: p.p_lease_id, fencingToken: Number(p.p_fencing_token), changes: p.p_changes
+    });
+    const replay = replayOperation(p.p_operation_id, user.id, requestHash);
+    if (replay) return replay;
+    const finish = result => storeOperation(p.p_operation_id, user.id, requestHash, result);
     const lease = state.leases.get(`kpi_batch:${state.report.id}`);
     if (!lease || lease.expiresAt <= now() || lease.leaseId !== p.p_lease_id
       || lease.fencingToken !== Number(p.p_fencing_token)
       || lease.clientSessionId !== p.p_client_session_id || lease.holderUserId !== user.id) {
-      return { ok: false, error: 'LEASE_LOST' };
+      return finish({ ok: false, error: 'LEASE_LOST' });
     }
     const changes = Array.isArray(p.p_changes) ? p.p_changes : [];
     if (!changes.length) return { ok: false, error: 'INVALID_PAYLOAD' };
     for (const change of changes) {
       const module = state.modules.find((entry) => entry.id === change.moduleId);
-      if (!module) return { ok: false, error: 'ENTITY_NOT_FOUND' };
+      if (!module) return finish({ ok: false, error: 'ENTITY_NOT_FOUND' });
       if (module.revision !== Number(change.expectedRevision)) {
-        return { ok: false, error: 'REVISION_CONFLICT', entityId: module.id, currentRevision: module.revision };
+        return finish({ ok: false, error: 'REVISION_CONFLICT', entityId: module.id, currentRevision: module.revision });
       }
     }
     const updated = [];
@@ -946,7 +955,7 @@ function rpc(name, p) {
       event('module', module.id, module.revision, p.p_operation_id);
     }
     lease.expiresAt = now() + 90000;
-    return { ok: true, updated, operationId: p.p_operation_id };
+    return finish({ ok: true, updated, operationId: p.p_operation_id });
   }
   if (name === 'monthly_v7_reorder_modules') {
     const user = userForSession(p.p_user_session_id);
@@ -1315,7 +1324,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/supabase-config.js') {
     res.writeHead(200, { 'Content-Type': mime['.js'] });
-    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace',topicRequestTimeoutMs:800};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.6.3'});`);
+    return res.end(`window.MONTHLY_REPORT_SUPABASE_CONFIG={supabaseUrl:${JSON.stringify(`http://${req.headers.host}`)},anonKey:'fake-anon-key',workspaceKey:'browser-workspace',topicRequestTimeoutMs:800};window.MONTHLY_REPORT_ASSET_BUILDS=Object.assign({},window.MONTHLY_REPORT_ASSET_BUILDS,{config:'7.6.4'});`);
   }
   if (url.pathname === '/vendor/supabase-2.112.2.js') { res.writeHead(200, { 'Content-Type': mime['.js'] }); return res.end(fakeSdk); }
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;

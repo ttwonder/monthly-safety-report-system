@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.6.3';
+  const buildId = '7.6.4';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
@@ -11,6 +11,185 @@
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (core, buildId) {
   'use strict';
+
+  // Synchronous editor reads, asynchronous durable commits. Only recovery data is
+  // moved; site/session settings and unrelated localStorage keys stay untouched.
+  class DurableDraftStorage {
+    constructor(indexedDB, legacyStorage, options = {}) {
+      this.indexedDB = indexedDB;
+      this.legacyStorage = legacyStorage;
+      this.name = options.name || 'monthly_v7_recovery';
+      this.onError = options.onError || (() => {});
+      this.values = new Map();
+      this.base = new Map();
+      this.dirty = new Map();
+      this.db = null;
+      this.flight = null;
+      this.error = null;
+      this.channel = null;
+    }
+
+    manages(key) {
+      return /^monthly_v7_(?:draft:|pending:|claim_denied_draft:)/.test(String(key));
+    }
+
+    failure(cause) {
+      const error = new Error('本機備份未能寫入；請勿刷新或關閉分頁。請先用「保存目前月報」另存備份，再重試保存。');
+      error.code = 'LOCAL_DRAFT_STORAGE_FAILED';
+      error.cause = cause;
+      this.error = error;
+      this.onError(error);
+      return error;
+    }
+
+    async initialize() {
+      try {
+        this.db = await new Promise((resolve, reject) => {
+          const request = this.indexedDB.open(this.name, 1);
+          request.onupgradeneeded = () => request.result.createObjectStore('entries', { keyPath: 'key' });
+          request.onerror = () => reject(request.error);
+          request.onblocked = () => reject(new Error('LOCAL_RECOVERY_DATABASE_BLOCKED'));
+          request.onsuccess = () => resolve(request.result);
+        });
+        this.db.onversionchange = () => this.db.close();
+        const legacy = new Map();
+        for (let i = 0; i < (this.legacyStorage?.length || 0); i += 1) {
+          const key = this.legacyStorage.key(i);
+          if (this.manages(key)) legacy.set(key, this.legacyStorage.getItem(key));
+        }
+        // Import in one transaction. Conflicting copies remain intact instead of
+        // guessing which pending operation or draft should win.
+        await new Promise((resolve, reject) => {
+          const tx = this.db.transaction('entries', 'readwrite');
+          const store = tx.objectStore('entries');
+          let conflict = null;
+          for (const [key, value] of legacy) {
+            const request = store.get(key);
+            request.onsuccess = () => {
+              if (request.result && request.result.value !== value) {
+                conflict = new Error('LOCAL_RECOVERY_COPY_CONFLICT');
+                tx.abort();
+              } else store.put({ key, value });
+            };
+          }
+          tx.oncomplete = resolve;
+          tx.onabort = () => reject(conflict || tx.error || new Error('LOCAL_RECOVERY_IMPORT_ABORTED'));
+        });
+        // Never remove an old key until IDB transaction COMPLETE, and never remove
+        // a newer value written meanwhile by another (possibly old-build) tab.
+        for (const [key, value] of legacy) {
+          if (this.legacyStorage.getItem(key) === value) this.legacyStorage.removeItem(key);
+        }
+        await this.refresh();
+        if (typeof BroadcastChannel === 'function') {
+          this.channel = new BroadcastChannel(this.name);
+          this.channel.onmessage = () => { this.refresh().catch(error => this.failure(error)); };
+        }
+        return this;
+      } catch (error) { throw this.failure(error); }
+    }
+
+    async refresh() {
+      const rows = await new Promise((resolve, reject) => {
+        const tx = this.db.transaction('entries', 'readonly');
+        const request = tx.objectStore('entries').getAll();
+        tx.oncomplete = () => resolve(request.result);
+        tx.onabort = () => reject(tx.error || new Error('LOCAL_RECOVERY_READ_ABORTED'));
+      });
+      const latest = new Map(rows.map(row => [row.key, row.value]));
+      for (const key of new Set([...this.base.keys(), ...latest.keys()])) {
+        if (this.dirty.has(key)) continue;
+        if (latest.has(key)) {
+          this.base.set(key, latest.get(key));
+          this.values.set(key, latest.get(key));
+        } else {
+          this.base.delete(key);
+          this.values.delete(key);
+        }
+      }
+    }
+
+    getItem(key) {
+      if (!this.manages(key)) return this.legacyStorage?.getItem(key) ?? null;
+      return this.values.get(String(key)) ?? null;
+    }
+
+    setItem(key, value) {
+      if (!this.manages(key)) return this.legacyStorage?.setItem(key, value);
+      key = String(key); value = String(value);
+      if (this.getItem(key) === value) return;
+      this.values.set(key, value);
+      this.dirty.set(key, { value });
+      this.schedule();
+    }
+
+    removeItem(key) {
+      if (!this.manages(key)) return this.legacyStorage?.removeItem(key);
+      key = String(key);
+      if (this.getItem(key) === null) return;
+      this.values.delete(key);
+      this.dirty.set(key, { value: null });
+      this.schedule();
+    }
+
+    keys() {
+      const keys = new Set(this.values.keys());
+      for (let i = 0; i < (this.legacyStorage?.length || 0); i += 1) {
+        const key = this.legacyStorage.key(i);
+        if (!this.manages(key)) keys.add(key);
+      }
+      return Array.from(keys);
+    }
+    get length() { return this.keys().length; }
+    key(index) { return this.keys()[index] ?? null; }
+    hasUnflushed() { return this.dirty.size > 0 || !!this.flight; }
+
+    schedule() {
+      // A rejected background write is visible, not an unhandled rejection or a
+      // false durability receipt. Keep the dirty values for explicit retry.
+      if (!this.error) Promise.resolve().then(() => this.flush()).catch(() => {});
+    }
+
+    flush() {
+      if (this.flight) return this.flight;
+      const run = async () => {
+        try {
+          while (this.dirty.size) {
+            const batch = new Map(this.dirty);
+            await new Promise((resolve, reject) => {
+              const tx = this.db.transaction('entries', 'readwrite');
+              const store = tx.objectStore('entries');
+              let conflict = null;
+              for (const [key, change] of batch) {
+                const request = store.get(key);
+                request.onsuccess = () => {
+                  const current = request.result?.value ?? null;
+                  if (current !== (this.base.get(key) ?? null) && current !== change.value) {
+                    conflict = new Error('LOCAL_RECOVERY_COPY_CONFLICT');
+                    tx.abort();
+                    return;
+                  }
+                  if (change.value === null) store.delete(key);
+                  else store.put({ key, value: change.value });
+                };
+              }
+              tx.oncomplete = resolve;
+              tx.onabort = () => reject(conflict || tx.error || new Error('LOCAL_RECOVERY_WRITE_ABORTED'));
+            });
+            for (const [key, change] of batch) {
+              if (change.value === null) this.base.delete(key);
+              else this.base.set(key, change.value);
+              if (this.dirty.get(key) === change) this.dirty.delete(key);
+            }
+            this.channel?.postMessage('changed');
+          }
+          this.error = null;
+        } catch (error) { throw this.failure(error); }
+      };
+      this.flight = run().finally(() => { this.flight = null; });
+      return this.flight;
+    }
+  }
 
   class MonthlyV7Client {
     constructor(options = {}) {
@@ -47,6 +226,10 @@
       this.operationReceipt = null;
       this.operationReceiptHistory = [];
       this.lastRpcName = '';
+    }
+
+    async flushDraftStorage() {
+      if (typeof this.draftStorage?.flush === 'function') await this.draftStorage.flush();
     }
 
     siteResumeStorageKey() { return 'monthly_v7_site_resume_marker'; }
@@ -1837,6 +2020,7 @@
     }
 
     async executeOperation(rpcName, params, pendingKey, options = {}) {
+      const operationContext = this.captureSessionContext();
       const storageKey = `monthly_v7_pending:${pendingKey}`;
       const signature = JSON.stringify(params);
       const requestedOrigin = String(options.saveOrigin || 'unspecified');
@@ -1880,7 +2064,6 @@
       const storedEnvelope = { operationId, signature: operationSignature, createdAt: new Date().toISOString() };
       if (pending && pending.actorUserId) storedEnvelope.actorUserId = pending.actorUserId;
       else if (!pending && currentActorId) storedEnvelope.actorUserId = currentActorId;
-      if (this.draftStorage) this.draftStorage.setItem(storageKey, JSON.stringify(storedEnvelope));
       const request = Object.assign({}, operationParams, { p_operation_id: operationId });
       let lastError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1888,9 +2071,25 @@
           state: 'SAVING', attempt: attempt + 1, errorCode: '', updatedAt: new Date().toISOString()
         }));
         try {
+          if (this.draftStorage) this.draftStorage.setItem(storageKey, JSON.stringify(storedEnvelope));
+          if (this.draftStorage?.flush) await this.flushDraftStorage();
+          this.assertSessionContext(operationContext, rpcName);
           const result = await this.rpc(rpcName, request);
           const preserveMismatch = result && result.ok === false && result.error === 'IDEMPOTENCY_MISMATCH';
-          if (this.draftStorage && !preserveMismatch) this.draftStorage.removeItem(storageKey);
+          if (this.draftStorage && !preserveMismatch) {
+            const savedPending = this.draftStorage.getItem(storageKey);
+            this.draftStorage.removeItem(storageKey);
+            if (this.draftStorage.flush) {
+              try { await this.flushDraftStorage(); }
+              catch (error) {
+                // A confirmed server response must remain replayable when local
+                // cleanup fails; do not lose the original operation identity.
+                if (savedPending !== null) this.draftStorage.setItem(storageKey, savedPending);
+                throw error;
+              }
+              this.assertSessionContext(operationContext, rpcName);
+            }
+          }
           const resultCode = result && result.ok === false ? String(result.error || '') : '';
           this.setOperationReceipt(Object.assign({}, this.operationReceipt, {
             state: result && result.ok === true
@@ -1912,13 +2111,15 @@
             errorCode: code,
             updatedAt: new Date().toISOString()
           }));
-          if (authorityCode || this.sessionErrorCode(error) || error?.code === 'STALE_SESSION_RESPONSE') throw error;
+          if (authorityCode || this.sessionErrorCode(error)
+            || ['STALE_SESSION_RESPONSE', 'LOCAL_DRAFT_STORAGE_FAILED'].includes(error?.code)) throw error;
         }
       }
       throw lastError;
     }
 
     async executeSensitiveOperation(rpcName, params, pendingKey, options = {}) {
+      const operationContext = this.captureSessionContext();
       const storageKey = `monthly_v7_pending:${pendingKey}`;
       const requestedOrigin = String(options.saveOrigin || 'manual');
       const currentActorId = String((this.currentUser() && this.currentUser().id) || '');
@@ -1967,7 +2168,6 @@
         pendingKey: String(pendingKey || ''),
         resultUnknown: true
       };
-      if (this.draftStorage) this.draftStorage.setItem(storageKey, JSON.stringify(envelope));
       this.setOperationReceipt({
         state: 'SAVING', rpcName: String(rpcName || ''), pendingKey: String(pendingKey || ''),
         operationId: String(operationId || ''), requestedOrigin,
@@ -1977,14 +2177,29 @@
       const request = Object.assign({}, params, { p_operation_id: operationId });
       let lastError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        if (this.draftStorage) this.draftStorage.setItem(storageKey, JSON.stringify(envelope));
         this.setOperationReceipt(Object.assign({}, this.operationReceipt, {
           state: 'SAVING', attempt: attempt + 1, errorCode: '', updatedAt: new Date().toISOString()
         }));
         try {
+          if (this.draftStorage) this.draftStorage.setItem(storageKey, JSON.stringify(envelope));
+          if (this.draftStorage?.flush) await this.flushDraftStorage();
+          this.assertSessionContext(operationContext, rpcName);
           const result = await this.rpc(rpcName, request);
           const preserveMismatch = result && result.ok === false && result.error === 'IDEMPOTENCY_MISMATCH';
-          if (this.draftStorage && !preserveMismatch) this.draftStorage.removeItem(storageKey);
+          if (this.draftStorage && !preserveMismatch) {
+            const savedPending = this.draftStorage.getItem(storageKey);
+            this.draftStorage.removeItem(storageKey);
+            if (this.draftStorage.flush) {
+              try { await this.flushDraftStorage(); }
+              catch (error) {
+                // A confirmed server response must remain replayable when local
+                // cleanup fails; do not lose the original operation identity.
+                if (savedPending !== null) this.draftStorage.setItem(storageKey, savedPending);
+                throw error;
+              }
+              this.assertSessionContext(operationContext, rpcName);
+            }
+          }
           const resultCode = result && result.ok === false ? String(result.error || '') : '';
           this.setOperationReceipt(Object.assign({}, this.operationReceipt, {
             state: result && result.ok === true
@@ -2006,8 +2221,9 @@
             errorCode: code,
             updatedAt: new Date().toISOString()
           }));
-          if (!resultUnknown && this.draftStorage) this.draftStorage.removeItem(storageKey);
-          if (authorityCode || this.sessionErrorCode(error) || error?.code === 'STALE_SESSION_RESPONSE') throw error;
+          if (!resultUnknown && error?.code !== 'LOCAL_DRAFT_STORAGE_FAILED' && this.draftStorage) this.draftStorage.removeItem(storageKey);
+          if (authorityCode || this.sessionErrorCode(error)
+            || ['STALE_SESSION_RESPONSE', 'LOCAL_DRAFT_STORAGE_FAILED'].includes(error?.code)) throw error;
         }
       }
       throw lastError;
@@ -3026,5 +3242,5 @@
     }
   }
 
-  return Object.freeze({ BUILD_ID: buildId, MonthlyV7Client });
+  return Object.freeze({ BUILD_ID: buildId, MonthlyV7Client, DurableDraftStorage });
 });

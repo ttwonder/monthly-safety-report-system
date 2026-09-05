@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.6.3';
+  const buildId = '7.6.4';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -157,6 +157,7 @@
   class MonthlyV7BrowserApp {
     constructor(options = {}) {
       this.transport = options.transport || new SupabaseV7Transport(root.supabase);
+      this.draftStorage = options.draftStorage || null;
       this.host = options.host || {};
       this.client = null;
       this.status = { mode: 'unknown' };
@@ -263,10 +264,16 @@
       if (browserBuildHandshakeRequired) assertStartupBuild();
       if (host) this.setHost(host);
       if (!config || !config.workspaceKey) throw new Error('SUPABASE_CONFIG_REQUIRED');
+      const draftStorage = this.draftStorage || await new clientApi.DurableDraftStorage(root.indexedDB, root.localStorage, {
+        onError: (error) => {
+          this.setStatus(error.message, 'error');
+          if (typeof this.host.onLocalPersistenceError === 'function') this.host.onLocalPersistenceError(error);
+        }
+      }).initialize();
       this.client = new clientApi.MonthlyV7Client({
         transport: this.transport,
         sessionStorage: root.sessionStorage,
-        draftStorage: root.localStorage,
+        draftStorage,
         resumeStorage: root.localStorage,
         host: this.clientHost()
       });
@@ -594,6 +601,7 @@
       const run = this.persistChain.catch(() => undefined).then(async () => {
         this.assertOperationContext(operationContext, operationName);
         const result = await task(operationContext);
+        await this.client.flushDraftStorage();
         this.assertOperationContext(operationContext, operationName);
         return result;
       });

@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.3';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.4';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -6751,10 +6751,12 @@
             const values = {};
             let storageReadable = true;
             try {
-                for (let index = 0; index < localStorage.length; index += 1) {
-                    const key = String(localStorage.key(index) || '');
+                const storage = window.MonthlyV7App?.client?.draftStorage || localStorage;
+                storageReadable = !storage.error && !storage.hasUnflushed?.();
+                for (let index = 0; index < storage.length; index += 1) {
+                    const key = String(storage.key(index) || '');
                     if (!key.startsWith('monthly_v7_draft:') && !key.startsWith('monthly_v7_pending:')) continue;
-                    values[key] = localStorage.getItem(key);
+                    values[key] = storage.getItem(key);
                 }
             } catch (_error) {
                 storageReadable = false;
@@ -6975,6 +6977,11 @@
         }
 
         function v4SetCloudRuntimeStatus(text, kind = 'muted', options = {}) {
+            const localError = window.MonthlyV7App?.client?.draftStorage?.error;
+            if (localError && options.allowPendingFailureOverride !== true) {
+                text = localError.message;
+                kind = 'error';
+            }
             const now = Date.now();
             const protectForMs = Math.max(0, Number(options.protectForMs) || 0);
             const criticalStatusProtected = now < V7_CRITICAL_STATUS_UNTIL
@@ -7088,6 +7095,7 @@
         }
 
         function v7ScheduleCloudAutoSave(delayMs = v7CloudAutoSaveIntervalMs(), saveOrigin = 'autosave') {
+            if (window.MonthlyV7App?.client?.draftStorage?.error) return;
             if (V4_CLOUD_APPLYING || V4_AUTO_SAVE_TIMER || !v7HasUnsyncedCloudChanges()) return;
             if (v7PublishClaimDeniedDraftBlocked()) return;
             if (!window.MonthlyV7App?.isActive?.() || !window.MonthlyV7App?.isWriteReady?.()) return;
@@ -7118,6 +7126,24 @@
         function v7MarkCloudDirty(reason = '修改') {
             V7_CLOUD_DIRTY_GENERATION += 1;
             if (typeof v7PreserveVisibleEditorDrafts === 'function') v7PreserveVisibleEditorDrafts();
+            const generation = V7_CLOUD_DIRTY_GENERATION;
+            const client = window.MonthlyV7App?.client;
+            if (client?.draftStorage?.hasUnflushed?.()) {
+                v4SetCloudRuntimeStatus(`${reason}已暫存於目前分頁；正在寫入本機草稿。`, 'muted');
+                client.flushDraftStorage().then(() => {
+                    if (generation === V7_CLOUD_DIRTY_GENERATION && !V4_CLOUD_SAVING
+                        && generation > V7_CLOUD_SAVED_GENERATION) v7PublishDurableDraftStatus(reason);
+                }).catch(error => {
+                    v7ClearCloudAutoSaveTimer();
+                    v4SetCloudRuntimeStatus(error.message, 'error');
+                });
+                return generation;
+            }
+            v7PublishDurableDraftStatus(reason);
+            return generation;
+        }
+
+        function v7PublishDurableDraftStatus(reason) {
             if (window.MonthlyV7App?.client?.snapshot?.legacyLocalRecovery) {
                 v7ClearCloudAutoSaveTimer();
                 v4SetCloudRuntimeStatus(v7LegacyRecoveryStatusText(), 'warn');
@@ -7542,6 +7568,12 @@
                         renderV4CloudPane();
                         return true;
                     } catch (error) {
+                        if (error?.code === 'LOCAL_DRAFT_STORAGE_FAILED') {
+                            v7ClearCloudAutoSaveTimer();
+                            v4SetCloudRuntimeStatus(error.message, 'error');
+                            if (!silent) alert(error.message);
+                            return false;
+                        }
                         if (v7IsPendingRecoveryBlocked()) {
                             v7PublishPendingRecoveryBlocked();
                             return false;
@@ -9764,6 +9796,10 @@
                 if (v7HasUnsyncedCloudChanges()) v7ScheduleCloudAutoSave();
             },
             onTransportError: (error) => console.warn('V7 collaboration error', error),
+            onLocalPersistenceError: (error) => {
+                v7ClearCloudAutoSaveTimer();
+                v4SetCloudRuntimeStatus(error.message, 'error');
+            },
             onSessionStateChanged: (event) => {
                 const code = String(event?.code || '');
                 if (!event?.user) v7ClearCloudAutoSaveTimer();
@@ -9795,6 +9831,13 @@
             onItemSaved: () => renderV5SessionBar(),
             onUsersChanged: () => setTimeout(() => window.MonthlyV7App?.loadSnapshot?.().catch(console.warn), 0)
         };
+
+        window.addEventListener('beforeunload', (event) => {
+            const storage = window.MonthlyV7App?.client?.draftStorage;
+            if (!storage?.error && !storage?.hasUnflushed?.()) return;
+            event.preventDefault();
+            event.returnValue = '';
+        });
 
         async function monthlyReportBoot() {
             if (SITE_ACCESS_BOOTED) return;
