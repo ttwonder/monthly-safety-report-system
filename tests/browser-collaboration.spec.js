@@ -614,7 +614,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.1';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.2';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -654,7 +654,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.1'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.2'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -857,7 +857,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.6.1', config: '7.6.1', assets: '7.6.1', core: '7.6.1', client: '7.6.1', v7: '7.6.1'
+      page: '7.6.2', config: '7.6.2', assets: '7.6.2', core: '7.6.2', client: '7.6.2', v7: '7.6.2'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -3519,6 +3519,7 @@ test('兩個瀏覽器同項排他、不同 module 並行保存且不互相覆蓋
   const titleB1 = rowB1.locator('td').nth(1).locator('.editable-div');
   await titleB1.click();
   await expect(titleB1).toHaveAttribute('contenteditable', 'false');
+  await expect(rowB1.locator('.v7-item-lock-badge')).toHaveText('由「Owner A」編輯中');
   await expect(pageB.locator('#v4-cloud-runtime-status')).toContainText('此項目目前由「Owner A」編輯，請稍後再試。');
   await expect(pageB.locator('#v4-cloud-runtime-status')).not.toContainText('LEASE_HELD');
   expect(await pageB.evaluate(() => window.MonthlyV7App.hasClaimDeniedDrafts())).toBe(false);
@@ -3588,7 +3589,7 @@ test('他人持有 lease 時等待期間輸入只保留本機草稿且拒絕後�
   releaseClaim();
   await expect(pageB.locator('#v4-cloud-runtime-status')).toContainText('此項目目前由「Owner A」編輯，請稍後再試。');
   await expect(titleB).toHaveAttribute('contenteditable', 'false');
-  await expect(rowB.locator('.v7-item-lock-badge')).toHaveText('點一下取得編輯權');
+  await expect(rowB.locator('.v7-item-lock-badge')).toHaveText('由「Owner A」編輯中');
   expect(await pageB.evaluate(() => {
     window.MonthlyV7App.restoreClaimDeniedDraftMarkers();
     return window.MonthlyV7App.hasClaimDeniedDrafts();

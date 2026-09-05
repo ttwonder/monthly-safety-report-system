@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.6.1';
+  const buildId = '7.6.2';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -164,6 +164,7 @@
       this.claimPromises = new Map();
       this.pendingModuleEditTargets = new Map();
       this.claimDeniedModules = new Set();
+      this.claimDeniedHolders = new Map();
       this.leaseDeniedDraftModules = new Set();
       this.provisionalDirtyModules = new Set();
       this.retryingDeniedModules = new Set();
@@ -976,6 +977,7 @@
       const id = String(entityId || '');
       if (id) {
         this.claimDeniedModules.delete(id);
+        this.claimDeniedHolders.delete(id);
         this.provisionalDirtyModules.delete(id);
         this.clearClaimDeniedDraftMarker(id);
         return this.leaseDeniedDraftModules.delete(id);
@@ -984,6 +986,7 @@
       const hadBlockedDraft = this.leaseDeniedDraftModules.size > 0;
       ids.forEach((blockedId) => this.clearClaimDeniedDraftMarker(blockedId));
       this.claimDeniedModules.clear();
+      this.claimDeniedHolders.clear();
       this.leaseDeniedDraftModules.clear();
       this.provisionalDirtyModules.clear();
       return hadBlockedDraft;
@@ -995,6 +998,20 @@
         .filter(Boolean);
       ids.forEach((id) => this.claimDeniedModules.add(id));
       const isLeaseHeld = String(error?.code || '') === 'LEASE_HELD';
+      const deniedEntityId = String(error?.result?.entity_id || error?.result?.entityId || '');
+      const holderDisplayName = String(
+        error?.holderDisplayName
+        || error?.result?.holder_display_name
+        || error?.result?.holderDisplayName
+        || '其他使用者'
+      ).trim().slice(0, 80) || '其他使用者';
+      ids.forEach((id) => {
+        if (isLeaseHeld && (!deniedEntityId || deniedEntityId === id)) {
+          this.claimDeniedHolders.set(id, holderDisplayName);
+        } else {
+          this.claimDeniedHolders.delete(id);
+        }
+      });
       const blockedIds = isLeaseHeld
         ? ids.filter((id) => options.forceLeaseBlock === true
           || this.provisionalDirtyModules.has(id)
@@ -1533,6 +1550,7 @@
         }
         if (owned) {
           this.claimDeniedModules.delete(id);
+          this.claimDeniedHolders.delete(id);
           this.leaseDeniedDraftModules.delete(id);
           this.provisionalDirtyModules.delete(id);
           this.clearClaimDeniedDraftMarker(id);
@@ -1542,8 +1560,11 @@
         } else {
           row.removeAttribute('data-v7-claim-denied');
         }
-        badge.textContent = owned ? '你正在編輯' : (claiming ? '取得編輯權中…' : '點一下取得編輯權');
-        badge.className = `v7-item-lock-badge no-print text-[10px] font-bold ${owned ? 'text-emerald-700' : (claiming ? 'text-amber-600' : 'text-slate-400')}`;
+        const deniedHolder = this.claimDeniedHolders.get(id);
+        badge.textContent = owned
+          ? '你正在編輯'
+          : (claiming ? '取得編輯權中…' : (deniedHolder ? `由「${deniedHolder}」編輯中` : '點一下取得編輯權'));
+        badge.className = `v7-item-lock-badge no-print text-[10px] font-bold ${owned ? 'text-emerald-700' : (claiming ? 'text-amber-600' : (deniedHolder ? 'text-rose-600' : 'text-slate-400'))}`;
       });
     }
 
