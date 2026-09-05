@@ -614,7 +614,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.2';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.3';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -654,7 +654,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => localStorage.setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.2'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.3'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -857,7 +857,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.6.2', config: '7.6.2', assets: '7.6.2', core: '7.6.2', client: '7.6.2', v7: '7.6.2'
+      page: '7.6.3', config: '7.6.3', assets: '7.6.3', core: '7.6.3', client: '7.6.3', v7: '7.6.3'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -3727,6 +3727,94 @@ test('格子停頓只保存本機草稿，週期上雲後仍保持編輯並顯�
   expect(state.modules[0].payload.title.replace(/<br>$/i, '')).toBe('分鐘級背景保存內容');
   await expect(title).toHaveText('分鐘級背景保存內容，仍可繼續輸入');
   await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+});
+
+test('既有趨勢圖、三色卡、KPI、進度卡與插入表格會補回欄位級可編輯能力', async ({ page, request }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    reportData[0].columns = [`
+      <div class="trend-chart-container" data-trend-chart="1" contenteditable="false">
+        <div class="chart-title" data-legacy-target="trend-title">舊趨勢</div>
+        <div class="chart-layout-wrapper">
+          <div class="chart-table-area">
+            <table class="chart-data-table" contenteditable="false">
+              <thead><tr><th>週期</th><th>指標</th></tr></thead>
+              <tbody><tr><td>08月</td><td class="chart-val" data-legacy-target="trend">1.55</td></tr></tbody>
+            </table>
+          </div>
+          <div class="chart-canvas-area" style="height:200px;min-width:240px;position:relative;"><canvas class="trend-canvas"></canvas></div>
+        </div>
+      </div>
+      <div class="kpi-card-container">
+        <div><div data-legacy-target="kpi-title">舊 KPI</div><div>
+          <span class="kpi-label-current">現值</span><span class="kpi-val current-val" data-legacy-target="kpi">50</span>
+          <span class="kpi-label-target">KPI</span><span class="kpi-val target-val">80</span>
+        </div></div>
+        <span class="kpi-min">0</span><span class="kpi-max">100</span>
+      </div>
+      <div class="progress-card-container">
+        <div><div data-legacy-target="progress-title">舊進度</div><div>
+          <span class="progress-label">完成度</span><span class="kpi-val progress-val" data-legacy-target="progress">50</span><span contenteditable="false">%</span>
+        </div></div>
+      </div>
+      <div class="zone-card-container">
+        <div><div data-legacy-target="zone-title">舊三色卡</div><div>
+          <span class="zone-label-current">現值</span><span class="zone-val current-val" data-legacy-target="zone">1.55</span>
+        </div></div>
+        <span class="zone-limit-mid">2.45</span><span class="zone-min">0</span>
+        <span class="zone-limit1">1.45</span><span class="zone-limit2">3.45</span><span class="zone-max">5</span>
+      </div>
+      <table class="custom-data-table" data-resizable-table="1" contenteditable="false">
+        <tbody><tr><th>項目</th><th>數值</th></tr><tr><td>舊表格</td><td data-legacy-target="table">7</td></tr></tbody>
+      </table>`];
+    reportData[0].colLayout = '1';
+    reportData[0].colCount = 1;
+    renderTable();
+    window.MonthlyV7App.decorateEditorRows();
+  });
+
+  const row = page.locator('#tableBody tr').first();
+  const selectors = {
+    trend: '[data-legacy-target="trend"]',
+    kpi: '[data-legacy-target="kpi"]',
+    progress: '[data-legacy-target="progress"]',
+    zone: '[data-legacy-target="zone"]',
+    table: '[data-legacy-target="table"]'
+  };
+  await expect.poll(() => row.evaluate((element, targetSelectors) => Object.fromEntries(
+    Object.entries(targetSelectors).map(([name, selector]) => [name, element.querySelector(selector)?.getAttribute('contenteditable')])
+  ), selectors)).toEqual({ trend: 'true', kpi: 'true', progress: 'true', zone: 'true', table: 'true' });
+  await expect(row.locator('.trend-chart-container')).toHaveAttribute('contenteditable', 'false');
+  await expect(row.locator('.chart-data-table')).toHaveAttribute('contenteditable', 'false');
+  expect(await page.evaluate(() => reportData[0].columns[0])).not.toContain('contenteditable="true"');
+
+  await row.locator(selectors.trend).click();
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  const replacements = {
+    trend: '1.72',
+    kpi: '61',
+    progress: '73',
+    zone: '2.15',
+    table: '9'
+  };
+  for (const [name, value] of Object.entries(replacements)) {
+    const target = row.locator(selectors[name]);
+    await target.click();
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type(value);
+    await expect(target).toHaveText(value);
+  }
+
+  await page.getByRole('button', { name: '保存修改' }).first().click();
+  await expect.poll(async () => request.get('/__fake_state').then((response) => response.json())
+    .then((state) => state.modules[0].payload.columns[0]))
+    .toMatch(/data-legacy-target="table"[^>]*>9<\/td>/);
+  const savedHtml = await request.get('/__fake_state').then((response) => response.json())
+    .then((state) => state.modules[0].payload.columns[0]);
+  expect(savedHtml).toMatch(/data-legacy-target="trend"[^>]*contenteditable="true"[^>]*>1\.72<\/td>/);
+  expect(savedHtml).toMatch(/data-legacy-target="kpi"[^>]*contenteditable="true"[^>]*>61<\/span>/);
+  expect(savedHtml).toMatch(/data-legacy-target="progress"[^>]*contenteditable="true"[^>]*>73<\/span>/);
+  expect(savedHtml).toMatch(/data-legacy-target="zone"[^>]*contenteditable="true"[^>]*>2\.15<\/span>/);
 });
 
 test('主標題 blur 自動保存不會搶回下方內容焦點', async ({ page }) => {

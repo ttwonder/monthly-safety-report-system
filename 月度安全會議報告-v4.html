@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.2';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.3';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -2539,6 +2539,51 @@
             }
         }
 
+        const LEGACY_WIDGET_EDITABLE_SELECTORS = [
+            '.trend-chart-container .chart-title',
+            '.trend-chart-container .chart-data-table th',
+            '.trend-chart-container .chart-data-table td',
+            '.kpi-card-container > div:first-child > div:first-child',
+            '.kpi-card-container .kpi-label-avg',
+            '.kpi-card-container .avg-val',
+            '.kpi-card-container .kpi-label-current',
+            '.kpi-card-container .current-val',
+            '.kpi-card-container .kpi-label-target',
+            '.kpi-card-container .target-val',
+            '.kpi-card-container .kpi-min',
+            '.kpi-card-container .kpi-max',
+            '.progress-card-container > div:first-child > div:first-child',
+            '.progress-card-container .progress-label',
+            '.progress-card-container .progress-val',
+            '.zone-card-container > div:first-child > div:first-child',
+            '.zone-card-container .zone-label-current',
+            '.zone-card-container .zone-val',
+            '.zone-card-container .zone-limit-mid',
+            '.zone-card-container .zone-min',
+            '.zone-card-container .zone-limit1',
+            '.zone-card-container .zone-limit2',
+            '.zone-card-container .zone-max',
+            'table.custom-data-table:not(.chart-data-table) th',
+            'table.custom-data-table:not(.chart-data-table) td'
+        ].join(',');
+
+        function repairLegacyWidgetEditableFields(root = document) {
+            if (!root || typeof root.querySelectorAll !== 'function') return 0;
+            root.querySelectorAll('.trend-chart-container').forEach(container => {
+                container.setAttribute('contenteditable', 'false');
+                container.querySelectorAll('.chart-data-table').forEach(table => {
+                    table.setAttribute('contenteditable', 'false');
+                });
+            });
+            let repaired = 0;
+            root.querySelectorAll(LEGACY_WIDGET_EDITABLE_SELECTORS).forEach(element => {
+                if (element.getAttribute('contenteditable') === 'true') return;
+                element.setAttribute('contenteditable', 'true');
+                repaired += 1;
+            });
+            return repaired;
+        }
+
         function cleanupEditable(editableDiv) {
             if (!editableDiv) return;
             
@@ -3219,6 +3264,10 @@
                 `;
                 tbody.appendChild(tr);
             });
+
+            // 歷史 snapshot 可能缺少內層 editable 屬性；僅修復已知資料欄位，
+            // 不在載入時修改 reportData 或觸發任何本機／雲端保存。
+            repairLegacyWidgetEditableFields(tbody);
 
             setTimeout(() => {
                 document.querySelectorAll('.editable-div').forEach(div => cleanupEditable(div));
@@ -9000,7 +9049,7 @@
                 ? captureEditorViewportState(document.activeElement)
                 : null;
             try {
-                if (editorState?.active?.classList?.contains('editable-div')) {
+                if (editorState?.active?.closest?.('.editable-div')) {
                     v7SyncFocusedEditorToModel(editorState.active);
                     await saveToDB(reportData, null, { deferCloud: true });
                 }
