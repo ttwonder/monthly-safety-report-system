@@ -679,6 +679,152 @@ test('claimLease 被占用時帶出持鎖者顯示名稱，不暴露 LEASE_HELD 
   });
 });
 
+test('release 途中舊 lease 不被 heartbeat 復活，重新 claim 等待 release 完成', async () => {
+  let claimCount = 0;
+  let releaseStartedResolve;
+  let releaseCompleteResolve;
+  const releaseStarted = new Promise((resolve) => { releaseStartedResolve = resolve; });
+  const releaseComplete = new Promise((resolve) => { releaseCompleteResolve = resolve; });
+  const lost = [];
+  const leaseResult = (index) => ({
+    ok: true,
+    entity_type: 'module',
+    entity_id: 'm1',
+    lease_id: `lease-${index}`,
+    fencing_token: index,
+    holder_user_id: 'u1',
+    client_session_id: 'tab-release-race',
+    expires_at: '2099-01-01T00:00:00.000Z'
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 0,
+      report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 },
+      modules: [{ id: 'm1', revision: 1, payload: { title: '原內容', columns: [''] } }],
+      records: [], users: []
+    },
+    monthly_v7_claim_lease: () => leaseResult(++claimCount),
+    monthly_v7_renew_lease: () => leaseResult(1),
+    monthly_v7_release_lease: async () => {
+      releaseStartedResolve();
+      await releaseComplete;
+      return { ok: true, released: true };
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport,
+    sessionStorage: memoryStorage(),
+    draftStorage: memoryStorage(),
+    idFactory: () => 'tab-release-race',
+    host: { onLeaseLost: (info) => lost.push(info) }
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  const captured = await client.claimLease('module', 'm1');
+  const releasePromise = client.releaseCapturedLease(captured);
+  await releaseStarted;
+
+  assert.equal(client.getLease('module', 'm1'), null, 'release 送出前就必須停止把舊 lease 當成可用');
+  assert.equal(await client.renewLease('module', 'm1'), null, 'heartbeat 不可重續正在 release 的 lease');
+  const reclaimPromise = client.claimLease('module', 'm1');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(claimCount, 1, 'replacement claim 不可跑在舊 release 前面');
+
+  releaseCompleteResolve();
+  assert.equal(await releasePromise, true);
+  const replacement = await reclaimPromise;
+  assert.equal(replacement.leaseId, 'lease-2');
+  assert.equal(client.getLease('module', 'm1'), replacement);
+  assert.equal(lost.length, 0);
+});
+
+test('in-flight renew 後 release 結果不明，先確認舊 fence 已釋放才 replacement claim', async () => {
+  let claimCount = 0;
+  let releaseCount = 0;
+  let renewStartedResolve;
+  let renewCompleteResolve;
+  let confirmationStartedResolve;
+  let confirmationCompleteResolve;
+  const renewStarted = new Promise((resolve) => { renewStartedResolve = resolve; });
+  const renewComplete = new Promise((resolve) => { renewCompleteResolve = resolve; });
+  const confirmationStarted = new Promise((resolve) => { confirmationStartedResolve = resolve; });
+  const confirmationComplete = new Promise((resolve) => { confirmationCompleteResolve = resolve; });
+  const leaseResult = (index, expiresAt = new Date(Date.now() + 90_000).toISOString()) => ({
+    ok: true,
+    entity_type: 'module',
+    entity_id: 'm1',
+    lease_id: `lease-uncertain-${index}`,
+    fencing_token: index,
+    holder_user_id: 'u1',
+    client_session_id: 'tab-release-uncertain',
+    expires_at: expiresAt
+  });
+  const transport = fakeTransport({
+    monthly_v7_get_status: { ok: true, authority_state: 'NORMALIZED_ACTIVE', authority_epoch: 2, minimum_client_version: 7 },
+    monthly_v7_open_site: { ok: true, site_session_id: 'site-1' },
+    monthly_v7_login_user: { ok: true, user_session_id: 'user-1', user: { id: 'u1', username: 'owner', role: 'owner' } },
+    monthly_v7_get_snapshot: {
+      ok: true, watermark: 0,
+      report: { id: 'r1', legacyFileId: 'x', title: '月報', period: {}, revision: 1 },
+      modules: [{ id: 'm1', revision: 1, payload: { title: '原內容', columns: [''] } }],
+      records: [], users: []
+    },
+    monthly_v7_claim_lease: () => leaseResult(++claimCount),
+    monthly_v7_renew_lease: async () => {
+      renewStartedResolve();
+      await renewComplete;
+      return leaseResult(1, new Date(Date.now() + 180_000).toISOString());
+    },
+    monthly_v7_release_lease: async () => {
+      releaseCount += 1;
+      if (releaseCount === 1) {
+        const error = new Error('RPC_TIMEOUT');
+        error.code = 'RPC_TIMEOUT';
+        throw error;
+      }
+      confirmationStartedResolve();
+      await confirmationComplete;
+      return { ok: true, released: true };
+    }
+  });
+  const client = new MonthlyV7Client({
+    transport,
+    sessionStorage: memoryStorage(),
+    draftStorage: memoryStorage(),
+    idFactory: () => 'tab-release-uncertain'
+  });
+  await client.initialize({ workspaceKey: 'workspace-test' });
+  await client.openSite('gate');
+  await client.login('owner', 'pass');
+
+  const captured = await client.claimLease('module', 'm1');
+  const renewalPromise = client.renewLease('module', 'm1');
+  await renewStarted;
+  await assert.rejects(client.releaseCapturedLease(captured), /RPC_TIMEOUT/);
+  renewCompleteResolve();
+  assert.equal(await renewalPromise, null, 'release 後回來的 renew 不可復活本機舊 lease');
+
+  const replacementPromise = client.claimLease('module', 'm1');
+  const confirmationWasDispatched = await Promise.race([
+    confirmationStarted.then(() => true),
+    replacementPromise.then(() => false, () => false)
+  ]);
+  assert.equal(confirmationWasDispatched, true, '不可靠本機 expiry 猜測，必須先重送同一舊 fence 的 release');
+  assert.equal(releaseCount, 2);
+  assert.equal(claimCount, 1, 'release confirmation 回覆前不可 dispatch replacement claim');
+
+  confirmationCompleteResolve();
+  const replacement = await replacementPromise;
+  assert.equal(claimCount, 2);
+  assert.equal(replacement.leaseId, 'lease-uncertain-2');
+  assert.equal(client.getLease('module', 'm1'), replacement);
+});
+
 test('logoutUser 只撤銷 user session，保留 site session 與本機草稿', async () => {
   const sessions = memoryStorage();
   const drafts = memoryStorage();

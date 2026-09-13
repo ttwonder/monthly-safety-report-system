@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.6.4';
+  const buildId = '7.6.5';
   const commonJs = typeof module === 'object' && module.exports;
   const api = factory(
     root,
@@ -1629,8 +1629,9 @@
         if (changed) return;
         try { await this.client.releaseCapturedLease(operationLease, operationContext); }
         catch {
-          // releaseCapturedLease drops only the captured local heartbeat in finally;
-          // the server lease will expire at its existing TTL if the ack is lost.
+          // The captured lease is already unavailable to local writes/heartbeat.
+          // An uncertain release stays fenced; the next claim must first obtain
+          // an authoritative response for the exact captured lease identity.
           this.setStatus('項目釋放確認失敗；編輯權將在逾時後自動釋放。', 'warn');
         }
         if (this.isOperationContextCurrent(operationContext)) this.decorateEditorRows();

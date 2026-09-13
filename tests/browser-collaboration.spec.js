@@ -529,6 +529,8 @@ test('保存目前月報建立獨立本機版本且切換會完整還原保存�
 
   await page.locator('[data-v1-tab="editor"]').click();
   await page.locator('#mainTitle').evaluate((node) => { node.innerText = '保存後已改標題'; });
+  await editor.click();
+  await expect(editor).toHaveAttribute('contenteditable', 'true');
   await editor.fill('保存後已改內文');
   await editor.blur();
   await page.locator('#reportDate').fill('2026-09-01');
@@ -614,7 +616,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.4';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.5';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -654,7 +656,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => (window.MonthlyV7App?.client?.draftStorage || localStorage).setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.4'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.5'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -857,7 +859,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.6.4', config: '7.6.4', assets: '7.6.4', core: '7.6.4', client: '7.6.4', v7: '7.6.4'
+      page: '7.6.5', config: '7.6.5', assets: '7.6.5', core: '7.6.5', client: '7.6.5', v7: '7.6.5'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -4402,6 +4404,97 @@ test('未修改 module 離開後立即釋放，另一瀏覽器不必等待 TTL',
 
   await contextA.close();
   await contextB.close();
+});
+
+test('release 回覆途中重回同一 module 不誤報失鎖、不丟焦點或跳頁', async ({ page, request }) => {
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(String(error && error.message || error)));
+  let claimCalls = 0;
+  let releaseCalls = 0;
+  let releaseStartedResolve;
+  let releaseCompleteResolve;
+  const releaseStarted = new Promise((resolve) => { releaseStartedResolve = resolve; });
+  const releaseComplete = new Promise((resolve) => { releaseCompleteResolve = resolve; });
+  await page.route('**/__fake_rpc', async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.name === 'monthly_v7_claim_lease' && payload?.params?.p_entity_type === 'module') {
+      claimCalls += 1;
+    }
+    if (payload?.name === 'monthly_v7_release_lease' && payload?.params?.p_entity_type === 'module') {
+      releaseCalls += 1;
+      releaseStartedResolve();
+      await releaseComplete;
+    }
+    await route.continue();
+  });
+
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const item = reportData[0];
+    item.columns = [`<div style="height:1500px">長內容，讓編輯位置位於頁面下方。</div><p data-release-race-target="1">原內容</p>`];
+    item.colLayout = '1';
+    item.colCount = 1;
+    window.MonthlyV7App.syncModuleBaseline(item, window.MonthlyV7App.client.modulePayload(item));
+    renderTable();
+    window.MonthlyV7App.decorateEditorRows();
+  });
+
+  const row = page.locator('#tableBody tr').first();
+  const title = row.locator('.module-title-editor');
+  await title.scrollIntoViewIfNeeded();
+  await title.click();
+  await expect.poll(() => claimCalls).toBe(1);
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toBeFocused();
+  await page.evaluate(() => {
+    const titleNode = document.querySelector('#tableBody tr .module-title-editor');
+    window.__releaseRaceTitleNode = titleNode;
+    window.__releaseRaceBaseline = {
+      scrollY: window.scrollY,
+      top: titleNode.getBoundingClientRect().top
+    };
+    titleNode.blur();
+  });
+
+  await releaseStarted;
+  expect(releaseCalls).toBe(1);
+  expect(await page.evaluate(() => {
+    const app = window.MonthlyV7App;
+    const id = app.client.snapshot.modules[0].id;
+    return app.client.getLease('module', id);
+  })).toBeNull();
+
+  await title.dispatchEvent('pointerdown', { pointerType: 'mouse', bubbles: true, cancelable: true });
+  await expect.poll(() => page.evaluate(() => window.MonthlyV7App.claimPromises.size)).toBe(1);
+  expect(claimCalls).toBe(1);
+  await expect(page.locator('#v5TopStatus')).not.toContainText('編輯權已失效');
+
+  releaseCompleteResolve();
+  await expect.poll(() => claimCalls).toBe(2);
+  await expect(row.locator('.v7-item-lock-badge')).toHaveText('你正在編輯');
+  await expect(title).toHaveAttribute('contenteditable', 'true');
+  await expect(title).toBeFocused();
+  const stability = await title.evaluate((element) => {
+    const baseline = window.__releaseRaceBaseline;
+    return {
+      sameNode: window.__releaseRaceTitleNode === element,
+      scrollDelta: Math.abs(window.scrollY - baseline.scrollY),
+      topDelta: Math.abs(element.getBoundingClientRect().top - baseline.top),
+      warningVisible: document.getElementById('v5TopStatus')?.innerText.includes('編輯權已失效') || false
+    };
+  });
+  expect(stability.sameNode).toBe(true);
+  expect(stability.scrollDelta).toBeLessThanOrEqual(2);
+  expect(stability.topDelta).toBeLessThanOrEqual(2);
+  expect(stability.warningVisible).toBe(false);
+
+  await title.fill('release/reclaim 後仍可保存');
+  await page.waitForTimeout(1100);
+  await page.getByRole('button', { name: '保存修改' }).first().click();
+  await expect.poll(async () => request.get('/__fake_state').then((response) => response.json())
+    .then((state) => state.modules[0].payload.title.replace(/<br>$/i, ''))).toBe('release/reclaim 後仍可保存');
+  await expect(page.locator('#v5TopStatus')).not.toContainText('編輯權已失效');
+  expect(pageErrors).toEqual([]);
 });
 
 test('未提交的 module 變更離開後仍保留 lease，不提前放鎖', async ({ page }) => {

@@ -1,5 +1,5 @@
 (function (root, factory) {
-  const buildId = '7.6.4';
+  const buildId = '7.6.5';
   const api = factory(
     typeof module === 'object' && module.exports ? require('./monthly-collaboration-core.js') : root.MonthlyCollaborationCore,
     buildId
@@ -215,6 +215,7 @@
       this.watermark = 0;
       this.snapshot = null;
       this.leases = new Map();
+      this.leaseReleasePromises = new Map();
       this.config = null;
       this.status = { mode: 'unknown', authorityState: '', authorityEpoch: 0, minimumClientVersion: 0 };
       this.heartbeatTimer = null;
@@ -1280,16 +1281,72 @@
       };
     }
 
+    async confirmUncertainLeaseRelease(key, entry, operationContext) {
+      if (entry.confirmationPromise) return entry.confirmationPromise;
+      const lease = entry.lease;
+      const confirmationTask = Promise.resolve().then(async () => {
+        const raw = await this.rpc('monthly_v7_release_lease', {
+          p_workspace_key: this.config.workspaceKey,
+          p_user_session_id: operationContext.userSessionId,
+          p_client_session_id: operationContext.clientSessionId,
+          p_entity_type: lease.entityType,
+          p_entity_id: lease.entityId,
+          p_lease_id: lease.leaseId,
+          p_fencing_token: lease.fencingToken
+        });
+        this.assertSessionContext(operationContext, 'release_lease_confirmation');
+        return !!(raw && raw.ok);
+      });
+      entry.confirmationPromise = confirmationTask;
+      try {
+        const released = await confirmationTask;
+        if (this.leaseReleasePromises.get(key) === entry) {
+          this.leaseReleasePromises.delete(key);
+        }
+        return released;
+      } catch (error) {
+        entry.error = error;
+        throw error;
+      } finally {
+        if (entry.confirmationPromise === confirmationTask) entry.confirmationPromise = null;
+      }
+    }
+
     async claimLease(entityType, entityId, ttlSeconds = 90) {
       this.requireUserSession();
+      const operationContext = this.captureSessionContext();
+      const key = this.leaseKey(entityType, entityId);
+      let pendingRelease = this.leaseReleasePromises.get(key);
+      if (pendingRelease) {
+        try {
+          await pendingRelease.promise;
+        } catch (_releaseError) {
+          // The barrier state below decides whether a replacement claim is safe.
+        }
+        this.assertSessionContext(operationContext, 'claim_lease');
+        pendingRelease = this.leaseReleasePromises.get(key);
+        if (pendingRelease && pendingRelease.state === 'uncertain') {
+          try {
+            await this.confirmUncertainLeaseRelease(key, pendingRelease, operationContext);
+          } catch (confirmationError) {
+            const error = new Error('LEASE_RELEASE_UNCERTAIN');
+            error.code = 'LEASE_RELEASE_UNCERTAIN';
+            error.cause = confirmationError;
+            throw error;
+          }
+        }
+      }
+      const existing = this.leases.get(key);
+      if (existing) return existing;
       const raw = await this.rpc('monthly_v7_claim_lease', {
         p_workspace_key: this.config.workspaceKey,
-        p_user_session_id: this.userSession.id,
-        p_client_session_id: this.clientSessionId,
+        p_user_session_id: operationContext.userSessionId,
+        p_client_session_id: operationContext.clientSessionId,
         p_entity_type: entityType,
         p_entity_id: entityId,
         p_ttl_seconds: ttlSeconds
       });
+      this.assertSessionContext(operationContext, 'claim_lease');
       if (!raw || raw.ok !== true) {
         const code = raw && raw.error || 'LEASE_HELD';
         const holderDisplayName = String(raw && (raw.holder_display_name || raw.holderDisplayName) || '').trim();
@@ -1305,7 +1362,7 @@
         throw error;
       }
       const lease = this.normalizeLease(raw);
-      this.leases.set(this.leaseKey(entityType, entityId), lease);
+      this.leases.set(key, lease);
       if (typeof this.host.onLease === 'function') this.host.onLease(lease);
       return lease;
     }
@@ -1350,10 +1407,18 @@
       const entityType = String(lease.entityType || '');
       const entityId = String(lease.entityId || '');
       const key = this.leaseKey(entityType, entityId);
+      const pendingRelease = this.leaseReleasePromises.get(key);
+      if (pendingRelease && pendingRelease.lease === lease) return pendingRelease.promise;
       if (!entityType || !entityId
         || !this.isSessionContextCurrent(operationContext)
         || this.leases.get(key) !== lease) return false;
-      try {
+
+      // A lease being released is no longer safe for local mutation or heartbeat.
+      // Detach it before the network await so a concurrent renew cannot replace the
+      // map entry and leave a server-released lease looking locally owned.
+      this.leases.delete(key);
+      const entry = { lease, promise: null, state: 'pending', error: null, confirmationPromise: null };
+      const releaseTask = Promise.resolve().then(async () => {
         const raw = await this.rpc('monthly_v7_release_lease', {
           p_workspace_key: this.config.workspaceKey,
           p_user_session_id: operationContext.userSessionId,
@@ -1365,10 +1430,18 @@
         });
         this.assertSessionContext(operationContext, 'release_lease');
         return !!(raw && raw.ok);
-      } finally {
-        if (this.isSessionContextCurrent(operationContext)
-          && this.leases.get(key) === lease) this.leases.delete(key);
-      }
+      }).catch((error) => {
+        entry.state = 'uncertain';
+        entry.error = error;
+        throw error;
+      });
+      entry.promise = releaseTask;
+      this.leaseReleasePromises.set(key, entry);
+      const clearConfirmedRelease = () => {
+        if (this.leaseReleasePromises.get(key) === entry) this.leaseReleasePromises.delete(key);
+      };
+      releaseTask.then(clearConfirmedRelease, () => undefined);
+      return releaseTask;
     }
 
     async releaseLease(entityType, entityId) {
