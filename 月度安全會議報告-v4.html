@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.6';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.7';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -1430,9 +1430,9 @@
                 break-inside: avoid !important;
             }
             body.pdf-print-mode #pdfPrintArea .pdf-table-chunk-flow,
-            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-table-chunked-module,
-            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-table-chunked-module > .module-content-cell,
-            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-table-chunked-module .module-content-columns {
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-split-flow-module,
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-split-flow-module > .module-content-cell,
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-oversized-module .module-content-columns {
                 display: block !important;
             }
             body.pdf-print-mode #pdfPrintArea table.pdf-table-page-chunk {
@@ -1467,14 +1467,14 @@
             body.pdf-print-mode #pdfPrintArea .pdf-splittable-module-header > .module-index-cell {
                 border-right: 1px solid #a5b4fc !important;
             }
-            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-table-chunked-module > .module-content-cell {
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-split-flow-module > .module-content-cell {
                 width: 100% !important;
                 min-height: 0 !important;
                 border: 1px solid #a5b4fc !important;
                 border-radius: 0 0 10px 10px;
                 overflow: visible !important;
             }
-            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-splittable-module {
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-split-flow-module {
                 border: 0 !important;
                 border-radius: 0 !important;
             }
@@ -1488,7 +1488,7 @@
                 border-right: 1px solid #a5b4fc !important;
                 border-radius: 0 10px 0 0;
             }
-            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-splittable-module > .module-content-cell {
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-split-flow-module > .module-content-cell {
                 padding: 0 !important;
                 border-top: 0 !important;
             }
@@ -5292,6 +5292,23 @@
             return visibleBlocks.length >= 2;
         }
 
+        function ensureV1PdfSplittableModuleFlow(module) {
+            if (!module) return false;
+            let moduleHeader = module.querySelector(':scope > .pdf-splittable-module-header');
+            if (!moduleHeader) {
+                const indexCell = module.querySelector(':scope > .module-index-cell');
+                const titleCell = module.querySelector(':scope > .module-title-cell');
+                const contentCell = module.querySelector(':scope > .module-content-cell');
+                if (!indexCell || !titleCell || !contentCell) return false;
+                moduleHeader = module.ownerDocument.createElement('div');
+                moduleHeader.className = 'pdf-splittable-module-header';
+                module.insertBefore(moduleHeader, contentCell);
+                moduleHeader.append(indexCell, titleCell);
+            }
+            module.classList.add('pdf-split-flow-module');
+            return true;
+        }
+
         function classifyV1PdfModulePageBreaks(printArea) {
             const pageContentHeight = (210 - 6 - 12) * 96 / 25.4;
             const maxSinglePageHeight = Math.floor(pageContentHeight) - 2;
@@ -5302,6 +5319,7 @@
             rows.forEach((row) => row.classList.remove(
                 'pdf-keep-together',
                 'pdf-splittable-module',
+                'pdf-oversized-module',
                 'pdf-compact-split',
                 'pdf-has-trend-chart'
             ));
@@ -5338,7 +5356,7 @@
                 let keepTogether = false;
                 let splitAcrossRemainder = false;
                 if (!fitsWholePage) {
-                    row.classList.add('pdf-splittable-module');
+                    row.classList.add('pdf-splittable-module', 'pdf-oversized-module');
                     splitAcrossRemainder = true;
                 } else if (hasTrend) {
                     keepTogether = true;
@@ -5355,6 +5373,7 @@
                 }
 
                 if (keepTogether) row.classList.add('pdf-keep-together');
+                if (row.classList.contains('pdf-splittable-module')) ensureV1PdfSplittableModuleFlow(row);
                 measuredHeight = v1MeasurePdfElementHeight(row, scale);
                 row.dataset.pdfModuleHeight = String(measuredHeight);
                 if (keepTogether && measuredHeight > remaining) {
@@ -5404,17 +5423,7 @@
                 if (current.length) groups.push(current);
                 if (groups.length < 2) return;
 
-                let moduleHeader = module.querySelector(':scope > .pdf-splittable-module-header');
-                if (!moduleHeader) {
-                    const indexCell = module.querySelector(':scope > .module-index-cell');
-                    const titleCell = module.querySelector(':scope > .module-title-cell');
-                    const contentCell = module.querySelector(':scope > .module-content-cell');
-                    if (!indexCell || !titleCell || !contentCell) return;
-                    moduleHeader = module.ownerDocument.createElement('div');
-                    moduleHeader.className = 'pdf-splittable-module-header';
-                    module.insertBefore(moduleHeader, contentCell);
-                    moduleHeader.append(indexCell, titleCell);
-                }
+                if (!ensureV1PdfSplittableModuleFlow(module)) return;
 
                 const headerTemplate = table.tHead.cloneNode(true);
                 const prefixNodes = Array.from(table.children)
@@ -5439,7 +5448,7 @@
                     if (footerTemplate && groupIndex === groups.length - 1) chunk.appendChild(footerTemplate.cloneNode(true));
                     holder.appendChild(chunk);
                 });
-                module.classList.add('pdf-table-chunked-module', 'pdf-splittable-module');
+                module.classList.add('pdf-table-chunked-module', 'pdf-splittable-module', 'pdf-split-flow-module');
                 table.replaceWith(holder);
                 chunkedTableCount += 1;
             });

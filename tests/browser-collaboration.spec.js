@@ -2,6 +2,28 @@
 
 const { test, expect } = require('@playwright/test');
 const { execFileSync } = require('node:child_process');
+const path = require('node:path');
+
+const PDF_TEXT_GEOMETRY_SCRIPT = path.join(__dirname, 'pdf-text-geometry.py');
+
+function extractPdfTextGeometry(pdfPath, markers) {
+  const stdout = execFileSync('uv', [
+    'run',
+    '--quiet',
+    '--no-project',
+    '--with',
+    'pymupdf==1.26.4',
+    'python',
+    PDF_TEXT_GEOMETRY_SCRIPT,
+    pdfPath,
+    ...markers
+  ], {
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+    env: { ...process.env, UV_NO_PROGRESS: '1' }
+  });
+  return JSON.parse(stdout.trim());
+}
 
 async function enterAndLogin(page, username, password, expectedModuleCount = 2) {
   await page.addInitScript(() => {
@@ -617,7 +639,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.6';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.7';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -657,7 +679,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => (window.MonthlyV7App?.client?.draftStorage || localStorage).setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.6'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.7'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -870,7 +892,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.6.6', config: '7.6.6', assets: '7.6.6', core: '7.6.6', client: '7.6.6', v7: '7.6.6'
+      page: '7.6.7', config: '7.6.7', assets: '7.6.7', core: '7.6.7', client: '7.6.7', v7: '7.6.7'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -5257,7 +5279,6 @@ test('列印目前內容依勾選與 PDF 順序輸出，不帶版本提示，且
       pdfOrder: 1
     });
     renderTable();
-    window.MonthlyV7App.transport.requestTimeoutMs = 35;
     window.__currentDraftPrintCalls = 0;
     window.__currentDraftOriginalTitle = document.title;
     const exportDate = new Date();
@@ -5281,6 +5302,7 @@ test('列印目前內容依勾選與 PDF 順序輸出，不帶版本提示，且
   await editor.click();
   await expect(editor).toHaveAttribute('contenteditable', 'true');
   await editor.fill('只在目前畫面的草稿標題');
+  await page.evaluate(() => { window.MonthlyV7App.transport.requestTimeoutMs = 35; });
   await request.post('/__fake_hang_rpc?name=monthly_v7_save_module&count=always');
   const before = await (await request.get('/__fake_state')).json();
 
@@ -6656,6 +6678,10 @@ test('95%緊湊分頁只拆安全的非趨勢模塊，減少整塊跳頁空白',
         trend: row.classList.contains('pdf-has-trend-chart'),
         keepTogether: row.classList.contains('pdf-keep-together'),
         compactSplit: row.classList.contains('pdf-compact-split'),
+        splitFlow: row.classList.contains('pdf-split-flow-module'),
+        oversized: row.classList.contains('pdf-oversized-module'),
+        display: getComputedStyle(row).display,
+        columnsDisplay: getComputedStyle(row.querySelector('.module-content-columns')).display,
         breakInside: getComputedStyle(row).breakInside
       }))
     };
@@ -6678,7 +6704,14 @@ test('95%緊湊分頁只拆安全的非趨勢模塊，減少整塊跳頁空白',
   expect(compactState.scale).toBe('95');
   expect(compactState.compact).toBe('true');
   expect(compactState.rows.every((row) => row.trend === false)).toBe(true);
-  expect(compactState.rows.some((row) => row.compactSplit && !row.keepTogether && row.breakInside === 'auto')).toBe(true);
+  const compactRows = compactState.rows.filter((row) => row.compactSplit);
+  expect(compactRows.some((row) => !row.keepTogether && row.breakInside === 'auto')).toBe(true);
+  compactRows.forEach((row) => {
+    expect(row.splitFlow).toBe(true);
+    expect(row.oversized).toBe(false);
+    expect(row.display).toBe('block');
+    expect(row.columnsDisplay).toBe('flex');
+  });
   expect(compactState.unused).toBeLessThan(standardUnused);
   expect(compactPages).toBeLessThanOrEqual(standardPages);
 });
@@ -6792,7 +6825,13 @@ test('PDF print media 保留部件與圖表色彩且小型圖表不跨頁切斷'
     const atomicBreaks = ['.data-card-table', '.kpi-card-container', '.zone-card-container', '.trend-chart-container']
       .map((selector) => getComputedStyle(root.querySelector(selector)).breakInside);
     return {
+      pageContentHeight: Number(root.dataset.pdfPageContentHeight || 0),
+      rowHeight: Number(row.dataset.pdfModuleHeight || 0),
+      oversizedModule: row.classList.contains('pdf-oversized-module'),
+      splitFlowModule: row.classList.contains('pdf-split-flow-module'),
+      splitHeaderCount: row.querySelectorAll(':scope > .pdf-splittable-module-header').length,
       rowDisplay: getComputedStyle(row).display,
+      contentDisplay: getComputedStyle(content).display,
       contentGridColumn: getComputedStyle(content).gridColumn,
       reportHeaderDisplay: getComputedStyle(root.querySelector('table[data-cloned-id="reportTable"] > thead')).display,
       printColorAdjust: getComputedStyle(bar).webkitPrintColorAdjust || getComputedStyle(bar).printColorAdjust,
@@ -6805,7 +6844,12 @@ test('PDF print media 保留部件與圖表色彩且小型圖表不跨頁切斷'
       atomicBreaks
     };
   });
-  expect(printState.rowDisplay).toBe('grid');
+  expect(printState.rowHeight).toBeGreaterThan(printState.pageContentHeight);
+  expect(printState.oversizedModule).toBe(true);
+  expect(printState.splitFlowModule).toBe(true);
+  expect(printState.splitHeaderCount).toBe(1);
+  expect(printState.rowDisplay).toBe('block');
+  expect(printState.contentDisplay).toBe('block');
   expect(printState.contentGridColumn).toBe('1 / -1');
   expect(printState.reportHeaderDisplay).toBe('none');
   expect(printState.printColorAdjust).toBe('exact');
@@ -7234,6 +7278,210 @@ test('超過單頁的長表格結束後才排入下一模塊，不得互相重�
     || (position.pageIndex === earlier.pageIndex && position.lineIndex > earlier.lineIndex);
   expect(isAfter(nextModule, finalRow)).toBe(true);
   expect(isAfter(followingContent, finalRow)).toBe(true);
+});
+
+test('整個模塊超頁但短表格被推到下一頁時，後續模塊不得壓進表格', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const items = reportData.slice(0, 2).map((item) => JSON.parse(JSON.stringify(item)));
+    const first = items[0];
+    first.title = 'PUSHED-SHORT-TABLE-MODULE';
+    first.columns = [`
+      <div class="content-block" style="height:430px;box-sizing:border-box;padding:12px;border:1px solid #dbeafe;">
+        <strong>PRELUDE-BEFORE-PUSHED-TABLE</strong>
+        <p>此段模擬實際模塊在表格前已有內容，使整個模塊超過單頁，但下方表格本身仍短於一頁。</p>
+      </div>
+      <table class="custom-data-table" data-resizable-table="1" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+        <colgroup>
+          <col style="width:7%"><col style="width:8%"><col style="width:9%"><col style="width:9%">
+          <col style="width:8%"><col style="width:10%"><col style="width:49%">
+        </colgroup>
+        <thead><tr>
+          <th style="border:1px solid #64748b;padding:7px;background:#e2e8f0;">編號</th>
+          <th style="border:1px solid #64748b;padding:7px;background:#e2e8f0;">發生日</th>
+          <th style="border:1px solid #64748b;padding:7px;background:#e2e8f0;">日期</th>
+          <th style="border:1px solid #64748b;padding:7px;background:#e2e8f0;">來源</th>
+          <th style="border:1px solid #64748b;padding:7px;background:#e2e8f0;">職位</th>
+          <th style="border:1px solid #64748b;padding:7px;background:#e2e8f0;">姓名</th>
+          <th style="border:1px solid #64748b;padding:7px;background:#e2e8f0;">PUSHEDTABLEHEADER</th>
+        </tr></thead>
+        <tbody>
+          ${Array.from({ length: 4 }, (_, index) => `
+            <tr style="height:74px;">
+              <td style="border:1px solid #cbd5e1;padding:7px;">ROW${String(index + 1).padStart(2, '0')}</td>
+              <td style="border:1px solid #cbd5e1;padding:7px;">F${28 + index}</td>
+              <td style="border:1px solid #cbd5e1;padding:7px;">07/${12 + index}</td>
+              <td style="border:1px solid #cbd5e1;padding:7px;">SIRE</td>
+              <td style="border:1px solid #cbd5e1;padding:7px;">3/O</td>
+              <td style="border:1px solid #cbd5e1;padding:7px;">TEST USER</td>
+              <td style="border:1px solid #cbd5e1;padding:7px;line-height:1.5;">模擬實際稽核說明的長文字列，內容本身不可被下一個模塊的項次、標題或卡片覆蓋。${index === 3 ? ' FINALROWBOTTOM' : ''}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`];
+    first.colLayout = '1';
+    first.selectedForPdf = true;
+    first.pdfOrder = 1;
+
+    const second = items[1];
+    second.title = 'NEXTMODULE20AFTERPUSHEDTABLE';
+    second.columns = [
+      '<div class="content-block" style="height:120px"><strong>NEXTMODULECONTENT20A</strong><p>外部要求更新</p></div>',
+      '<div class="content-block" style="height:120px"><strong>NEXTMODULECONTENT20B</strong><p>行動／要求</p></div>'
+    ];
+    second.colLayout = '1:1';
+    second.selectedForPdf = true;
+    second.pdfOrder = 2;
+
+    const third = JSON.parse(JSON.stringify(items[1]));
+    third._v7Id = '33333333-3333-4333-8333-333333333339';
+    third.title = 'NEXTMODULE19AFTERMODULE20';
+    third.columns = [
+      '<div class="content-block" style="height:105px"><strong>NEXTMODULECONTENT19A</strong><p>Circular &amp; Bulletin</p></div>',
+      '<div class="content-block" style="height:105px"><strong>NEXTMODULECONTENT19B</strong><p>程序書、平台完善</p></div>'
+    ];
+    third.colLayout = '1:1';
+    third.selectedForPdf = true;
+    third.pdfOrder = 3;
+
+    reportData = [first, second, third];
+    document.querySelector('.report-header-section').style.height = '190px';
+    renderTable();
+    v1EnsureModuleFields();
+    v1SavePdfPrintSettings({ scalePercent: 95, compact: true });
+  });
+  await page.evaluate(() => {
+    window.__pushedShortTablePrepareState = { status: 'pending', error: '' };
+    window.__pushedShortTablePreparePromise = prepareV1PdfPrintArea().then((ok) => {
+      if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+      document.body.classList.add('pdf-print-mode');
+      window.__pushedShortTablePrepareState = { status: 'done', error: '' };
+    }).catch((error) => {
+      window.__pushedShortTablePrepareState = { status: 'error', error: String(error?.message || error) };
+    });
+  });
+  await expect.poll(() => page.evaluate(() => window.__pushedShortTablePrepareState?.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__pushedShortTablePrepareState)).toEqual({ status: 'done', error: '' });
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+
+  const layout = await page.evaluate(() => {
+    const printArea = document.getElementById('pdfPrintArea');
+    const module = printArea.querySelector('.module-card-row');
+    const table = module.querySelector('.custom-data-table');
+    const scale = Number.parseFloat(getComputedStyle(printArea).getPropertyValue('--v1-pdf-print-scale')) || 0.95;
+    return {
+      pageContentHeight: Number(printArea.dataset.pdfPageContentHeight || 0),
+      moduleHeight: module.getBoundingClientRect().height * scale,
+      tableHeight: table.getBoundingClientRect().height * scale,
+      splittableModule: module.classList.contains('pdf-splittable-module'),
+      oversizedModule: module.classList.contains('pdf-oversized-module'),
+      splitFlowModule: module.classList.contains('pdf-split-flow-module'),
+      chunkedModule: module.classList.contains('pdf-table-chunked-module'),
+      moduleDisplay: getComputedStyle(module).display,
+      columnsDisplay: getComputedStyle(module.querySelector('.module-content-columns')).display
+    };
+  });
+  expect(layout.moduleHeight).toBeGreaterThan(layout.pageContentHeight);
+  expect(layout.tableHeight).toBeLessThan(layout.pageContentHeight);
+  expect(layout.splittableModule).toBe(true);
+  expect(layout.oversizedModule).toBe(true);
+  expect(layout.splitFlowModule).toBe(true);
+  expect(layout.chunkedModule).toBe(false);
+  expect(layout.moduleDisplay).toBe('block');
+  expect(layout.columnsDisplay).toBe('block');
+
+  const followingLayout = await page.evaluate(() => {
+    const modules = Array.from(document.querySelectorAll('#pdfPrintArea .module-card-row'));
+    const module20 = modules[1];
+    const columns = Array.from(module20.querySelectorAll('.module-content-columns > div'));
+    const rects = columns.map((column) => {
+      const rect = column.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, top: rect.top, width: rect.width };
+    });
+    return {
+      moduleDisplay: getComputedStyle(module20).display,
+      columnsDisplay: getComputedStyle(module20.querySelector('.module-content-columns')).display,
+      rects
+    };
+  });
+  expect(followingLayout.moduleDisplay).toBe('grid');
+  expect(followingLayout.columnsDisplay).toBe('flex');
+  expect(followingLayout.rects).toHaveLength(2);
+  expect(Math.abs(followingLayout.rects[0].top - followingLayout.rects[1].top)).toBeLessThanOrEqual(1);
+  expect(followingLayout.rects[1].left).toBeGreaterThanOrEqual(followingLayout.rects[0].right - 1);
+
+  const pdfPath = testInfo.outputPath('pushed-short-table-followed-by-module.pdf');
+  const pdf = await page.pdf({ path: pdfPath, printBackground: false, preferCSSPageSize: true });
+  await testInfo.attach('pushed-short-table-followed-by-module.pdf', { body: pdf, contentType: 'application/pdf' });
+  const layoutText = execFileSync('pdftotext', ['-layout', pdfPath, '-'], {
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024
+  });
+  const pages = layoutText.split('\f').map((text, pageIndex) => ({
+    pageIndex,
+    lines: text.split('\n')
+  }));
+  const locate = (text) => pages.flatMap((pdfPage) => pdfPage.lines
+    .map((line, lineIndex) => ({ line, lineIndex }))
+    .filter(({ line }) => line.includes(text))
+    .map(({ lineIndex }) => ({ pageIndex: pdfPage.pageIndex, lineIndex })));
+  const rowMarkers = Array.from({ length: 4 }, (_, index) => locate(`ROW${String(index + 1).padStart(2, '0')}`));
+  const nextTitles20 = locate('NEXTMODULE20AFTERPUSHEDTABLE');
+  const nextContents20 = [locate('NEXTMODULECONTENT20A'), locate('NEXTMODULECONTENT20B')];
+  const nextTitles19 = locate('NEXTMODULE19AFTERMODULE20');
+  const nextContents19 = [locate('NEXTMODULECONTENT19A'), locate('NEXTMODULECONTENT19B')];
+  rowMarkers.forEach((matches) => expect(matches).toHaveLength(1));
+  expect(nextTitles20).toHaveLength(1);
+  expect(nextTitles19).toHaveLength(1);
+  nextContents20.concat(nextContents19).forEach((matches) => expect(matches).toHaveLength(1));
+  const finalRow = rowMarkers[3][0];
+  const isAfter = (position, earlier) => position.pageIndex > earlier.pageIndex
+    || (position.pageIndex === earlier.pageIndex && position.lineIndex > earlier.lineIndex);
+  expect(isAfter(nextTitles20[0], finalRow)).toBe(true);
+  nextContents20.forEach((matches) => expect(isAfter(matches[0], finalRow)).toBe(true));
+  expect(isAfter(nextTitles19[0], nextTitles20[0])).toBe(true);
+  nextContents19.forEach((matches) => expect(isAfter(matches[0], nextTitles20[0])).toBe(true));
+
+  const geometryMarkers = [
+    'ROW01', 'ROW02', 'ROW03', 'ROW04', 'FINALROWBOTTOM',
+    'NEXTMODULE20AFTERPUSHEDTABLE', 'NEXTMODULECONTENT20A', 'NEXTMODULECONTENT20B',
+    'NEXTMODULE19AFTERMODULE20', 'NEXTMODULECONTENT19A', 'NEXTMODULECONTENT19B'
+  ];
+  const geometry = extractPdfTextGeometry(pdfPath, geometryMarkers);
+  await testInfo.attach('pushed-short-table-text-geometry.json', {
+    body: Buffer.from(JSON.stringify(geometry, null, 2)),
+    contentType: 'application/json'
+  });
+  const oneBox = (marker) => {
+    expect(geometry.matches[marker], marker).toHaveLength(1);
+    return geometry.matches[marker][0];
+  };
+  geometryMarkers.forEach(oneBox);
+  const finalRowBottom = oneBox('FINALROWBOTTOM');
+  const module20Boxes = [
+    oneBox('NEXTMODULE20AFTERPUSHEDTABLE'),
+    oneBox('NEXTMODULECONTENT20A'),
+    oneBox('NEXTMODULECONTENT20B')
+  ];
+  const boxStartsAfter = (box, earlier) => box.page_index > earlier.page_index
+    || (box.page_index === earlier.page_index && box.y0 >= earlier.y1 - 0.5);
+  module20Boxes.forEach((box) => expect(boxStartsAfter(box, finalRowBottom)).toBe(true));
+  const module20Bottom = module20Boxes.reduce((latest, box) => {
+    if (box.page_index !== latest.page_index) return box.page_index > latest.page_index ? box : latest;
+    return box.y1 > latest.y1 ? box : latest;
+  });
+  const module19Boxes = [
+    oneBox('NEXTMODULE19AFTERMODULE20'),
+    oneBox('NEXTMODULECONTENT19A'),
+    oneBox('NEXTMODULECONTENT19B')
+  ];
+  module19Boxes.forEach((box) => expect(boxStartsAfter(box, module20Bottom)).toBe(true));
+
+  const physicalPageCount = (pdf.toString('latin1').match(/\/Type\s*\/Page\b/g) || []).length;
+  expect(geometry.page_count).toBe(physicalPageCount);
+  expect(nextTitles19[0].pageIndex).toBe(physicalPageCount - 1);
+  expect(oneBox('NEXTMODULE19AFTERMODULE20').page_index).toBe(physicalPageCount - 1);
 });
 
 test('舊 p_kind 的 PostgREST 失敗 pending 在 reload 後改送正確 snapshot RPC', async ({ page }) => {
