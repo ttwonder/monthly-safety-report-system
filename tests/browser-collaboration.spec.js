@@ -5771,6 +5771,53 @@ test('正式 PDF meta 漂移須指出 settings 欄位且不得列印', async ({ 
   expect(dialogs.some((message) => message.includes('資料欄位：SETTINGS'))).toBe(true);
 });
 
+test('正式 PDF 非預設字型漂移須指出 settings 欄位且不得列印', async ({ page }) => {
+  const dialogs = [];
+  let differentFont = '';
+  await page.route('**/__fake_rpc', async (route) => {
+    const request = route.request().postDataJSON();
+    if (request?.name !== 'monthly_v7_create_report_snapshot') {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = await response.json();
+    body.snapshot.report.settings = Object.assign({}, body.snapshot.report.settings, {
+      globalFontEn: differentFont
+    });
+    await route.fulfill({ response, body: JSON.stringify(body), contentType: 'application/json' });
+  });
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  differentFont = await page.evaluate(() => {
+    const selector = document.getElementById('globalFontEnSelector');
+    const defaultFont = selector.options[0].value;
+    return Array.from(selector.options).map((option) => option.value)
+      .find((value) => value && value !== defaultFont) || '';
+  });
+  expect(differentFont).not.toBe('');
+  await page.evaluate(() => {
+    window.__fontDriftPrintCalls = 0;
+    window.print = () => { window.__fontDriftPrintCalls += 1; };
+    window.manualSave = async () => ({ deferred: true });
+  });
+
+  await page.locator('.v1-tab-btn[data-v1-tab="pdf"]').click();
+  await page.getByRole('button', { name: '輸出正式 PDF' }).click();
+  await expect.poll(() => page.evaluate(() => window.__v7LastFormalSnapshotCoverage?.ok), {
+    timeout: 30000
+  }).toBe(false);
+
+  const coverage = await page.evaluate(() => window.__v7LastFormalSnapshotCoverage);
+  expect(await page.evaluate(() => window.__fontDriftPrintCalls)).toBe(0);
+  expect(coverage.reasons).toContain('INTENT_META');
+  expect(coverage.intentMetaMismatchFields).toEqual(['SETTINGS']);
+  expect(dialogs.some((message) => message.includes('資料欄位：SETTINGS'))).toBe(true);
+});
+
 test('正式 PDF 低年份日期漂移須指出 date 欄位且不得列印', async ({ page }) => {
   const dialogs = [];
   await page.route('**/__fake_rpc', async (route) => {
@@ -5808,6 +5855,57 @@ test('正式 PDF 低年份日期漂移須指出 date 欄位且不得列印', asy
   expect(coverage.reasons).toContain('INTENT_META');
   expect(coverage.intentMetaMismatchFields).toEqual(['DATE']);
   expect(dialogs.some((message) => message.includes('資料欄位：DATE'))).toBe(true);
+});
+
+test('正式 PDF revision 與 watermark floor 各維度皆須 fail closed', async ({ page }) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const coverage = await page.evaluate(async () => {
+    const sourceFormal = await window.MonthlyV7App.createReportSnapshot('pdf');
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const formal = clone(sourceFormal);
+    formal.snapshot.report.revision = 10;
+    formal.snapshot.watermark = 20;
+    formal.snapshot.modules.forEach((item, index) => { item.revision = 30 + index; });
+    const snapshot = formal.snapshot;
+    const intentState = v7FormalSnapshotIntentStateFromSnapshot(snapshot);
+    const floor = {
+      reportId: String(snapshot.report.id || ''),
+      reportRevision: Number(snapshot.report.revision || 0),
+      watermark: Number(snapshot.watermark || 0),
+      moduleRevisions: snapshot.modules.map((item) => ({
+        id: String(item.id || ''),
+        revision: Number(item.revision || 0)
+      })),
+      intentState,
+      intentSignature: v7FormalSnapshotIntentCanonical(intentState)
+    };
+    const cloneFormal = () => clone(formal);
+    const reportRevision = cloneFormal();
+    const watermark = cloneFormal();
+    const moduleRevision = cloneFormal();
+    reportRevision.snapshot.report.revision = floor.reportRevision - 1;
+    watermark.snapshot.watermark = floor.watermark - 1;
+    moduleRevision.snapshot.modules[0].revision = floor.moduleRevisions[0].revision - 1;
+    return {
+      floor,
+      control: v7FormalSnapshotCoverageDetails(formal, floor),
+      reportRevision: v7FormalSnapshotCoverageDetails(reportRevision, floor),
+      watermark: v7FormalSnapshotCoverageDetails(watermark, floor),
+      moduleRevision: v7FormalSnapshotCoverageDetails(moduleRevision, floor)
+    };
+  });
+
+  expect(coverage.floor.reportRevision).toBeGreaterThan(0);
+  expect(coverage.floor.watermark).toBeGreaterThan(0);
+  expect(coverage.floor.moduleRevisions[0].revision).toBeGreaterThan(0);
+  expect(coverage.control.ok).toBe(true);
+  expect(coverage.reportRevision.ok).toBe(false);
+  expect(coverage.reportRevision.reasons).toEqual(['REPORT_REVISION']);
+  expect(coverage.watermark.ok).toBe(false);
+  expect(coverage.watermark.reasons).toEqual(['WATERMARK']);
+  expect(coverage.moduleRevision.ok).toBe(false);
+  expect(coverage.moduleRevision.reasons).toEqual(['MODULE_REVISION']);
+  expect(coverage.moduleRevision.moduleRevisionMismatchIndices).toEqual([1]);
 });
 
 test('顯式預設字型不得造成正式 PDF 假性 stale', async ({ page }) => {
