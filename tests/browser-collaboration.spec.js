@@ -1,6 +1,7 @@
 'use strict';
 
 const { test, expect } = require('@playwright/test');
+const { execFileSync } = require('node:child_process');
 
 async function enterAndLogin(page, username, password, expectedModuleCount = 2) {
   await page.addInitScript(() => {
@@ -616,7 +617,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.5';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.6';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -656,7 +657,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => (window.MonthlyV7App?.client?.draftStorage || localStorage).setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.5'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.6'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -679,8 +680,10 @@ test('有 durable draft 或 conflict 時安全重載必須先確認證據，第�
     entityType: 'module', entityId: 'safe-reload-draft', baseRevision: 4,
     payload: { title: '安全重載必須保留的草稿' }, savedAt: '2026-08-13T12:00:00.000Z'
   });
-  await page.evaluate(({ key, value }) => {
-    (window.MonthlyV7App?.client?.draftStorage || localStorage).setItem(key, value);
+  await page.evaluate(async ({ key, value }) => {
+    const storage = window.MonthlyV7App?.client?.draftStorage || localStorage;
+    storage.setItem(key, value);
+    if (typeof storage.flush === 'function') await storage.flush();
     window.MonthlyV7App.revisionConflictBlocks.set('module:safe-reload-draft', {
       state: 'REVISION_CONFLICT_BLOCKED', entityType: 'module', entityId: 'safe-reload-draft'
     });
@@ -712,8 +715,10 @@ test('unknown pending 安全重載不得建立新保存且原 operation evidence
     operationId: 'safe-reload-operation-1', signature: '{}',
     createdAt: '2026-08-13T12:00:00.000Z', actorUserId: 'owner-id'
   });
-  await page.evaluate(({ key, value }) => {
-    (window.MonthlyV7App?.client?.draftStorage || localStorage).setItem(key, value);
+  await page.evaluate(async ({ key, value }) => {
+    const storage = window.MonthlyV7App?.client?.draftStorage || localStorage;
+    storage.setItem(key, value);
+    if (typeof storage.flush === 'function') await storage.flush();
     window.MonthlyV7App.client = {
       lastOperationReceipt: () => ({
         state: 'RESULT_UNKNOWN_PENDING_RECONCILIATION', operationId: 'safe-reload-operation-1',
@@ -748,8 +753,10 @@ test('in-flight 保存期間安全重載必須停止，不得人為製造 lost-A
     entityType: 'module', entityId: 'in-flight-module', baseRevision: 2,
     payload: { title: '保存仍在途的草稿' }, savedAt: '2026-08-13T12:00:00.000Z'
   });
-  const result = await page.evaluate(({ key, value }) => {
-    (window.MonthlyV7App?.client?.draftStorage || localStorage).setItem(key, value);
+  const result = await page.evaluate(async ({ key, value }) => {
+    const storage = window.MonthlyV7App?.client?.draftStorage || localStorage;
+    storage.setItem(key, value);
+    if (typeof storage.flush === 'function') await storage.flush();
     V7_CLOUD_SAVE_PROMISE = new Promise(() => {});
     V4_CLOUD_SAVING = true;
     return {
@@ -776,8 +783,10 @@ test('conflict 安全重載不得以其他 entity 的 draft 冒充 durable 證�
     entityType: 'module', entityId: 'unrelated-module', baseRevision: 1,
     payload: { title: '不相關草稿' }, savedAt: '2026-08-13T12:00:00.000Z'
   });
-  const result = await page.evaluate(({ key, value }) => {
-    (window.MonthlyV7App?.client?.draftStorage || localStorage).setItem(key, value);
+  const result = await page.evaluate(async ({ key, value }) => {
+    const storage = window.MonthlyV7App?.client?.draftStorage || localStorage;
+    storage.setItem(key, value);
+    if (typeof storage.flush === 'function') await storage.flush();
     window.MonthlyV7App.revisionConflictBlocks.set('module:missing-draft-module', {
       state: 'REVISION_CONFLICT_BLOCKED',
       entityType: 'module',
@@ -810,8 +819,10 @@ test('unknown result 安全重載只接受相同 operation ID 的 pending 證據
     operationId: 'operation-b', signature: '{}',
     createdAt: '2026-08-13T12:00:00.000Z', actorUserId: 'owner-id'
   });
-  const result = await page.evaluate(({ key, value }) => {
-    (window.MonthlyV7App?.client?.draftStorage || localStorage).setItem(key, value);
+  const result = await page.evaluate(async ({ key, value }) => {
+    const storage = window.MonthlyV7App?.client?.draftStorage || localStorage;
+    storage.setItem(key, value);
+    if (typeof storage.flush === 'function') await storage.flush();
     window.MonthlyV7App.client = {
       lastOperationReceipt: () => ({
         state: 'RESULT_UNKNOWN_PENDING_RECONCILIATION',
@@ -859,7 +870,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.6.5', config: '7.6.5', assets: '7.6.5', core: '7.6.5', client: '7.6.5', v7: '7.6.5'
+      page: '7.6.6', config: '7.6.6', assets: '7.6.6', core: '7.6.6', client: '7.6.6', v7: '7.6.6'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -3713,7 +3724,7 @@ test('格子停頓只保存本機草稿，週期上雲後仍保持編輯並顯�
   await expect(page.locator('#v4-cloud-runtime-status')).not.toContainText('watermark');
   expect(await page.evaluate(() => window.MonthlyV7App.client.lastOperationReceipt())).toMatchObject({
     state: 'CLOUD_CONFIRMED',
-    rpcName: 'monthly_v7_save_report_meta',
+    rpcName: 'monthly_v7_save_module',
     requestedOrigin: 'autosave',
     saveOrigin: 'autosave'
   });
@@ -3801,9 +3812,7 @@ test('既有趨勢圖、三色卡、KPI、進度卡與插入表格會補回欄�
   };
   for (const [name, value] of Object.entries(replacements)) {
     const target = row.locator(selectors[name]);
-    await target.click();
-    await page.keyboard.press('ControlOrMeta+A');
-    await page.keyboard.type(value);
+    await target.fill(value);
     await expect(target).toHaveText(value);
   }
 
@@ -5329,6 +5338,120 @@ test('列印目前內容沒有勾選模塊時提示並停止，不輸出空白�
   expect(await page.evaluate(() => window.__emptySelectionPrintCalls)).toBe(0);
   await expect(page.locator('#saveToast')).toContainText('請先勾選至少一個模塊');
   await expect(page.locator('#pdfPrintArea')).toBeEmpty();
+});
+
+test('乾淨月報連續輸出正式 PDF 不新增草稿、不推進內容世代或重送資料保存', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const app = window.MonthlyV7App;
+    const client = app.client;
+    const originalSaveDraft = client.saveDraft.bind(client);
+    window.__cleanFormalPdfDraftWrites = [];
+    client.saveDraft = (...args) => {
+      window.__cleanFormalPdfDraftWrites.push({
+        entityType: String(args[0] || ''),
+        entityId: String(args[1] || '')
+      });
+      return originalSaveDraft(...args);
+    };
+    window.__cleanFormalPdfPrintCalls = 0;
+    window.print = () => { window.__cleanFormalPdfPrintCalls += 1; };
+    window.__cleanFormalPdfEvidence = async () => {
+      await client.flushDraftStorage?.();
+      const storage = client.draftStorage || localStorage;
+      const keys = [];
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (key && /^monthly_v7_(?:draft|pending):/.test(key)) keys.push(key);
+      }
+      return {
+        keys: keys.sort(),
+        dirtyGeneration: V7_CLOUD_DIRTY_GENERATION,
+        savedGeneration: V7_CLOUD_SAVED_GENERATION,
+        printCalls: window.__cleanFormalPdfPrintCalls,
+        draftWrites: window.__cleanFormalPdfDraftWrites.slice()
+      };
+    };
+  });
+  const beforeLocal = await page.evaluate(() => window.__cleanFormalPdfEvidence());
+  const beforeServer = await (await request.get('/__fake_state')).json();
+  expect(beforeLocal.keys).toEqual([]);
+
+  await page.locator('.v1-tab-btn[data-v1-tab="pdf"]').click();
+  const exportButton = page.getByRole('button', { name: '輸出正式 PDF' });
+  await exportButton.click();
+  await expect.poll(() => page.evaluate(() => window.__cleanFormalPdfPrintCalls), { timeout: 30000 }).toBe(1);
+  await expect(page.locator('body')).not.toHaveAttribute('data-v7-formal-print-lock', 'true');
+  const afterFirst = await page.evaluate(() => window.__cleanFormalPdfEvidence());
+
+  await exportButton.click();
+  await expect.poll(() => page.evaluate(() => window.__cleanFormalPdfPrintCalls), { timeout: 30000 }).toBe(2);
+  await expect(page.locator('body')).not.toHaveAttribute('data-v7-formal-print-lock', 'true');
+  const afterSecond = await page.evaluate(() => window.__cleanFormalPdfEvidence());
+  const afterServer = await (await request.get('/__fake_state')).json();
+
+  expect(dialogs).toEqual([]);
+  expect(afterFirst.keys).toEqual(beforeLocal.keys);
+  expect(afterSecond.keys).toEqual(beforeLocal.keys);
+  expect(afterSecond.draftWrites).toEqual([]);
+  expect(afterFirst.dirtyGeneration).toBe(beforeLocal.dirtyGeneration);
+  expect(afterSecond.dirtyGeneration).toBe(beforeLocal.dirtyGeneration);
+  expect(afterSecond.savedGeneration).toBe(beforeLocal.savedGeneration);
+  expect(afterServer.rpcCounts.monthly_v7_save_module || 0)
+    .toBe(beforeServer.rpcCounts.monthly_v7_save_module || 0);
+  expect(afterServer.rpcCounts.monthly_v7_save_module_batch || 0)
+    .toBe(beforeServer.rpcCounts.monthly_v7_save_module_batch || 0);
+  expect(afterServer.rpcCounts.monthly_v7_save_report_meta || 0)
+    .toBe(beforeServer.rpcCounts.monthly_v7_save_report_meta || 0);
+  expect(afterServer.snapshots).toHaveLength(beforeServer.snapshots.length + 2);
+});
+
+test('未保存的非預設字型仍由正式 PDF barrier 上雲並寫入 snapshot', async ({ page, request }) => {
+  const dialogs = [];
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  const before = await (await request.get('/__fake_state')).json();
+  await page.evaluate(() => {
+    window.__fontFormalPrintCalls = 0;
+    window.print = () => { window.__fontFormalPrintCalls += 1; };
+    window.manualSave = async () => ({ deferred: true });
+  });
+
+  const fontEn = page.locator('#globalFontEnSelector');
+  const fontZh = page.locator('#globalFontZhSelector');
+  await fontEn.selectOption({ index: 1 });
+  await fontZh.selectOption({ index: 1 });
+  const selectedSettings = await page.evaluate(() => ({
+    globalFontEn: document.getElementById('globalFontEnSelector').value,
+    globalFontZh: document.getElementById('globalFontZhSelector').value
+  }));
+  expect(selectedSettings.globalFontEn).not.toBe("system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial");
+  expect(selectedSettings.globalFontZh).not.toBe('sans-serif');
+
+  await page.locator('.v1-tab-btn[data-v1-tab="pdf"]').click();
+  await page.getByRole('button', { name: '輸出正式 PDF' }).click();
+  await expect.poll(() => page.evaluate(() => window.__fontFormalPrintCalls), { timeout: 30000 }).toBe(1);
+
+  const after = await (await request.get('/__fake_state')).json();
+  expect(dialogs).toEqual([]);
+  expect(after.report.settings).toEqual(selectedSettings);
+  expect(after.report.revision).toBe(before.report.revision + 1);
+  expect(after.rpcCounts.monthly_v7_save_report_meta || 0)
+    .toBe((before.rpcCounts.monthly_v7_save_report_meta || 0) + 1);
+  expect(after.snapshots).toHaveLength(before.snapshots.length + 1);
+  const snapshotSummary = after.snapshots.at(-1);
+  const snapshotOperation = after.operations.find((operation) => (
+    operation.result?.snapshotId === snapshotSummary.snapshotId
+  ));
+  expect(snapshotOperation.result.snapshot.report.settings).toEqual(selectedSettings);
 });
 
 test('保存 ACK 先清 pending、晚到的 production-shaped Realtime hint 仍不誤報遠端新版本', async ({ page, request }) => {
@@ -6967,41 +7090,58 @@ test('超過單頁的長表格可自然跨頁，表頭重複且資料列不被�
   const layout = await page.evaluate(() => {
     const area = document.getElementById('pdfPrintArea');
     const module = area.querySelector('.module-card-row');
-    const table = module.querySelector('.custom-data-table');
+    const tables = Array.from(module.querySelectorAll('table.pdf-table-page-chunk'));
     const contentCell = module.querySelector('.module-content-cell');
-    const bodyRows = Array.from(table.tBodies[0].rows);
+    const moduleHeader = module.querySelector(':scope > .pdf-splittable-module-header');
+    const indexCell = moduleHeader?.querySelector('.module-index-cell');
+    const titleCell = moduleHeader?.querySelector('.module-title-cell');
+    const bodyRows = tables.flatMap((table) => Array.from(table.tBodies[0]?.rows || []));
     const liveTable = document.querySelector('#tableBody .custom-data-table');
+    const indexRect = indexCell?.getBoundingClientRect();
+    const titleRect = titleCell?.getBoundingClientRect();
+    const headerRect = moduleHeader?.getBoundingClientRect();
+    const contentRect = contentCell?.getBoundingClientRect();
     return {
       pageContentHeight: Number(area.dataset.pdfPageContentHeight || 0),
       moduleHeight: Number(module.dataset.pdfModuleHeight || 0),
       splittableModule: module.classList.contains('pdf-splittable-module'),
+      chunkedModule: module.classList.contains('pdf-table-chunked-module'),
       moduleBreakInside: getComputedStyle(module).breakInside,
       moduleBorderBottomStyle: getComputedStyle(module).borderBottomStyle,
       contentPaddingTop: getComputedStyle(contentCell).paddingTop,
-      tableHeight: Math.ceil(table.getBoundingClientRect().height),
-      tableBreakInside: getComputedStyle(table).breakInside,
-      printHasThead: Boolean(table.tHead),
+      chunkCount: tables.length,
+      totalTableHeight: tables.reduce((sum, table) => sum + Math.ceil(table.getBoundingClientRect().height), 0),
+      maxChunkHeight: Math.max(...tables.map((table) => Math.ceil(table.getBoundingClientRect().height))),
+      tableBreaks: Array.from(new Set(tables.map((table) => getComputedStyle(table).breakInside))),
+      printHasThead: tables.every((table) => Boolean(table.tHead)),
       liveHasThead: Boolean(liveTable?.tHead),
-      headerDisplay: table.tHead ? getComputedStyle(table.tHead).display : 'missing',
-      headerText: table.tHead?.textContent || '',
+      headerDisplays: Array.from(new Set(tables.map((table) => getComputedStyle(table.tHead).display))),
+      headerTexts: tables.map((table) => table.tHead?.textContent || ''),
       bodyRowCount: bodyRows.length,
-      bodyRowBreaks: Array.from(new Set(bodyRows.map((row) => getComputedStyle(row).breakInside)))
+      bodyRowBreaks: Array.from(new Set(bodyRows.map((row) => getComputedStyle(row).breakInside))),
+      metadataAligned: Boolean(indexRect && titleRect && Math.abs(indexRect.top - titleRect.top) <= 1),
+      contentBelowHeader: Boolean(headerRect && contentRect && contentRect.top >= headerRect.bottom - 1)
     };
   });
 
-  expect(layout.tableHeight).toBeGreaterThan(layout.pageContentHeight);
+  expect(layout.totalTableHeight).toBeGreaterThan(layout.pageContentHeight);
+  expect(layout.maxChunkHeight).toBeLessThanOrEqual(layout.pageContentHeight);
   expect(layout.moduleHeight).toBeGreaterThan(layout.pageContentHeight);
   expect(layout.splittableModule).toBe(true);
+  expect(layout.chunkedModule).toBe(true);
   expect(layout.moduleBreakInside).toBe('auto');
   expect(layout.moduleBorderBottomStyle).toBe('none');
   expect(layout.contentPaddingTop).toBe('0px');
-  expect(layout.tableBreakInside).toBe('auto');
+  expect(layout.chunkCount).toBeGreaterThan(1);
+  expect(layout.tableBreaks).toEqual(['avoid']);
   expect(layout.printHasThead).toBe(true);
   expect(layout.liveHasThead).toBe(false);
-  expect(layout.headerDisplay).toBe('table-header-group');
-  expect(layout.headerText).toContain('TABLE-HEADER-ITEM');
+  expect(layout.headerDisplays).toEqual(['table-header-group']);
+  expect(layout.headerTexts.every((text) => text.includes('TABLE-HEADER-ITEM'))).toBe(true);
   expect(layout.bodyRowCount).toBe(72);
   expect(layout.bodyRowBreaks).toEqual(['avoid']);
+  expect(layout.metadataAligned).toBe(true);
+  expect(layout.contentBelowHeader).toBe(true);
 
   const pdfPath = testInfo.outputPath('long-table-natural-pagination.pdf');
   const pdf = await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
@@ -7009,6 +7149,91 @@ test('超過單頁的長表格可自然跨頁，表頭重複且資料列不被�
   const pageObjects = pdf.toString('latin1').match(/\/Type\s*\/Page\b/g) || [];
   expect(pageObjects.length).toBeGreaterThan(2);
   expect(pageObjects.length).toBeLessThan(12);
+});
+
+test('超過單頁的長表格結束後才排入下一模塊，不得互相重疊', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const items = reportData.slice(0, 2).map((item) => JSON.parse(JSON.stringify(item)));
+    const rows = Array.from({ length: 72 }, (_, index) => `
+      <tr>
+        <td style="border:1px solid #cbd5e1;padding:5px 7px;">ROW-${String(index + 1).padStart(3, '0')}</td>
+        <td style="border:1px solid #cbd5e1;padding:5px 7px;">LONG-TABLE-DATA-${String(index + 1).padStart(3, '0')}</td>
+      </tr>`).join('');
+    const first = items[0];
+    first.title = 'LONG-TABLE-MODULE';
+    first.columns = [`
+      <table class="custom-data-table" data-resizable-table="1" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+        <tbody>
+          <tr>
+            <th style="border:1px solid #64748b;padding:6px 7px;background:#e2e8f0;">LONG-TABLE-HEADER-A</th>
+            <th style="border:1px solid #64748b;padding:6px 7px;background:#e2e8f0;">LONG-TABLE-HEADER-B</th>
+          </tr>
+          ${rows}
+        </tbody>
+      </table>`];
+    first.colLayout = '1';
+    first.selectedForPdf = true;
+    first.pdfOrder = 1;
+
+    const second = items[1];
+    second.title = 'NEXT-MODULE-AFTER-LONG-TABLE';
+    second.columns = ['<div style="height:90px">FOLLOWING-MODULE-CONTENT</div>'];
+    second.colLayout = '1';
+    second.selectedForPdf = true;
+    second.pdfOrder = 2;
+
+    reportData = [first, second];
+    document.querySelector('.report-header-section').style.height = '520px';
+    renderTable();
+    v1EnsureModuleFields();
+    v1SavePdfPrintSettings({ scalePercent: 95, compact: true });
+  });
+  await page.evaluate(() => {
+    window.__longTableFollowingPrepareState = { status: 'pending', error: '' };
+    window.__longTableFollowingPreparePromise = prepareV1PdfPrintArea().then((ok) => {
+      if (!ok) throw new Error('PRINT_AREA_NOT_READY');
+      document.body.classList.add('pdf-print-mode');
+      window.__longTableFollowingPrepareState = { status: 'done', error: '' };
+    }).catch((error) => {
+      window.__longTableFollowingPrepareState = { status: 'error', error: String(error?.message || error) };
+    });
+  });
+  await expect.poll(() => page.evaluate(() => window.__longTableFollowingPrepareState?.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__longTableFollowingPrepareState)).toEqual({ status: 'done', error: '' });
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+
+  const pdfPath = testInfo.outputPath('long-table-followed-by-module.pdf');
+  const pdf = await page.pdf({ path: pdfPath, printBackground: false, preferCSSPageSize: true });
+  await testInfo.attach('long-table-followed-by-module.pdf', { body: pdf, contentType: 'application/pdf' });
+  const layoutText = execFileSync('pdftotext', ['-layout', pdfPath, '-'], {
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024
+  });
+  const pages = layoutText.split('\f').map((text, pageIndex) => ({
+    pageIndex,
+    lines: text.split('\n')
+  }));
+  const locate = (text) => pages.flatMap((pdfPage) => pdfPage.lines
+    .map((line, lineIndex) => ({ line, lineIndex }))
+    .filter(({ line }) => line.includes(text))
+    .map(({ lineIndex }) => ({ pageIndex: pdfPage.pageIndex, lineIndex })));
+  const rowMarkers = Array.from({ length: 72 }, (_, index) => locate(`ROW-${String(index + 1).padStart(3, '0')}`));
+  const finalRows = rowMarkers[71];
+  const nextModules = locate('NEXT-MODULE-AFTER-LONG-TABLE');
+  const followingContents = locate('FOLLOWING-MODULE-CONTENT');
+  rowMarkers.forEach((matches) => expect(matches).toHaveLength(1));
+  expect(nextModules).toHaveLength(1);
+  expect(followingContents).toHaveLength(1);
+  const finalRow = finalRows[0];
+  const nextModule = nextModules[0];
+  const followingContent = followingContents[0];
+  const isAfter = (position, earlier) => position.pageIndex > earlier.pageIndex
+    || (position.pageIndex === earlier.pageIndex && position.lineIndex > earlier.lineIndex);
+  expect(isAfter(nextModule, finalRow)).toBe(true);
+  expect(isAfter(followingContent, finalRow)).toBe(true);
 });
 
 test('舊 p_kind 的 PostgREST 失敗 pending 在 reload 後改送正確 snapshot RPC', async ({ page }) => {

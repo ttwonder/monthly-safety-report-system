@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.5';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.6';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -1428,6 +1428,51 @@
             body.pdf-print-mode #pdfPrintArea .module-content-cell table.pdf-splittable-table > tbody > tr {
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .pdf-table-chunk-flow,
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-table-chunked-module,
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-table-chunked-module > .module-content-cell,
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-table-chunked-module .module-content-columns {
+                display: block !important;
+            }
+            body.pdf-print-mode #pdfPrintArea table.pdf-table-page-chunk {
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+                width: 100% !important;
+                margin: 0 !important;
+            }
+            body.pdf-print-mode #pdfPrintArea table.pdf-table-page-chunk > tbody > tr {
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .pdf-splittable-module-header {
+                display: grid !important;
+                grid-template-columns: 132px minmax(0, 1fr);
+                width: 100%;
+                border: 1px solid #a5b4fc;
+                border-bottom: 0;
+                border-radius: 10px 10px 0 0;
+                overflow: hidden;
+                box-sizing: border-box;
+                page-break-after: avoid !important;
+                break-after: avoid !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .pdf-splittable-module-header > .module-index-cell,
+            body.pdf-print-mode #pdfPrintArea .pdf-splittable-module-header > .module-title-cell {
+                display: flex !important;
+                min-height: 48px;
+                padding: 9px 12px;
+                box-sizing: border-box;
+            }
+            body.pdf-print-mode #pdfPrintArea .pdf-splittable-module-header > .module-index-cell {
+                border-right: 1px solid #a5b4fc !important;
+            }
+            body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-table-chunked-module > .module-content-cell {
+                width: 100% !important;
+                min-height: 0 !important;
+                border: 1px solid #a5b4fc !important;
+                border-radius: 0 0 10px 10px;
+                overflow: visible !important;
             }
             body.pdf-print-mode #pdfPrintArea .module-card-row.pdf-splittable-module {
                 border: 0 !important;
@@ -5332,11 +5377,81 @@
             }));
         }
 
+        function chunkV1PdfSplittableTables(printArea) {
+            const pageContentHeight = (210 - 6 - 12) * 96 / 25.4;
+            const targetChunkHeight = Math.floor(pageContentHeight * 0.82);
+            const scale = v1PdfPrintScaleFactor(printArea);
+            const tables = Array.from(printArea?.querySelectorAll?.('table.pdf-splittable-table') || []);
+            let chunkedTableCount = 0;
+            tables.forEach((table) => {
+                const module = table.closest('.module-card-row');
+                const bodyRows = Array.from(table.tBodies || []).flatMap((body) => Array.from(body.rows || []));
+                if (!module || !table.tHead || bodyRows.length < 2) return;
+                const headerHeight = Math.ceil((table.tHead.getBoundingClientRect().height || table.tHead.scrollHeight || 0) * scale);
+                const groups = [];
+                let current = [];
+                let currentHeight = Math.max(1, headerHeight + 4);
+                bodyRows.forEach((row) => {
+                    const rowHeight = Math.max(1, Math.ceil((row.getBoundingClientRect().height || row.scrollHeight || 0) * scale));
+                    if (current.length && currentHeight + rowHeight > targetChunkHeight) {
+                        groups.push(current);
+                        current = [];
+                        currentHeight = Math.max(1, headerHeight + 4);
+                    }
+                    current.push(row);
+                    currentHeight += rowHeight;
+                });
+                if (current.length) groups.push(current);
+                if (groups.length < 2) return;
+
+                let moduleHeader = module.querySelector(':scope > .pdf-splittable-module-header');
+                if (!moduleHeader) {
+                    const indexCell = module.querySelector(':scope > .module-index-cell');
+                    const titleCell = module.querySelector(':scope > .module-title-cell');
+                    const contentCell = module.querySelector(':scope > .module-content-cell');
+                    if (!indexCell || !titleCell || !contentCell) return;
+                    moduleHeader = module.ownerDocument.createElement('div');
+                    moduleHeader.className = 'pdf-splittable-module-header';
+                    module.insertBefore(moduleHeader, contentCell);
+                    moduleHeader.append(indexCell, titleCell);
+                }
+
+                const headerTemplate = table.tHead.cloneNode(true);
+                const prefixNodes = Array.from(table.children)
+                    .filter((child) => child.tagName === 'CAPTION' || child.tagName === 'COLGROUP')
+                    .map((child) => child.cloneNode(true));
+                const footerTemplate = table.tFoot?.cloneNode(true) || null;
+                const holder = table.ownerDocument.createElement('div');
+                holder.className = 'pdf-table-chunk-flow';
+                holder.dataset.pdfTableChunkCount = String(groups.length);
+                groups.forEach((rows, groupIndex) => {
+                    const chunk = table.cloneNode(false);
+                    chunk.classList.remove('pdf-splittable-table');
+                    chunk.classList.add('pdf-table-page-chunk');
+                    chunk.removeAttribute('data-pdf-splittable-table');
+                    chunk.dataset.pdfTableChunkIndex = String(groupIndex + 1);
+                    chunk.dataset.pdfTableChunkCount = String(groups.length);
+                    prefixNodes.forEach((node) => chunk.appendChild(node.cloneNode(true)));
+                    chunk.appendChild(headerTemplate.cloneNode(true));
+                    const body = table.ownerDocument.createElement('tbody');
+                    rows.forEach((row) => body.appendChild(row));
+                    chunk.appendChild(body);
+                    if (footerTemplate && groupIndex === groups.length - 1) chunk.appendChild(footerTemplate.cloneNode(true));
+                    holder.appendChild(chunk);
+                });
+                module.classList.add('pdf-table-chunked-module', 'pdf-splittable-module');
+                table.replaceWith(holder);
+                chunkedTableCount += 1;
+            });
+            return chunkedTableCount;
+        }
+
         window.addEventListener('beforeprint', () => {
             if (!document.body.classList.contains('pdf-print-mode')) return;
             const printArea = document.getElementById('pdfPrintArea');
             normalizeV1PdfModuleRowContainers(printArea);
             classifyV1PdfModulePageBreaks(printArea);
+            if (chunkV1PdfSplittableTables(printArea)) classifyV1PdfModulePageBreaks(printArea);
         });
 
         async function prepareV1PdfPrintArea(options = {}) {
@@ -5353,6 +5468,11 @@
             if (window.renderAllCharts) window.renderAllCharts();
             await new Promise(resolve => setTimeout(resolve, 180));
             classifyV1PdfModulePageBreaks(printArea);
+            if (chunkV1PdfSplittableTables(printArea)) {
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                if (!await waitForV1PdfImages(printArea)) return false;
+                classifyV1PdfModulePageBreaks(printArea);
+            }
             return true;
         }
 
@@ -5754,7 +5874,12 @@
                 const intentSignature = v7FormalSnapshotIntentSignature();
                 const saved = await saveToDB(reportData, Date.now(), {
                     resolveRevisionConflict: true,
-                    saveOrigin: 'formal-pdf'
+                    saveOrigin: 'formal-pdf',
+                    // Formal export is an explicit foreground save barrier, not a
+                    // new editor mutation. The canonical intent is checked after
+                    // every awaited stage, so scheduling another dirty generation
+                    // here only resurrects drafts from the presentation journey.
+                    markCloudDirty: false
                 });
                 if (saved?.error) throw saved.error;
                 if (saved?.cloudSaved !== true) {
@@ -9543,6 +9668,35 @@
         };
 
 
+        function v7CurrentReportSettings() {
+            const fontEn = document.getElementById('globalFontEnSelector');
+            const fontZh = document.getElementById('globalFontZhSelector');
+            const visible = {
+                globalFontEn: fontEn?.value || '',
+                globalFontZh: fontZh?.value || ''
+            };
+            const report = window.MonthlyV7App?.client?.currentReport?.();
+            if (!report) return visible;
+            const authoritySettings = report.settings
+                && typeof report.settings === 'object'
+                && !Array.isArray(report.settings)
+                ? JSON.parse(JSON.stringify(report.settings))
+                : {};
+            const resolvedAuthority = {
+                globalFontEn: String(authoritySettings.globalFontEn
+                    || fontEn?.options?.[0]?.value
+                    || ''),
+                globalFontZh: String(authoritySettings.globalFontZh
+                    || fontZh?.options?.[0]?.value
+                    || '')
+            };
+            if (visible.globalFontEn === resolvedAuthority.globalFontEn
+                && visible.globalFontZh === resolvedAuthority.globalFontZh) {
+                return authoritySettings;
+            }
+            return Object.assign(authoritySettings, visible);
+        }
+
         function v7CurrentReportMeta() {
             return {
                 title: document.getElementById('mainTitle')?.innerText || '月度安全會議報告',
@@ -9553,10 +9707,7 @@
                     endM: document.getElementById('endMonth')?.value || '',
                     endD: document.getElementById('endDay')?.value || ''
                 },
-                settings: {
-                    globalFontEn: document.getElementById('globalFontEnSelector')?.value || '',
-                    globalFontZh: document.getElementById('globalFontZhSelector')?.value || ''
-                }
+                settings: v7CurrentReportSettings()
             };
         }
 
