@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- 公開 Supabase 設定：只放 anon public key，不能放 service_role。 -->
     <script>
-        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.7';
+        window.MONTHLY_REPORT_PAGE_BUILD = '7.6.8';
         window.MONTHLY_REPORT_ASSET_BUILDS = Object.assign({}, window.MONTHLY_REPORT_ASSET_BUILDS, { page: window.MONTHLY_REPORT_PAGE_BUILD });
         window.MONTHLY_REPORT_STARTUP_ASSETS = Object.freeze({
             config: './supabase-config.js',
@@ -1393,6 +1393,7 @@
                 page-break-inside: auto !important;
                 break-inside: auto !important;
             }
+
             body.pdf-print-mode #pdfPrintArea .v1-selected-editor-print-clone [data-cloned-id="tableBody"] .module-card-row.pdf-keep-together {
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
@@ -5282,6 +5283,7 @@
             if (!row || row.querySelector('.trend-chart-container')) return false;
             if (row.querySelector('.module-content-cell img.content-inline-img')) return false;
             if (row.querySelector('table.pdf-splittable-table')) return true;
+            if (row.querySelector('.module-content-cell table')) return false;
             const visibleBlocks = Array.from(row.querySelectorAll('.module-content-cell .editable-div')).flatMap((editable) =>
                 Array.from(editable.children).filter((child) => {
                     const rect = child.getBoundingClientRect();
@@ -5555,7 +5557,37 @@
             return payload;
         }
 
-        function v7FormalSnapshotIntentSignatureFromSnapshot(snapshot) {
+        function v7FormalSnapshotIntentMeta(meta) {
+            const source = meta && typeof meta === 'object' ? meta : {};
+            const rawSettings = source.settings
+                && typeof source.settings === 'object'
+                && !Array.isArray(source.settings)
+                ? JSON.parse(JSON.stringify(source.settings))
+                : {};
+            const defaultFontEn = String(document.getElementById('globalFontEnSelector')?.options?.[0]?.value || '');
+            const defaultFontZh = String(document.getElementById('globalFontZhSelector')?.options?.[0]?.value || '');
+            rawSettings.globalFontEn = String(rawSettings.globalFontEn || defaultFontEn);
+            rawSettings.globalFontZh = String(rawSettings.globalFontZh || defaultFontZh);
+
+            const rawDate = String(source.date || '');
+            let date = '';
+            if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+                const [year, month, day] = rawDate.split('-').map(Number);
+                const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+                const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+                if (month >= 1 && month <= 12 && day >= 1 && day <= monthDays[month - 1]) date = rawDate;
+            }
+            return {
+                title: String(source.title || '月度安全會議報告').replace(/^ +| +$/g, ''),
+                date,
+                period: source.period && typeof source.period === 'object' && !Array.isArray(source.period)
+                    ? JSON.parse(JSON.stringify(source.period))
+                    : {},
+                settings: rawSettings
+            };
+        }
+
+        function v7FormalSnapshotIntentStateFromSnapshot(snapshot) {
             if (!snapshot?.report || !Array.isArray(snapshot.modules)) return '';
             const modules = snapshot.modules.map((item, index) => {
                 const payload = item?.payload && typeof item.payload === 'object' ? item.payload : {};
@@ -5569,37 +5601,110 @@
                 };
             });
             const report = snapshot.report;
-            const meta = {
+            const meta = v7FormalSnapshotIntentMeta({
                 title: String(report.title || '月度安全會議報告'),
                 date: String(report.date || ''),
                 period: report.period && typeof report.period === 'object' ? report.period : {},
                 settings: report.settings && typeof report.settings === 'object' ? report.settings : {}
+            });
+            return { modules, meta };
+        }
+
+        function v7FormalSnapshotIntentSignatureFromSnapshot(snapshot) {
+            const state = v7FormalSnapshotIntentStateFromSnapshot(snapshot);
+            return state ? v7FormalSnapshotIntentCanonical(state) : '';
+        }
+
+        function v7FormalSnapshotCoverageDetails(formal, floor) {
+            const snapshot = formal?.snapshot;
+            if (!snapshot?.report || !Array.isArray(snapshot.modules) || !floor?.intentSignature) {
+                return { ok: false, reasons: ['SNAPSHOT_SHAPE'], intentModuleMismatchIndices: [] };
+            }
+            const reasons = [];
+            const reportIdMatches = String(snapshot.report.id || '') === String(floor.reportId || '');
+            const reportRevision = Number(snapshot.report.revision || 0);
+            const requiredReportRevision = Number(floor.reportRevision || 0);
+            const watermark = Number(snapshot.watermark || 0);
+            const requiredWatermark = Number(floor.watermark || 0);
+            if (!reportIdMatches) reasons.push('REPORT_ID');
+            if (reportRevision < requiredReportRevision) reasons.push('REPORT_REVISION');
+            if (watermark < requiredWatermark) reasons.push('WATERMARK');
+
+            const snapshotRevisions = new Map(snapshot.modules.map((item) => [String(item.id || ''), Number(item.revision || 0)]));
+            const requiredModuleRevisions = Array.isArray(floor.moduleRevisions) ? floor.moduleRevisions : [];
+            const moduleRevisionMismatchIndices = requiredModuleRevisions
+                .map((item, index) => (
+                    snapshotRevisions.has(item.id) && snapshotRevisions.get(item.id) >= item.revision ? 0 : index + 1
+                ))
+                .filter(Boolean);
+            if (moduleRevisionMismatchIndices.length) reasons.push('MODULE_REVISION');
+
+            const snapshotIntentState = v7FormalSnapshotIntentStateFromSnapshot(snapshot);
+            const snapshotIntentSignature = snapshotIntentState ? v7FormalSnapshotIntentCanonical(snapshotIntentState) : '';
+            const intentMatches = snapshotIntentSignature === floor.intentSignature;
+            const intentModuleMismatchIndices = [];
+            const intentMetaMismatchFields = [];
+            let intentMetaMatches = true;
+            if (!intentMatches) {
+                const expected = floor.intentState;
+                if (expected?.meta && snapshotIntentState?.meta) {
+                    ['title', 'date', 'period', 'settings'].forEach((field) => {
+                        if (v7FormalSnapshotIntentCanonical(expected.meta[field])
+                            !== v7FormalSnapshotIntentCanonical(snapshotIntentState.meta[field])) {
+                            intentMetaMismatchFields.push(field.toUpperCase());
+                        }
+                    });
+                    intentMetaMatches = intentMetaMismatchFields.length === 0;
+                    if (!intentMetaMatches) reasons.push('INTENT_META');
+                }
+                const expectedModules = Array.isArray(expected?.modules) ? expected.modules : [];
+                const snapshotModules = Array.isArray(snapshotIntentState?.modules) ? snapshotIntentState.modules : [];
+                if (expectedModules.length !== snapshotModules.length) reasons.push('INTENT_MODULE_COUNT');
+                const count = Math.max(expectedModules.length, snapshotModules.length);
+                for (let index = 0; index < count; index += 1) {
+                    if (v7FormalSnapshotIntentCanonical(expectedModules[index]) !== v7FormalSnapshotIntentCanonical(snapshotModules[index])) {
+                        intentModuleMismatchIndices.push(index + 1);
+                    }
+                }
+                if (intentModuleMismatchIndices.length) reasons.push('INTENT_MODULE');
+                if (!reasons.some((reason) => reason.startsWith('INTENT_'))) reasons.push('INTENT_SIGNATURE');
+            }
+            return {
+                ok: reasons.length === 0,
+                reasons,
+                reportIdMatches,
+                reportRevision,
+                requiredReportRevision,
+                watermark,
+                requiredWatermark,
+                moduleRevisionMismatchIndices,
+                intentMetaMatches,
+                intentMetaMismatchFields,
+                intentModuleMismatchIndices
             };
-            return v7FormalSnapshotIntentCanonical({ modules, meta });
         }
 
         function v7FormalSnapshotCoversFloor(formal, floor) {
-            const snapshot = formal?.snapshot;
-            if (!snapshot?.report || !Array.isArray(snapshot.modules) || !floor?.intentSignature) return false;
-            if (String(snapshot.report.id || '') !== String(floor.reportId || '')) return false;
-            if (Number(snapshot.report.revision || 0) < Number(floor.reportRevision || 0)) return false;
-            if (Number(snapshot.watermark || 0) < Number(floor.watermark || 0)) return false;
-            const snapshotRevisions = new Map(snapshot.modules.map((item) => [String(item.id || ''), Number(item.revision || 0)]));
-            if (!floor.moduleRevisions.every((item) => snapshotRevisions.has(item.id) && snapshotRevisions.get(item.id) >= item.revision)) return false;
-            return v7FormalSnapshotIntentSignatureFromSnapshot(snapshot) === floor.intentSignature;
+            return v7FormalSnapshotCoverageDetails(formal, floor).ok;
         }
 
         async function v7CreateFreshFormalSnapshot(kind, floor) {
             let formal = null;
+            let coverage = null;
             for (let attempt = 0; attempt < 2; attempt += 1) {
                 formal = await window.MonthlyV7App.createReportSnapshot(kind, { saveOrigin: 'formal-pdf' });
-                if (v7FormalSnapshotCoversFloor(formal, floor)) {
+                coverage = v7FormalSnapshotCoverageDetails(formal, floor);
+                if (coverage.ok) {
                     V7_CRITICAL_STATUS_UNTIL = 0;
+                    window.__v7LastFormalSnapshotCoverage = coverage;
                     return formal;
                 }
             }
             const error = new Error('STALE_SNAPSHOT_AFTER_SAVE');
             error.code = 'STALE_SNAPSHOT_AFTER_SAVE';
+            error.coverage = coverage;
+            error.coverageReasons = coverage?.reasons || ['SNAPSHOT_SHAPE'];
+            window.__v7LastFormalSnapshotCoverage = coverage;
             throw error;
         }
 
@@ -5611,7 +5716,7 @@
             return JSON.stringify(value);
         }
 
-        function v7FormalSnapshotIntentSignature() {
+        function v7FormalSnapshotIntentState() {
             const app = window.MonthlyV7App;
             const modules = reportData.map((item, index) => ({
                 id: String(item?._v7Id || item?.id || `local-${index}`),
@@ -5621,7 +5726,11 @@
                     index + 1
                 )
             }));
-            return v7FormalSnapshotIntentCanonical({ modules, meta: v7CurrentReportMeta() });
+            return { modules, meta: v7FormalSnapshotIntentMeta(v7CurrentReportMeta()) };
+        }
+
+        function v7FormalSnapshotIntentSignature() {
+            return v7FormalSnapshotIntentCanonical(v7FormalSnapshotIntentState());
         }
 
         function v7AssertFormalSnapshotIntent(floor) {
@@ -5836,7 +5945,17 @@
             }
             const stage = String(error?.pdfStage || '');
             const stageText = stage ? `｜階段：${V7_FORMAL_PDF_STAGE_LABELS[stage] || '未知階段'}（${stage}）` : '';
-            return `${code}${stageText}；本機草稿已保留，尚未列印。`;
+            const coverageReasons = Array.isArray(error?.coverageReasons) ? error.coverageReasons.filter(Boolean) : [];
+            const coverageText = coverageReasons.length ? `｜檢查：${coverageReasons.join(',')}` : '';
+            const moduleIndices = Array.isArray(error?.coverage?.intentModuleMismatchIndices)
+                ? error.coverage.intentModuleMismatchIndices.slice(0, 12)
+                : [];
+            const moduleText = moduleIndices.length ? `｜內容模塊：${moduleIndices.join(',')}` : '';
+            const metaFields = Array.isArray(error?.coverage?.intentMetaMismatchFields)
+                ? error.coverage.intentMetaMismatchFields
+                : [];
+            const metaText = metaFields.length ? `｜資料欄位：${metaFields.join(',')}` : '';
+            return `${code}${coverageText}${moduleText}${metaText}${stageText}；本機草稿已保留，尚未列印。`;
         }
 
         function v7ReportFormalPdfFailure(error) {
@@ -5920,6 +6039,7 @@
                     error.code = 'PENDING_DRAFTS_UNRESOLVED';
                     throw error;
                 }
+                const intentState = v7FormalSnapshotIntentState();
                 return {
                     reportId: String(report.id || ''),
                     reportRevision: Number(report.revision || 0),
@@ -5927,7 +6047,8 @@
                     moduleRevisions: reportData
                         .filter((item) => item?._v7Id && Number.isFinite(Number(item._v7Revision)))
                         .map((item) => ({ id: String(item._v7Id), revision: Number(item._v7Revision) })),
-                    intentSignature
+                    intentSignature,
+                    intentState
                 };
             }
             throw new Error('PDF_CONTENT_CHANGED_DURING_SAVE');

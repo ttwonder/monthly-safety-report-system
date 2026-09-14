@@ -639,7 +639,7 @@ test('舊 HTML 載入新 V7 時必須由 adapter 在第一個 RPC 前反向封�
     await route.fulfill({
       response,
       body: body
-        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.7';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
+        .replace("window.MONTHLY_REPORT_PAGE_BUILD = '7.6.8';", "window.MONTHLY_REPORT_PAGE_BUILD = 'stale-page';")
         .replace('v7AssertStartupBuild();', 'window.__pageBuildAssertBypassed = true;')
     });
   });
@@ -679,7 +679,7 @@ test('clean 混版可一鍵安全重載且保留 storage 並使用唯一 cache-b
   await page.evaluate(() => (window.MonthlyV7App?.client?.draftStorage || localStorage).setItem('monthly_safe_reload_sentinel', 'keep-clean'));
 
   await Promise.all([
-    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.7'
+    page.waitForURL((url) => url.searchParams.get('monthly-build') === '7.6.8'
       && Boolean(url.searchParams.get('monthly-reload'))),
     page.locator('#site-safe-reload').click()
   ]);
@@ -892,7 +892,7 @@ test('診斷收據包含 build、authority、workspace hash、last RPC 與 save 
   expect(receipt).toMatchObject({
     state: 'NORMALIZED_READY',
     builds: {
-      page: '7.6.7', config: '7.6.7', assets: '7.6.7', core: '7.6.7', client: '7.6.7', v7: '7.6.7'
+      page: '7.6.8', config: '7.6.8', assets: '7.6.8', core: '7.6.8', client: '7.6.8', v7: '7.6.8'
     },
     authority: { state: 'NORMALIZED_ACTIVE', epoch: 2 },
     lastRpc: 'monthly_v7_get_snapshot',
@@ -5724,7 +5724,126 @@ test('保存後 snapshot 前遠端內容變更時不得列印不同 intent', asy
   await page.evaluate(() => printV1SelectedPdf());
   await page.waitForTimeout(200);
   expect(await page.evaluate(() => window.__remoteDriftPrintCalls)).toBe(0);
+  const coverage = await page.evaluate(() => window.__v7LastFormalSnapshotCoverage);
+  expect(coverage.ok).toBe(false);
+  expect(coverage.reasons).toContain('INTENT_MODULE');
+  expect(coverage.intentModuleMismatchIndices).toContain(1);
   expect(dialogs.some((message) => message.includes('STALE_SNAPSHOT_AFTER_SAVE'))).toBe(true);
+  expect(dialogs.some((message) => message.includes('檢查：INTENT_MODULE') && message.includes('內容模塊：1'))).toBe(true);
+});
+
+test('正式 PDF meta 漂移須指出 settings 欄位且不得列印', async ({ page }) => {
+  const dialogs = [];
+  await page.route('**/__fake_rpc', async (route) => {
+    const request = route.request().postDataJSON();
+    if (request?.name !== 'monthly_v7_create_report_snapshot') {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = await response.json();
+    body.snapshot.report.settings = Object.assign({}, body.snapshot.report.settings, {
+      metaDiagnosticProbe: 'remote-setting'
+    });
+    await route.fulfill({ response, body: JSON.stringify(body), contentType: 'application/json' });
+  });
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    window.__metaDriftPrintCalls = 0;
+    window.print = () => { window.__metaDriftPrintCalls += 1; };
+    window.manualSave = async () => ({ deferred: true });
+  });
+
+  await page.locator('.v1-tab-btn[data-v1-tab="pdf"]').click();
+  await page.getByRole('button', { name: '輸出正式 PDF' }).click();
+  await expect.poll(() => page.evaluate(() => window.__v7LastFormalSnapshotCoverage?.ok), {
+    timeout: 30000
+  }).toBe(false);
+
+  const coverage = await page.evaluate(() => window.__v7LastFormalSnapshotCoverage);
+  expect(await page.evaluate(() => window.__metaDriftPrintCalls)).toBe(0);
+  expect(coverage.reasons).toContain('INTENT_META');
+  expect(coverage.intentMetaMismatchFields).toEqual(['SETTINGS']);
+  expect(dialogs.some((message) => message.includes('資料欄位：SETTINGS'))).toBe(true);
+});
+
+test('正式 PDF 低年份日期漂移須指出 date 欄位且不得列印', async ({ page }) => {
+  const dialogs = [];
+  await page.route('**/__fake_rpc', async (route) => {
+    const request = route.request().postDataJSON();
+    if (request?.name !== 'monthly_v7_create_report_snapshot') {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = await response.json();
+    body.snapshot.report.date = '0098-01-01';
+    await route.fulfill({ response, body: JSON.stringify(body), contentType: 'application/json' });
+  });
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.locator('#reportDate').fill('0099-01-01');
+  expect(await page.locator('#reportDate').inputValue()).toBe('0099-01-01');
+  await page.evaluate(() => {
+    window.__lowYearDateDriftPrintCalls = 0;
+    window.print = () => { window.__lowYearDateDriftPrintCalls += 1; };
+    window.manualSave = async () => ({ deferred: true });
+  });
+
+  await page.locator('.v1-tab-btn[data-v1-tab="pdf"]').click();
+  await page.getByRole('button', { name: '輸出正式 PDF' }).click();
+  await expect.poll(() => page.evaluate(() => window.__v7LastFormalSnapshotCoverage?.ok), {
+    timeout: 30000
+  }).toBe(false);
+
+  const coverage = await page.evaluate(() => window.__v7LastFormalSnapshotCoverage);
+  expect(await page.evaluate(() => window.__lowYearDateDriftPrintCalls)).toBe(0);
+  expect(coverage.reasons).toContain('INTENT_META');
+  expect(coverage.intentMetaMismatchFields).toEqual(['DATE']);
+  expect(dialogs.some((message) => message.includes('資料欄位：DATE'))).toBe(true);
+});
+
+test('顯式預設字型不得造成正式 PDF 假性 stale', async ({ page }) => {
+  const dialogs = [];
+  let defaultSettings = null;
+  await page.route('**/__fake_rpc', async (route) => {
+    const request = route.request().postDataJSON();
+    if (request?.name !== 'monthly_v7_create_report_snapshot') {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = await response.json();
+    body.snapshot.report.settings = Object.assign({}, defaultSettings);
+    await route.fulfill({ response, body: JSON.stringify(body), contentType: 'application/json' });
+  });
+  page.on('dialog', async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  defaultSettings = await page.evaluate(() => ({
+    globalFontEn: document.getElementById('globalFontEnSelector').options[0].value,
+    globalFontZh: document.getElementById('globalFontZhSelector').options[0].value
+  }));
+  await page.evaluate(() => {
+    window.__semanticMetaPrintCalls = 0;
+    window.print = () => { window.__semanticMetaPrintCalls += 1; };
+    window.manualSave = async () => ({ deferred: true });
+  });
+  expect(await page.evaluate(() => v7CurrentReportMeta().settings)).toEqual({});
+
+  await page.locator('.v1-tab-btn[data-v1-tab="pdf"]').click();
+  await page.getByRole('button', { name: '輸出正式 PDF' }).click();
+  await expect.poll(() => page.evaluate(() => window.__semanticMetaPrintCalls), { timeout: 30000 }).toBe(1);
+  expect(dialogs).toEqual([]);
 });
 
 test('PDF snapshot 建立後內容再變更時不得列印舊 snapshot', async ({ page }) => {
@@ -6631,6 +6750,92 @@ test('接近頁尾的趨勢圖模塊整體移頁，canvas留在卡片內且不�
   const pdfPath = testInfo.outputPath('near-page-trend-no-overlap.pdf');
   const pdf = await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
   await testInfo.attach('near-page-trend-no-overlap.pdf', { body: pdf, contentType: 'application/pdf' });
+});
+
+test('可整頁容納的內嵌表格模塊不做緊湊拆分，後續模塊須在表格後方', async ({ page }, testInfo) => {
+  await enterAndLogin(page, 'owner', 'owner-pass');
+  await page.evaluate(() => {
+    const originals = reportData.map((item) => JSON.parse(JSON.stringify(item)));
+    const makeItem = (index, title, html) => {
+      const item = JSON.parse(JSON.stringify(originals[index % originals.length]));
+      item.id = 2200 + index;
+      item._v7Id = `atomic-table-fixture-${index + 1}`;
+      item.title = title;
+      item.columns = [html];
+      item.colLayout = '1';
+      item.selectedForPdf = true;
+      item.pdfOrder = index + 1;
+      return item;
+    };
+    const rows = Array.from({ length: 5 }, (_, rowIndex) => `
+      <tr style="height:46px">
+        <td>ROW${rowIndex + 1}</td><td>A</td><td>B</td><td>C</td><td>D</td><td>E</td>
+        <td>${rowIndex === 4 ? '<span style="display:block;font-size:6px;line-height:6px;height:6px">ATOMIC_TABLE_LAST</span>' : 'F'}</td>
+      </tr>`).join('');
+    reportData = [
+      makeItem(0, 'PAGE_FILLER', '<div class="content-block" style="height:470px">PAGE_FILLER_CONTENT</div>'),
+      makeItem(1, 'ATOMIC_TABLE_MODULE', `
+        <div style="height:42px">ATOMIC_TABLE_INTRO</div>
+        <table class="custom-data-table layout-block" style="width:100%;border-collapse:collapse">
+          <thead><tr><th>C1</th><th>C2</th><th>C3</th><th>C4</th><th>C5</th><th>C6</th><th>C7</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`),
+      makeItem(2, 'ATOMIC_FOLLOW_TITLE', '<div class="content-block" style="height:90px">ATOMIC_FOLLOW_CONTENT</div>')
+    ];
+    document.querySelector('.report-header-section').style.height = '180px';
+    renderTable();
+    v1EnsureModuleFields();
+  });
+
+  await page.evaluate(() => {
+    window.__atomicTablePrepareState = { status: 'pending', ok: false, error: '' };
+    window.__atomicTablePreparePromise = prepareV1PdfPrintArea()
+      .then((ok) => {
+        window.__atomicTablePrepareState = { status: 'done', ok: Boolean(ok), error: '' };
+      })
+      .catch((error) => {
+        window.__atomicTablePrepareState = {
+          status: 'error',
+          ok: false,
+          error: String(error?.message || error)
+        };
+      });
+  });
+  await expect.poll(() => page.evaluate(() => window.__atomicTablePrepareState?.status), { timeout: 30000 })
+    .toMatch(/^(done|error)$/);
+  expect(await page.evaluate(() => window.__atomicTablePrepareState)).toEqual({ status: 'done', ok: true, error: '' });
+  await page.evaluate(() => document.body.classList.add('pdf-print-mode'));
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+
+  const classification = await page.evaluate(() => {
+    const row = document.querySelectorAll('#pdfPrintArea .module-card-row')[1];
+    return {
+      keepTogether: row.classList.contains('pdf-keep-together'),
+      compactSplit: row.classList.contains('pdf-compact-split'),
+      splitFlow: row.classList.contains('pdf-split-flow-module'),
+      oversized: row.classList.contains('pdf-oversized-module'),
+      tableSplittable: row.querySelector('table')?.classList.contains('pdf-splittable-table') || false
+    };
+  });
+  expect(classification).toEqual({
+    keepTogether: true,
+    compactSplit: false,
+    splitFlow: false,
+    oversized: false,
+    tableSplittable: false
+  });
+
+  const pdfPath = testInfo.outputPath('atomic-table-module-flow.pdf');
+  await page.pdf({ path: pdfPath, printBackground: false, preferCSSPageSize: true });
+  const geometry = extractPdfTextGeometry(pdfPath, ['ATOMIC_TABLE_LAST', 'ATOMIC_FOLLOW_TITLE']);
+  expect(geometry.matches.ATOMIC_TABLE_LAST).toHaveLength(1);
+  expect(geometry.matches.ATOMIC_FOLLOW_TITLE).toHaveLength(1);
+  const tableLast = geometry.matches.ATOMIC_TABLE_LAST[0];
+  const following = geometry.matches.ATOMIC_FOLLOW_TITLE[0];
+  expect(following.page_index > tableLast.page_index || (
+    following.page_index === tableLast.page_index && following.y0 > tableLast.y1 + 2
+  )).toBe(true);
 });
 
 test('95%緊湊分頁只拆安全的非趨勢模塊，減少整塊跳頁空白', async ({ page }) => {
